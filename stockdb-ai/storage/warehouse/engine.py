@@ -37,7 +37,11 @@ _ADJUST_GLOB = "adjust/snapshot=*.parquet"
 _DAILY_EMPTY_COLUMNS = [
     ("code", "TEXT"), ("date", "DATE"), ("name", "TEXT"), ("is_st", "BOOLEAN"),
     ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"), ("close", "DOUBLE"),
-    ("prev_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+    ("pre_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+    ("turnover", "DOUBLE"), ("pct_chg", "DOUBLE"), ("amplitude", "DOUBLE"),
+    ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
+    ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
+    ("total_mv", "DOUBLE"), ("float_mv", "DOUBLE"),
 ]
 
 

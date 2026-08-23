@@ -46,8 +46,12 @@ def _now_iso() -> str:
 
 
 def _snapshot_points(date: str) -> list[dict]:
-    """全市场单日快照（limit=0 = 不截断，一次往返；快照内部已走 SDK 批量快路径）。"""
-    return (query_snapshot({"date": date, "limit": 0}) or {}).get("points") or []
+    """全市场单日快照（limit=0 = 不截断，一次往返）+ 字段适配。
+
+    快照通道的 prev_close 映射为引擎原生 pre_close（0.10.7 sink 纯镜像引擎字段，
+    改名适配归通道侧）。"""
+    points = (query_snapshot({"date": date, "limit": 0}) or {}).get("points") or []
+    return [{**p, "pre_close": p.get("pre_close", p.get("prev_close"))} for p in points]
 
 
 def warehouse_run(days: int = 1, reconcile_sample: int = 10,

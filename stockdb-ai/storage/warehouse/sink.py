@@ -18,17 +18,15 @@ from . import catalog, layout
 
 # 日K列定义（引擎日K字段原样：date 转 DATE 类型便于 SQL 区间/年份运算）
 _DAILY_COLUMNS = (
-    ("code", "TEXT"),
-    ("date", "DATE"),
-    ("name", "TEXT"),
-    ("is_st", "BOOLEAN"),
-    ("open", "DOUBLE"),
-    ("high", "DOUBLE"),
-    ("low", "DOUBLE"),
-    ("close", "DOUBLE"),
-    ("prev_close", "DOUBLE"),
-    ("volume", "DOUBLE"),
-    ("amount", "DOUBLE"),
+    # 引擎日K原生字段（21 列，0.10.7 起原样镜像：不改名/不裁剪——此前 11 列且
+    # pre_close 被改名 prev_close，直连通道全量被护栏误拒的根因）
+    ("code", "TEXT"), ("date", "DATE"), ("name", "TEXT"), ("is_st", "BOOLEAN"),
+    ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"), ("close", "DOUBLE"),
+    ("pre_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+    ("turnover", "DOUBLE"), ("pct_chg", "DOUBLE"), ("amplitude", "DOUBLE"),
+    ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
+    ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
+    ("total_mv", "DOUBLE"), ("float_mv", "DOUBLE"),
 )
 _NUMERIC_FIELDS = ("open", "high", "low", "close", "prev_close", "volume", "amount")
 
@@ -51,25 +49,24 @@ def _finite(value) -> bool:
 
 
 def _normalize_rows(rows: list[dict], columns):
-    """dict 行 → 元组行：数值护栏、列序对齐（date 字段由调用方注入行内）。返回 (rows, dropped)。"""
-    out, dropped = [], 0
-    numeric = {name for name, _ in columns if name in _NUMERIC_FIELDS or name == "factor"}
-    names = [name for name, _ in columns]
+    """dict 行 → 元组行（镜像语义，0.10.7）：字段按列名原样取值，缺字段=NULL；
+    NaN/Inf 消毒为 NULL（存脏浮点会毒化查询；拒绝整行则违背"读到什么写什么"）。
+    返回 (rows, sanitized_cells)。"""
+    import math as _math
+    out, sanitized = [], 0
     for r in rows:
-        if any(not _finite(r.get(f)) for f in numeric):
-            dropped += 1
-            continue
         row = []
-        for name in names:
+        for name, ctype in columns:
             v = r.get(name)
-            if name in ("date", "snapshot"):
-                row.append(layout.iso_date(v))
+            if isinstance(v, float) and not _math.isfinite(v):
+                v, sanitized = None, sanitized + 1
+            elif ctype == "DATE" and v is not None:
+                v = layout.iso_date(v)  # 8 位/ISO → ISO（DATE 列统一：date/snapshot 等）
             elif name == "is_st":
-                row.append(bool(v) if v is not None else None)
-            else:
-                row.append(v)
+                v = bool(v) if v is not None else None
+            row.append(v)
         out.append(tuple(row))
-    return out, dropped
+    return out, sanitized
 
 
 def _write_parquet_atomic(rows: list[tuple], columns, target: Path) -> None:
@@ -111,7 +108,7 @@ def write_daily(root: Path, date, rows: list[dict]) -> dict:
         market = layout.market_of(r.get("code", ""))
         row = {"date": date, **r}  # 快照行不带日期，由任务层日期注入
         normalized, d = _normalize_rows([row], _DAILY_COLUMNS)
-        dropped += d
+        dropped += d  # 0.10.7 起为消毒单元格计数（不再丢行）
         if normalized:
             by_market.setdefault(market, []).append(normalized[0])
 

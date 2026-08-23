@@ -28,23 +28,23 @@ def _sample_rows() -> list[dict]:
     """三市场 + ETF + 北交所 的迷你全市场样本。"""
     return [
         {"code": "600000", "name": "浦发银行", "is_st": False,
-         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "prev_close": 10.0,
+         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "pre_close": 10.0,
          "volume": 1234567.0, "amount": 12500000.0},
         {"code": "000001", "name": "平安银行", "is_st": False,
-         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "prev_close": 11.0,
+         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "pre_close": 11.0,
          "volume": 2234567.0, "amount": 24500000.0},
         {"code": "300750", "name": "宁德时代", "is_st": False,
-         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "prev_close": 200.0,
+         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "pre_close": 200.0,
          "volume": 3234567.0, "amount": 650000000.0},
         {"code": "920001", "name": "北交样本", "is_st": False,
-         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "prev_close": 5.0,
+         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "pre_close": 5.0,
          "volume": 234567.0, "amount": 1200000.0},
         {"code": "510300", "name": "沪深300ETF", "is_st": None,
-         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "prev_close": 4.0,
+         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "pre_close": 4.0,
          "volume": 8234567.0, "amount": 33000000.0},
-        # 护栏用例：close 为 NaN 的行必须被拒
-        {"code": "600001", "name": "坏行", "is_st": False,
-         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "prev_close": 1.0,
+        # 镜像语义用例（0.10.7）：close=NaN 的行不再被拒——消毒为 NULL 落盘
+        {"code": "600001", "name": "脏行", "is_st": False,
+         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "pre_close": 1.0,
          "volume": 1.0, "amount": 1.0},
     ]
 
@@ -124,8 +124,8 @@ class WarehouseSinkTest(unittest.TestCase):
         result = sink.write_daily(self.root, "20260822", _sample_rows())
         self.assertEqual(result["status"], "written")
         self.assertEqual(sorted(result["markets"]), ["bj", "sh", "sz"])
-        self.assertEqual(result["rows"], 5)  # 6 行样本 - 1 NaN 拒写
-        self.assertEqual(result["dropped_nonfinite"], 1)
+        self.assertEqual(result["rows"], 6)  # 0.10.7：NaN 消毒为 NULL，不再丢行
+        self.assertEqual(result["dropped_nonfinite"], 1)  # 消毒单元格计数
 
         sh = layout.daily_partition(self.root, "20260822", "sh")
         sz = layout.daily_partition(self.root, "20260822", "sz")
@@ -158,7 +158,7 @@ class WarehouseSinkTest(unittest.TestCase):
                 f"SELECT count(*) FROM read_parquet("
                 f"'{layout.facts_dir(self.root).as_posix()}/daily/*/*/date=*.parquet')"
             ).fetchone()[0]
-            self.assertEqual(n, 5)  # 无重复
+            self.assertEqual(n, 6)  # 无重复（含消毒行）
         finally:
             con.close()
         # watermark 第二次不再推进
@@ -228,7 +228,7 @@ class WarehouseEngineTest(unittest.TestCase):
             sink.write_daily(self.root, f"202608{11 + i:02d}", [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": c - 0.1, "high": c + 0.5, "low": c - 0.5, "close": float(c),
-                "prev_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
+                "pre_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
                 "volume": 1000.0 + i, "amount": 10000.0 + i,
             }])
         sink.write_adjust_snapshot(self.root, "20260811", [{"code": "600000", "factor": 2.0}])
@@ -391,9 +391,14 @@ class WarehouseReconcileTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    @staticmethod
+    def _to_engine_fields(points):
+        """快照形态 → 引擎原生字段（与生产 _snapshot_points 适配一致，0.10.7）。"""
+        return [{**p, "pre_close": p.get("pre_close", p.get("prev_close"))} for p in points]
+
     def test_reconcile_all_green(self):
         pts = _traded_points()[:2]
-        w = sink.write_daily(self.root, "20260822", pts)
+        w = sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", pts,
             sedimented_rows=w["rows"], dropped_nonfinite=w["dropped_nonfinite"])
@@ -402,7 +407,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_detects_row_count_gap(self):
         pts = _traded_points()[:2]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", pts + [_traded_points()[0]],  # 多报一行
             sedimented_rows=2, dropped_nonfinite=0)
@@ -411,7 +416,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_detects_field_mismatch(self):
         pts = _traded_points()[:1]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         tampered = [{**pts[0], "close": 999.0}]
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", tampered,
@@ -422,7 +427,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_external_cross_check(self):
         pts = _traded_points()[:2]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         # 异源行：600000 开盘一致；000001 开盘差 10%（超 0.5% 容限 → 检出）
         external = [{"code": "600000", "open_price": 10.0, "prev_close": 10.0},
                     {"code": "000001", "open_price": 12.21, "prev_close": 11.0}]
