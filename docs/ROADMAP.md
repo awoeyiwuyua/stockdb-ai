@@ -69,6 +69,7 @@
 - **收敛清单（0.10.0 落地时一并执行）**：C1 引擎 HTTP 双轨收归 free_stockdb 闸口；
   C2 查询面收敛（指标一律 SQL 宏，不加单指标工具）；C3 services→warehouse 走注入；
   C4 元数据唯一存 warehouse.duckdb meta；C5 warehouse.duckdb 纳入每日备份
+  （0.10.8 落地：COPY FROM DATABASE 在线快照 + 保留 14 份，见 docs/design/warehouse.md §5.1）
 - **延后项登记（防无限挂起）**：仓库历史回填（用户 2026-08-22 延后，另行讨论）；
   分钟K/基本面/龙虎榜数据集（dataset 维度已预留，按需逐个加 sink）；
   hk日k 迁仓库（仓库稳定后，mydb 届时只剩自定义表）；M2 打板情绪衍生指标、

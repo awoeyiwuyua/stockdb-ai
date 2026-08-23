@@ -4,6 +4,19 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.8] — 2026-08-23（root 锁定 + warehouse.duckdb 日级备份 + 回填脚本修复）
+
+- **root 锁定（用户 2026-08-23 拍板）**：所有数据存放于 `<repo>/data`，仓库根 =
+  `<repo>/data/warehouse`。config 启动校验：Windows 上 DATA_DIR 未显式设置（默认 /data
+  解析为 C:\data——本机漂移事故源头）即 stderr 警告；WAREHOUSE_DIR 显式但偏离锁定布局
+  也警告。dev.sh 固化 `WAREHOUSE_DIR=$DATA_DIR/warehouse` 并 mkdir + 打印。
+- **warehouse.duckdb 每日备份（C5 落地）**：沉淀任务成功且有目标日后一次，
+  `COPY FROM DATABASE` 独立连接在线快照（含 meta/codes/research 表/视图宏），
+  保留最近 14 份，失败静默不阻塞沉淀；facts/ 可从引擎重拉不纳入备份。
+- **回填脚本修复**：`backfill_daily_direct.py` 双 `def main()` 事故（旧 staging 版覆盖
+  纯内存版且引用未 import 的 shutil）——删除旧版，恢复 0.10.7 纯内存转置通道。
+- 51 个 warehouse 测试全绿（新增备份 5 测试 + 备份触发链路测试）。
+
 ## [0.10.7] — 2026-08-23（日K 原样镜像 21 列 + 全量回填重启）
 
 - **镜像语义定稿（用户原则：读到什么写什么）**：日K 列改为引擎原生 21 字段

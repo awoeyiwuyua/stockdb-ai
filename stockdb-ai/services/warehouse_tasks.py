@@ -29,6 +29,7 @@ reconcile_daily = None  # storage.warehouse.reconcile.reconcile_daily
 warehouse_root = None   # () -> Path（storage.warehouse.layout.root_dir）
 availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
+backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：warehouse.duckdb 日级备份）
 adjust_provider = None  # () -> list[dict]（复权因子全量行；未接 SDK 通道前为 None → 跳过快照）
 
 # 周度复权快照：周一沉淀日顺带全量刷新（快照小、全量幂等）
@@ -155,6 +156,14 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                 refresh_views()
             except Exception:  # noqa: BLE001 - 视图刷新失败下次重建
                 pass
+        # 0.10.8：warehouse.duckdb 日级备份（沿 research_store 模式；失败静默不阻塞）
+        if backup_duckdb is not None and results:
+            try:
+                path = backup_duckdb(root)
+                if path is not None:
+                    log(f"🗄️ warehouse.duckdb 备份完成：{path.name}")
+            except Exception:  # noqa: BLE001 - 备份失败不影响沉淀结论
+                log("⚠️ warehouse.duckdb 备份失败（已静默，不影响沉淀）")
         ok = all(r.get("reconcile", {}).get("ok", True) for r in results)
         return {"ok": ok, "days": results, "finished_at": _now_iso()}
     except Exception as exc:  # noqa: BLE001 - 单块降级

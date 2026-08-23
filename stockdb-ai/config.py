@@ -30,7 +30,14 @@ def _env_int(name: str, default: int) -> int:
 # ---- 引擎与部署（原生引擎 127.0.0.1:7899；容器内同进程） ----
 STOCKDB_HOST: str = os.environ.get("STOCKDB_HOST", "127.0.0.1")
 STOCKDB_PORT: int = _env_int("STOCKDB_PORT", 7899)
+# 0.10.8：root 锁定（用户拍板：所有数据存放于 <repo>/data）——DATA_DIR 必须显式
+# 设置；未设置时 Windows 默认解析到 C:\data（本机漂移事故源头，见 docs/design/warehouse.md）
 DATA_DIR: Path = Path(os.environ.get("DATA_DIR", "/data"))
+DATA_DIR_EXPLICIT: bool = "DATA_DIR" in os.environ
+if os.name == "nt" and not DATA_DIR_EXPLICIT:
+    print(f"config: ⚠️ DATA_DIR 未显式设置，Windows 默认解析为 {DATA_DIR}——"
+          f"锁定规则要求数据位于 <repo>/data（经 dev.sh 或显式 DATA_DIR=../data）",
+          file=sys.stderr)
 LISTEN_PORT: int = _env_int("WEBUI_PORT", 8080)
 
 # 引擎进程控制（同步器/重启检测）
@@ -39,7 +46,7 @@ STOCKDB_PAUSE: Path = Path(os.environ.get("STOCKDB_PAUSE_FLAG", "/data/.stockdb-
 STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"))
 
 # 版本号（发布物标识，见 docs/release-policy.md）
-WEBUI_VERSION: str = "0.10.7"
+WEBUI_VERSION: str = "0.10.8"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致
@@ -66,8 +73,14 @@ AUCTION_CLOSE_TIME: str = auction_env_time("AUCTION_CLOSE_TIME", "16:30")
 WAREHOUSE_ENABLED: bool = os.environ.get("WAREHOUSE_ENABLED", "1") not in ("0", "false", "no")
 # 沉淀任务触发点（HH:MM）：置于打板 close 16:30 与数据同步之后
 WAREHOUSE_SEDIMENT_TIME: str = auction_env_time("WAREHOUSE_SEDIMENT_TIME", "16:40")
-# 仓库根目录（facts/ 分区 + warehouse.duckdb + backups/）
+# 仓库根目录（facts/ 分区 + warehouse.duckdb + backups/；跟随 DATA_DIR，root 锁定）
 WAREHOUSE_DIR: Path = Path(os.environ.get("WAREHOUSE_DIR", str(DATA_DIR / "warehouse")))
+WAREHOUSE_DIR_EXPLICIT: bool = "WAREHOUSE_DIR" in os.environ
+if os.name == "nt" and WAREHOUSE_DIR_EXPLICIT and DATA_DIR_EXPLICIT:
+    # 双显式但互相脱离（WAREHOUSE_DIR 不在 DATA_DIR 下）——布局契约违反，警告
+    if WAREHOUSE_DIR != DATA_DIR / "warehouse":
+        print(f"config: ⚠️ WAREHOUSE_DIR={WAREHOUSE_DIR} 偏离锁定布局 "
+              f"{DATA_DIR / 'warehouse'}（0.10.8 root 锁定）", file=sys.stderr)
 # run_sql 结果行数上限（超出截断，信封 truncated 承载）
 WAREHOUSE_ROW_CAP: int = int(os.environ.get("WAREHOUSE_ROW_CAP", "5000"))
 # 单条语句执行超时（秒）

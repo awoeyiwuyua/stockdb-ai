@@ -19,7 +19,7 @@ if str(WEBUI) not in sys.path:
 
 import config
 from storage import warehouse
-from storage.warehouse import catalog, layout, sink
+from storage.warehouse import backup, catalog, layout, sink
 from storage.warehouse.engine import GuardrailError, WarehouseEngine
 from storage.warehouse.queries import WarehouseUnavailable
 
@@ -348,6 +348,92 @@ class WarehouseEngineTest(unittest.TestCase):
                 eng.close()
 
 
+class WarehouseBackupTest(unittest.TestCase):
+    """0.10.8：warehouse.duckdb 在线备份（COPY FROM DATABASE）——独立可读/一致性/保留策略/日级守卫。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        sink.write_daily(self.root, "20260822", _sample_rows()[:2])
+        sink.write_codes(self.root, [{"code": "600000", "name": "浦发银行"}])
+        # research 用户表（备份必须带走）
+        con = duckdb.connect(str(layout.duckdb_path(self.root)))
+        try:
+            con.execute("CREATE SCHEMA research")
+            con.execute("CREATE TABLE research.spot (code TEXT, close DOUBLE)")
+            con.execute("INSERT INTO research.spot VALUES ('600000', 9.08)")
+        finally:
+            con.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_backup_file_independent_and_consistent(self):
+        """备份文件独立可打开；meta/codes/research 数据读回一致（沿备份独立可读断言模式）。"""
+        target = backup.backup_duckdb(self.root, force=True)
+        self.assertIsNotNone(target)
+        self.assertTrue(target.exists())
+        self.assertTrue(target.name.startswith("warehouse-"))
+        self.assertEqual(target.parent, layout.backups_dir(self.root))
+        # 独立连接直读备份
+        con = duckdb.connect(str(target), read_only=True)
+        try:
+            self.assertEqual(con.execute("SELECT * FROM meta").fetchall(),
+                             [("watermark:daily", "20260822")])
+            self.assertEqual(con.execute("SELECT code, name FROM codes").fetchall(),
+                             [("600000", "浦发银行")])
+            self.assertEqual(con.execute("SELECT * FROM research.spot").fetchall(),
+                             [("600000", 9.08)])
+        finally:
+            con.close()
+
+    def test_backup_daily_guard_skips_second_call(self):
+        """日级守卫：同日第二次（force=False）跳过；force=True 绕过。"""
+        first = backup.backup_duckdb(self.root)
+        second = backup.backup_duckdb(self.root)
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)  # 同日守卫
+        third = backup.backup_duckdb(self.root, force=True)
+        self.assertIsNotNone(third)  # force 绕过
+        self.assertEqual(len(list(layout.backups_dir(self.root).glob("warehouse-*.db"))), 2)
+
+    def test_backup_retention_keeps_newest(self):
+        """保留最近 BACKUP_KEEP 份：模拟多日备份后旧文件被清理。"""
+        import storage.warehouse.backup as bk
+        old_keep = bk.BACKUP_KEEP
+        bk.BACKUP_KEEP = 2
+        try:
+            backup.backup_duckdb(self.root, force=True)
+            backup.backup_duckdb(self.root, force=True)
+            backup.backup_duckdb(self.root, force=True)
+            files = sorted(layout.backups_dir(self.root).glob("warehouse-*.db"))
+            self.assertEqual(len(files), 2)  # 保留 2 份
+        finally:
+            bk.BACKUP_KEEP = old_keep
+
+    def test_backup_missing_source_returns_none(self):
+        """源库不存在 → None（静默，无异常）。"""
+        empty = pathlib.Path(self._tmp.name) / "empty-root"
+        self.assertIsNone(backup.backup_duckdb(empty, force=True))
+
+    def test_backup_with_engine_open(self):
+        """0.10.8 实测缺陷回归：engine 常驻连接已持有源库时备份仍成功
+        （duckdb.connect(路径) 复用缓存实例；显式 ATTACH 同一路径会
+        Unique file handle conflict——备份曾因此静默失败）。"""
+        eng = WarehouseEngine(self.root)  # 打开常驻连接（生产真实场景）
+        try:
+            target = backup.backup_duckdb(self.root, force=True)
+        finally:
+            eng.close()
+        self.assertIsNotNone(target)
+        self.assertTrue(target.exists())
+        con = duckdb.connect(str(target), read_only=True)
+        try:
+            self.assertEqual(con.execute("SELECT count(*) FROM research.spot").fetchone()[0], 1)
+        finally:
+            con.close()
+
+
 class WarehouseQueriesFacadeTest(unittest.TestCase):
     """W3：queries 门面 availability 降级与 known_at。"""
 
@@ -454,7 +540,7 @@ class WarehouseTasksTest(unittest.TestCase):
         self._saved = {k: getattr(wt, k) for k in
                        ("query_snapshot", "data_latest", "is_trading_day", "sink",
                         "reconcile_daily", "warehouse_root", "availability",
-                        "refresh_views", "adjust_provider")}
+                        "refresh_views", "backup_duckdb", "adjust_provider")}
         wt.query_snapshot = lambda q: {"points": _traded_points()}
         wt.data_latest = lambda force=False: "20260822"
         wt.is_trading_day = lambda d: True
@@ -463,6 +549,7 @@ class WarehouseTasksTest(unittest.TestCase):
         wt.warehouse_root = lambda: self.root
         wt.availability = lambda: (True, "ok")
         wt.refresh_views = lambda: None
+        wt.backup_duckdb = lambda root, force=False: None  # 0.10.8：隔离备份副作用
         wt.adjust_provider = None
         # 日检/告警/日志落 tmp（防写到默认 /data）
         self._cm = mock.patch.multiple(config, DATA_DIR=self.root)
@@ -549,6 +636,20 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertTrue(s["available"])
         self.assertEqual(s["watermark_daily"], "20260822")
         self.assertFalse(s["running"])
+
+    def test_sediment_triggers_backup(self):
+        """0.10.8：沉淀成功（有 results）后调用备份注入点；无沉淀时不调用。"""
+        calls = []
+        self.wt.backup_duckdb = lambda root, force=False: calls.append(root) or None
+        res = self.wt.warehouse_run(days=1)
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(calls), 1)  # 有目标日 → 备份一次
+        self.wt.warehouse_run(days=1)  # 幂等：无新目标日
+        self.assertEqual(len(calls), 1)  # 不重复备份
+        # 备份异常不影响沉淀结论
+        self.wt.backup_duckdb = lambda root, force=False: (_ for _ in ()).throw(RuntimeError("boom"))
+        res2 = self.wt.warehouse_run(days=1)
+        self.assertTrue(res2["ok"])
 
 
 class EngineGateConvergenceTest(unittest.TestCase):

@@ -13,7 +13,12 @@
 - 仓库 = 派生副本，可信度由 **watermark** 承载（known_at = 已沉淀最新交易日，可能落后引擎当日）
 - 沉淀数据全部来自现有引擎通道（快照/日K），**不新增行情获取源**——「不自建行情获取管线」红线继续成立
 
-## 2. 磁盘布局（DATA_DIR 按存储类型分目录；0.10.0 治理批定稿）
+## 2. 磁盘布局（DATA_DIR 按存储类型分目录；0.10.0 治理批定稿；0.10.8 root 锁定）
+
+> **0.10.8 root 锁定（用户 2026-08-23 拍板）**：所有数据存放于 `<repo>/data`，
+> 仓库根 = `<repo>/data/warehouse`。`WAREHOUSE_DIR` 必须显式设置或跟随 DATA_DIR；
+> Windows 上未设 DATA_DIR 时默认 `/data` 解析为 `C:\data`（本机漂移事故源头）——
+> config 启动即警告，dev.sh 固化 `DATA_DIR=../data` + `WAREHOUSE_DIR=$DATA_DIR/warehouse`。
 
 ```
 DATA_DIR/                                                 本机开发 = 仓库根 data/，生产 = /data 卷
@@ -21,11 +26,17 @@ DATA_DIR/                                                 本机开发 = 仓库�
 │   ├── facts/daily/year=YYYY/market=sh/date=YYYYMMDD.parquet   日K：按日一文件，内按 code 排序
 │   ├── facts/adjust/snapshot=YYYYMMDD.parquet                  复权因子：低频全量快照（版本化追加）
 │   ├── warehouse.duckdb                                        视图/宏 + 用户表 + meta（C4 单点）
-│   └── backups/                                                warehouse.duckdb 备份
+│   └── backups/warehouse-<stamp>-<uuid>.db                     warehouse.duckdb 在线备份（0.10.8，C5）
 ├── research/                                             研究成果 SQLite（research.db + backups/；旧根路径粘性兼容）
 ├── records/                                              日检 jsonl
 └── alerts.json / sync.log                                ops 自描述单文件（留根）
 ```
+
+**分层原则（0.10.8 确认）**：按「生命周期与角色」分目录，而非按技术格式——
+facts/ = 不可变事实（Parquet，只增不改），warehouse.duckdb = 可变状态+派生（单文件，
+内部 schema 分层：main 视图/宏 + research 用户表 + meta），backups/ = 恢复副本。
+新数据集（分钟K/基本面/龙虎榜/hk）直接加 facts/<dataset>/ 子目录；duckdb 保持单文件
+（不拆多库：视图/宏/元数据原子性与备份简单优先，与 mydb 单文件多表同原则）。
 
 - 文件粒度「年/市场/日」而非「每标的一文件」：日K约 5000 行/日，按日成文件保持追加语义，
   又避免每年数千小文件；单标的时序查询靠文件内 code 排序 + 行组统计裁剪
@@ -87,6 +98,16 @@ DATA_DIR/                                                 本机开发 = 仓库�
 - 手动通道：`POST /api/warehouse/run {"days":1-5}`（小范围测试拉取，幂等补缺口）；
   `GET /api/warehouse/status`（watermark/守卫/任务状态）
 - 层纪律（C3）：services 不 import storage.warehouse——sink/reconcile/availability 经组合根注入
+
+### 5.1 warehouse.duckdb 每日备份（0.10.8，C5 落地）
+
+- 时机：沉淀任务成功且有目标日后一次（`backup_duckdb(root)` 注入点，日级守卫防重复）；
+  失败静默（log 不阻塞沉淀），同 research_store 的"备份失败不影响日检"纪律
+- 机制：独立连接 `COPY FROM DATABASE`（DuckDB 1.5 语法；ATTACH 源/目标后全库镜像，
+  含 meta/codes/research 用户表/视图宏定义）——不占 engine 业务锁（沿 0.9.12 教训）
+- 保留：最近 `BACKUP_KEEP=14` 份（backups/warehouse-<stamp>-<uuid>.db，秒级+uuid 防同名）
+- 边界：facts/ 是 Parquet 事实区（可从引擎重拉），**不纳入**本备份；恢复时先还原
+  duckdb，再按需回填 facts。备份文件独立可打开（沿"备份独立可读"断言模式）
 
 ## 6. 对账三板斧（storage/warehouse/reconcile.py）
 
