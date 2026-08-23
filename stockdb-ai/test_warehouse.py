@@ -258,6 +258,82 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertTrue(result["watermark_advanced"])
         self.assertFalse(layout.facts_dir(self.root).exists())
 
+    def test_aggregate_weekly_semantics(self):
+        """0.10.10 周K聚合语义：open=周首日、high/low=max/min、close=周末日、
+        volume/amount/turnover=求和、pct_chg/amplitude 重算、复权列同规则聚合。"""
+        # 一周 5 个交易日，单只股票（600000，sh）
+        week = [("20260817", 10.0, 11.0, 10.5, 1000.0, 10000.0, 1.0, 2.0),
+                ("20260818", 10.5, 12.0, 10.8, 2000.0, 20000.0, 2.0, 2.0),
+                ("20260819", 10.8, 13.0, 12.0, 3000.0, 30000.0, 3.0, 2.0),
+                ("20260820", 12.0, 14.0, 13.0, 4000.0, 40000.0, 4.0, 2.0),
+                ("20260821", 13.0, 15.0, 14.0, 5000.0, 50000.0, 5.0, 2.0)]
+        for d, o, h, c, v, a, t, f in week:
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": o, "high": h, "low": o - 0.5, "close": c,
+                "pre_close": o - 0.2, "volume": v, "amount": a, "turnover": t,
+            }], factor_map={"600000": f})
+
+        res = sink.aggregate_weekly(self.root, "20260821")
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["markets"], ["sh"])
+        self.assertEqual(res["rows"], 1)
+
+        con = duckdb.connect()
+        try:
+            p = layout.week_partition(self.root, "20260821", "sh")
+            row = con.execute(
+                f"SELECT code, open, high, low, close, pre_close, volume, amount, "
+                f"turnover, pct_chg, amplitude, adj_factor, close_fq, open_fq "
+                f"FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            code, open_, high, low, close, pre_close, vol, amt, to, pct, amp, fac, cfq, ofq = row
+            self.assertEqual(code, "600000")
+            self.assertAlmostEqual(open_, 10.0)      # 周一首日开盘
+            self.assertAlmostEqual(high, 15.0)       # 周内最高
+            self.assertAlmostEqual(low, 9.5)         # 周内最低（首日 open-0.5）
+            self.assertAlmostEqual(close, 14.0)      # 周五收盘
+            self.assertAlmostEqual(pre_close, 9.8)   # 周一首日 pre_close
+            self.assertAlmostEqual(vol, 15000.0)     # 求和
+            self.assertAlmostEqual(amt, 150000.0)    # 求和
+            self.assertAlmostEqual(to, 15.0)         # 换手求和
+            self.assertAlmostEqual(pct, (14.0 - 9.8) / 9.8 * 100)  # 周涨跌幅重算
+            self.assertAlmostEqual(amp, (15.0 - 9.5) / 9.8 * 100)  # 周振幅重算
+            self.assertAlmostEqual(fac, 2.0)         # 周末日因子
+            self.assertAlmostEqual(cfq, 28.0)        # 周五 close × 周五因子
+            self.assertAlmostEqual(ofq, 20.0)        # 周一 open × 周一因子
+        finally:
+            con.close()
+        # watermark 推进
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_aggregate_weekly_idempotent(self):
+        """周聚合幂等：重复聚合 skipped，watermark 不回退，行数不变。"""
+        for d in ("20260817", "20260818", "20260819", "20260820", "20260821"):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+            }])
+        first = sink.aggregate_weekly(self.root, "20260821")
+        again = sink.aggregate_weekly(self.root, "20260821")
+        self.assertEqual(first["status"], "written")
+        self.assertEqual(again["status"], "skipped")
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+        # 旧周聚合不推进 watermark（回看补聚合不覆盖已推进值）
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_aggregate_weekly_skips_other_market(self):
+        """other 兜底市场不沉淀周K（无意义孤码）。"""
+        sink.write_daily(self.root, "20260817", [{
+            "code": "200002", "name": "B股孤码", "is_st": False,
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
+            "pre_close": 1.0, "volume": 1.0, "amount": 1.0,
+        }])
+        res = sink.aggregate_weekly(self.root, "20260817")
+        self.assertEqual(res["status"], "empty")
+        self.assertEqual(res["rows"], 0)
+
 
 class WarehouseEngineTest(unittest.TestCase):
     """W3 验收：视图 / 宏数值正确性 / 三护栏 / 超时 / 状态清单。
@@ -701,6 +777,36 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertTrue(s["available"])
         self.assertEqual(s["watermark_daily"], "20260822")
         self.assertFalse(s["running"])
+
+    def test_sediment_triggers_weekly_aggregation(self):
+        """0.10.10：沉淀完整周后自动聚合周K（facts/week + watermark:week 推进）。"""
+        # data_latest=20260822(六)；is_trading_day 周末排除 → 目标日 0822 前向到 0821(五)
+        # 先用交易日判定覆盖完整周 0817~0821
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        self.wt.data_latest = lambda force=False: "20260821"  # 周五，本周完整
+        res = self.wt.warehouse_run(days=5)  # 0821 往前补 5 天（含周末跳过）
+        self.assertTrue(res["ok"], res)
+        dates = [d["date"] for d in res["days"]]
+        self.assertEqual(dates, ["20260817", "20260818", "20260819", "20260820", "20260821"])
+        # 周K 分区已生成（周结束日=周五 20260821）
+        w = layout.week_partition(self.root, "20260821", "sh")
+        self.assertTrue(w.exists(), f"{w} 不存在")
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_incomplete_week_not_aggregated(self):
+        """0.10.10：周内缺口（只有周一~周三）不聚合——等周完整后一次聚合。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        self.wt.data_latest = lambda force=False: "20260819"  # 周三，本周不完整
+        res = self.wt.warehouse_run(days=3)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([d["date"] for d in res["days"]],
+                         ["20260817", "20260818", "20260819"])
+        self.assertFalse(layout.week_partition(self.root, "20260821", "sh").exists())
+        self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "week"))
 
     def test_sediment_triggers_backup(self):
         """0.10.8：沉淀成功（有 results）后调用备份注入点；无沉淀时不调用。"""

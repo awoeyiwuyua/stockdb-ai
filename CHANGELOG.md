@@ -4,6 +4,20 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.11] — 2026-08-23（粒度阶梯第一级：week 聚合物化落地）
+
+- **周K聚合物化（sink.aggregate_weekly）**：沉淀任务完成后自动触发——对每个覆盖到的
+  自然周，**周完整才聚合**（daily watermark 覆盖周内全部交易日；周内缺口/周五未到
+  跳过，避免"先聚合后补全"时周分区已存在无法重写）；节假日周以实际最后交易日判定
+- **聚合语义（周K 口径）**：open/close=首末日（arg_min/arg_max by date）、
+  high/low=max/min、volume/amount/turnover=求和、pct_chg/amplitude 重算（周口径）、
+  vol_ratio=NULL、时点类=周末日、复权物化列同规则聚合（open_fq=首日/close_fq=末日）
+- **周分区与 daily 同构 26 列**（facts/week/year=YYYY/market=xx/date=YYYYMMDD），
+  幂等（已存在跳过）+ watermark:week 只前进；other 孤码不沉淀
+- **真实链路验证**：W34（0817~0821）5 日 → 周K 5182 行，600000 逐字段手工核对
+  （open=9.09/high=9.15/low=8.96/close=9.05/volume=3.12 亿求和）全一致
+- 222 测试全绿（新增聚合语义/幂等/完整周触发/不完整周跳过/other 跳过）
+
 ## [0.10.10] — 2026-08-23（粒度阶梯定稿 + 复权沉淀时物化，取代 0.10.9 矩阵）
 
 - **七级粒度阶梯（用户拍板，取代 0.10.9 矩阵）**：tick→minute→hour→daily→week→

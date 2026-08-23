@@ -179,6 +179,15 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                              "traded": rec["traded"], "issues": rec["issues"][:5],
                              "at": _now_iso()})
 
+        # 0.10.10 粒度阶梯：周K聚合物化——对沉淀覆盖到的每个"自然周结束日"（周五）
+        # 聚合该周 daily → facts/week（幂等：已存在周分区跳过，watermark:week 只前进）。
+        # 周五未到（周内补沉淀）时也聚合出"部分周"（周K以最新交易日为周结束日）。
+        try:
+            if results:
+                _aggregate_weeks(root, results)
+        except Exception as exc:  # noqa: BLE001 - 周聚合失败不阻塞日K沉淀结论
+            log(f"⚠️ 仓库周K聚合失败（不阻塞日K）：{exc}")
+
         if refresh_views is not None:
             try:
                 refresh_views()
@@ -204,6 +213,52 @@ def _prev_date(d: str) -> str:
     from datetime import timedelta
     dt = datetime.strptime(d, "%Y%m%d") - timedelta(days=1)
     return dt.strftime("%Y%m%d")
+
+
+def _week_end_of(d: str) -> str:
+    """日期所在自然周的周五（YYYYMMDD）。周一=周五-4；跨月/跨年安全（datetime 运算）。"""
+    from datetime import timedelta
+    dt = datetime.strptime(d, "%Y%m%d")
+    friday = dt + timedelta(days=(4 - dt.weekday()))
+    return friday.strftime("%Y%m%d")
+
+
+def _week_complete(root, week_end: str) -> bool:
+    """该周是否完整：周内所有交易日均已沉淀（daily watermark ≥ 周内最后交易日）。
+
+    只聚合完整周——部分周（周内缺口/周五未到）跳过，避免"先聚合后补全"时
+    周分区已存在（幂等跳过）导致过期周无法重写。节假日周（周五非交易日）
+    以周内实际最后交易日判定，照常聚合。
+    """
+    from datetime import timedelta
+    wm = sink.catalog.get_watermark(root, "daily")
+    if wm is None:
+        return False
+    friday = datetime.strptime(week_end, "%Y%m%d")
+    tds = []
+    for i in range(5):  # 周五→周一扫描
+        d = friday - timedelta(days=i)
+        if is_trading_day is None or is_trading_day(d.date()):
+            tds.append(d.strftime("%Y%m%d"))
+    if not tds:
+        return False
+    return wm >= max(tds)  # watermark 覆盖周内最后交易日 = 周完整
+
+
+def _aggregate_weeks(root, results) -> None:
+    """沉淀结果 → 自动周K聚合（0.10.10）：对每个覆盖到的自然周，周完整才聚合。
+    幂等由 sink.aggregate_weekly 保证（周分区存在跳过，watermark:week 只前进）。"""
+    seen: set[str] = set()
+    for r in results:
+        d = r.get("date")
+        if not d:
+            continue
+        week_end = _week_end_of(d)
+        if week_end in seen:
+            continue
+        seen.add(week_end)
+        if _week_complete(root, week_end):
+            sink.aggregate_weekly(root, week_end)
 
 
 def _adjust_rows(latest: str) -> list[dict]:

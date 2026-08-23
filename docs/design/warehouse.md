@@ -64,12 +64,35 @@ tick 盘中流式到达（逐码追加写同一文件），按日文件会写放
 - **minute 家族**：1m/5m/15m/30m 共享 `minute` dataset，period 为目录段（hive 解析出
   period 列）——文件内单一周期避免混装过大；hour=60m 独立成 dataset（金融惯例 H1）
 - **week/month/year 由 daily 本地级联聚合物化**：沉淀 daily 后当场聚合落盘
-  （一次计算多次复用，不依赖 pybao SDK 的 1w/1M 通道），同骨架同列（含物化复权列）
+  （一次计算多次复用，不依赖 pybao SDK 的 1w/1M 通道），同骨架同列（含物化复权列）。
+  **week 已实现（0.10.11）**，聚合语义见 §2.4；month/year 同模式待加。
 - **hk 并入 daily**：market=hk 分区（layout.market_of 已支持 hk 前缀/5 位代码），
   由 mydb 迁入时直接写 `market=hk` 分区，不独立成 dataset
 - **事件/快照类（lhb/fundamental 等）暂不占位**：非 K 线尺度，接入时再定
 - **空仓视图**：每个 dataset 独立 `v_<dataset>` 空视图（类型正确的空结果），
   沉淀后 refresh 换成 read_parquet 视图——与 v_daily 同模式（W3 已验证）
+
+### 2.4 周K聚合物化（0.10.11 落地，粒度阶梯第一级）
+
+- **触发**：沉淀任务完成后自动——对每个覆盖到的自然周（周一~周五），**周完整才聚合**
+  （该周所有交易日 daily watermark 已覆盖；周内缺口/周五未到跳过，避免"先聚合后补全"
+  时周分区已存在无法重写）；节假日周（周五非交易日）以周内实际最后交易日判定
+- **聚合源**：该周 daily 分区 read_parquet glob（不重复拉引擎），market 经 hive 解析
+- **聚合语义（周K 口径）**：
+
+  | 列 | 规则 |
+  |---|---|
+  | open / close | 周内首/末日（arg_min/arg_max by date） |
+  | high / low | 周内 max / min |
+  | volume / amount / turnover | 周内求和 |
+  | pct_chg | (周 close − 周首日 pre_close) / 周首日 pre_close（周涨跌幅，重算） |
+  | amplitude | (high − low) / 周首日 pre_close（周振幅，重算） |
+  | vol_ratio | NULL（周级无定义） |
+  | is_st / name / pb / pe_ttm / 市值类 | 周末日（arg_max by date） |
+  | adj_factor / *_fq | 物化列同规则聚合（open_fq=首日、close_fq=末日、high/low_fq=max/min） |
+
+- **幂等**：周分区已存在跳过（facts 只增不改）；watermark:week 只前进
+- **other 市场孤码不沉淀周K**；周分区与 daily 同构 26 列，查询面可复用 v_daily 模式
 
 ### 2.3 复权：沉淀时物化，查询零计算（0.10.10 重构，取代查询时 ASOF）
 
