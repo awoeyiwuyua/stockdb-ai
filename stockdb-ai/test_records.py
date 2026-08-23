@@ -72,14 +72,26 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(recs[0]["date"], "20260810")
 
     def test_cleanup_removes_expired(self):
+        """0.10.5 语义：按修改时间保留——文件名日期不再决定清理（历史回填记录
+        文件名是旧业务日但 mtime 是现在，必须存活）；mtime 超期才清。"""
+        import os
+        import time as _t
         old_retention = records.RETENTION_DAYS
         records.RETENTION_DAYS = 2
         try:
             today = datetime.now().strftime("%Y%m%d")
+            historical = "20000104"  # 历史回填业务日
+            records.append({"date": historical, "ok": True})
+            records.append({"date": today, "ok": True})
+            self.assertTrue(self._daily(historical).exists())  # 刚写的历史日：存活
+
             expired = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
             records.append({"date": expired, "ok": True})
-            records.append({"date": today, "ok": True})
-            self.assertFalse(self._daily(expired).exists())  # 过期已清理
+            p_expired = self._daily(expired)
+            old_ts = _t.time() - 3 * 86400  # mtime 3 天前（超 2 天保留期）
+            os.utime(p_expired, (old_ts, old_ts))
+            records.append({"date": today, "ok": True})  # 触发 _cleanup
+            self.assertFalse(p_expired.exists())  # mtime 超期：清理
             self.assertTrue(self._daily(today).exists())
         finally:
             records.RETENTION_DAYS = old_retention
@@ -90,3 +102,28 @@ class RecordsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class CleanupMtimeTest(unittest.TestCase):
+    """0.10.5：_cleanup 按修改时间（非文件名日期）保留——历史回填记录不再被误删。"""
+
+    def test_old_dated_record_survives_recent_cleanup(self):
+        import time as _t
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(config, "DATA_DIR", Path(tmp)):
+                # 写一条"2000 年业务日"的记录（模拟历史回填日检）
+                records.append({"date": "20000104", "task": "warehouse_sediment",
+                                "ok": True, "at": "x"})
+                self.assertTrue((Path(tmp) / "records" / "20000104.jsonl").exists())
+                # 再写一条今日记录触发 _cleanup —— 20000104（刚写，mtime=now）必须存活
+                records.append({"date": "20991231", "task": "t", "ok": True, "at": "x"})
+                self.assertTrue((Path(tmp) / "records" / "20000104.jsonl").exists())
+                # 真正超期（mtime 90+ 天前）的文件才被清
+                old = Path(tmp) / "records" / "20200101.jsonl"
+                old.parent.mkdir(exist_ok=True)
+                old.write_text("{}" + chr(10), encoding="utf-8")
+                old_ts = _t.time() - 100 * 86400
+                import os
+                os.utime(old, (old_ts, old_ts))
+                records.append({"date": "20991231", "task": "t2", "ok": True, "at": "x"})
+                self.assertFalse(old.exists())

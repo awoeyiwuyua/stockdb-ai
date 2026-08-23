@@ -51,13 +51,22 @@ def append(record: dict) -> None:
 
 
 def _cleanup() -> None:
-    """清理超保留期的按天文件（保留最近 RETENTION_DAYS 天）。"""
+    """清理超保留期的按天文件（按文件修改时间保留 RETENTION_DAYS 天）。
+
+    0.10.5 修复：此前按文件名日期（记录描述的业务日）判定保留——历史回填写入的
+    2000~2025 年日期记录会在下一次 append 的清理中被立即误删（实测全量回填期
+    2000* 记录文件全部消失）。保留期语义应为"落盘时间距今"（遥测留存），改用
+    st_mtime 判定，与文件名日期解耦。
+    """
     try:
-        cutoff = (datetime.now() - timedelta(days=RETENTION_DAYS)).strftime("%Y%m%d")
+        import time as _time
+        cutoff_ts = _time.time() - RETENTION_DAYS * 86400
         for f in _dir().glob("*.jsonl"):
-            day = f.stem
-            if len(day) == 8 and day.isdigit() and day < cutoff:
-                f.unlink(missing_ok=True)
+            try:
+                if f.stat().st_mtime < cutoff_ts:
+                    f.unlink(missing_ok=True)
+            except OSError:
+                continue
     except OSError:
         pass
 
