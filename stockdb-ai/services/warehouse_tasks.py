@@ -37,6 +37,7 @@ _ADJUST_WEEKDAYS = {0}
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
 _wh_run_state: dict = {"running": False, "started": None, "finished": None, "result": None}
 _RETRY_INTERVAL = 600  # 未就绪/失败重试间隔（10 分钟）
+_BACKFILL_FLOOR = "20000101"  # 回填下界（引擎日K实测起点 2000 年）
 _RETRY_UNTIL = "20:00"  # 超过此时刻放弃当日沉淀（告警收口）
 
 
@@ -82,16 +83,26 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
         #   backfill=True：从已沉淀最早日（无沉淀则 latest）向更早回看 days 个**交易日**
         #     （跳过非交易日；已有分区由 sink 跳过，幂等；watermark 只前进不受影响）
         targets = []
+        # 目标日集合（0.10.3 增 backfill；0.10.6 改**缺口感知**）：
+        #   默认：watermark 之后的前向缺口（正常调度语义——不重复沉淀）
+        #   backfill=True：从最新已沉淀日向下扫全部日历日——已有分区文件或已标记
+        #     "空交易日"（catalog empty:）的日期跳过，其余（含中断留下的历史空洞）
+        #     全部补齐。旧语义只从 sedimented[0] 向下挖，进程中断后会漏掉其上方的
+        #     大段空洞（实测：2000-08 与 2026-05 两段间 25 年被跳过）。
         if backfill:
             sedimented = sink.layout.list_daily_dates(root) if hasattr(sink, "layout") else []
-            cursor = _prev_date(sedimented[0]) if sedimented else latest
-            traded_seen = 0
-            while traded_seen < days and cursor >= "20000101":
+            anchor = watermark or (sedimented[-1] if sedimented else latest)
+            cursor = _prev_date(anchor)
+            while len(targets) < days and cursor >= _BACKFILL_FLOOR:
                 if is_trading_day is None or is_trading_day(
                         datetime.strptime(cursor, "%Y%m%d").date()):
-                    targets.append(cursor)
-                    traded_seen += 1
+                    has_file = any(sink.layout.daily_partition(root, cursor, m).exists()
+                                   for m in ("sh", "sz", "bj"))
+                    marked_empty = sink.catalog.get_meta(root, f"empty:{cursor}") is not None
+                    if not has_file and not marked_empty:
+                        targets.append(cursor)
                 cursor = _prev_date(cursor)
+            targets.sort()  # 旧 → 新
         else:
             target = latest
             for _ in range(days):
@@ -99,10 +110,15 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     break  # 只补 watermark 之后的缺口，不重复沉淀
                 targets.append(target)
                 target = _prev_date(target)
-        for t in reversed(targets):  # 旧 → 新
+        for t in sorted(targets):  # 旧 → 新（缺口感知语义下 targets 已升序，幂等保序）
             points = [p for p in _snapshot_points(t)
                       if isinstance(p, dict) and p.get("status") == "TRADED"]
             if not points:
+                # 空交易日标记（catalog）：缺口感知回填据此跳过，节假日不再反复重探
+                try:
+                    sink.catalog.set_meta(root, f"empty:{t}", 1)
+                except Exception:  # noqa: BLE001 - 标记失败不影响主流程
+                    pass
                 results.append({"date": t, "status": "empty"})
                 continue
             w = sink.write_daily(root, t, points)
