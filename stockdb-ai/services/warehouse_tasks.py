@@ -62,7 +62,8 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
     """
     if availability is None or not availability()[0]:
         return {"ok": False, "reason": "warehouse 不可用（duckdb 缺失或 WAREHOUSE_ENABLED=0）"}
-    days = max(1, min(5, int(days)))
+    days_cap = 9999 if backfill else 5  # backfill=全量回填意图，放开上限
+    days = max(1, min(days_cap, int(days)))
     root = warehouse_root()
     try:
         latest = str(data_latest(force=True) or "").replace("-", "")

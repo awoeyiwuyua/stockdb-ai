@@ -259,14 +259,17 @@ class WarehouseEngineTest(unittest.TestCase):
         self.assertAlmostEqual(mas[4], sum(self.CLOSES[:5]) / 5)
         self.assertAlmostEqual(mas[9], sum(self.CLOSES[5:]) / 5)
 
-    def test_ta_rsi_exact_value(self):
-        """RSI(6) 首个有效值 = 教科书公式手算：前 6 个价差 +1,+1,+1,-1,-1,+1
-        → avg gain 4/6、avg loss 2/6 → RSI = 100·(2/3)/(2/3+1/3) = 200/3。"""
+    def test_ta_rsi_wilder_first_diff_seed(self):
+        """RSI(6) Wilder 首差种子（0.10.5 对齐 pybao 实证口径）：
+        价差 +1,+1,-1,-1,+1,+1,+1,+1,-1（rn2~10），ag/al 从首差递推。
+        前两根纯涨 → 100；末根(rn10,-1) ag=198905/279936 al=81031/279936 → 71.054。"""
         r = self.engine.run_sql(
             "SELECT rsi FROM ta_rsi(6) WHERE code = '600000' ORDER BY date")
         values = [v for v, in r["rows"] if v is not None]
-        self.assertEqual(len(values), 4)  # 10 日 - 6 价差需求 + 1 首日无价差 = 4 个有效值
-        self.assertAlmostEqual(values[0], 200.0 / 3.0, places=9)
+        self.assertEqual(len(values), 9)  # rn2~10 全部有值
+        self.assertEqual(values[0], 100.0)
+        self.assertEqual(values[1], 100.0)
+        self.assertAlmostEqual(values[-1], 71.054, places=3)
         self.assertTrue(all(0 <= v <= 100 for v in values))
 
     def test_ta_macd_shape_and_ema_seed(self):

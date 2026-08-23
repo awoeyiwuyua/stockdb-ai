@@ -147,9 +147,9 @@ class Handler(BaseHTTPRequestHandler):
         days 个交易日。异步执行（单飞防重），进度走 GET /api/warehouse/status。
         """
         body = self._read_json()
-        days = max(1, min(int(body.get("days") or 1), 5))
-        sample = max(1, min(int(body.get("reconcile_sample") or 10), 50))
         backfill = bool(body.get("backfill") or False)
+        days = max(1, min(int(body.get("days") or 1), 9999 if backfill else 5))
+        sample = max(1, min(int(body.get("reconcile_sample") or 10), 50))
         self._send(200, json.dumps(
             warehouse_run_async(days=days, reconcile_sample=sample, backfill=backfill),
             ensure_ascii=False))

@@ -117,25 +117,34 @@ class WarehouseEngine:
                    END AS ma
             FROM v_daily
         """)
-        # RSI：n 日简单版（滚动均值比，非 Wilder 平滑——口径差异见设计文档）；
-        # 需 n 个价差 → 窗口 n PRECEDING，计满 n 个非空 diff 才有值
+        # RSI：Wilder 平滑（0.10.5 口径对齐 pybao/逆向实证：种子 = 首根价差本身
+        # 直接递推 ag_t=(ag_{t-1}(n-1)+gain_t)/n，无 SMA 种子窗——从第二根 bar 起
+        # 即有值；实测与 zhibiao 逐点差 <0.001）
         con.execute("""
             CREATE OR REPLACE MACRO ta_rsi(n) AS TABLE
-            WITH d AS (
+            WITH RECURSIVE
+            d AS (
                 SELECT code, date, close,
-                       close - lag(close) OVER w AS diff
+                       close - lag(close) OVER w AS diff,
+                       row_number() OVER w AS rn
                 FROM v_daily
-                WINDOW w AS (PARTITION BY code ORDER BY date))
-            SELECT code, date, close,
-                   CASE WHEN count(diff) OVER g < n THEN NULL
-                        WHEN avg(greatest(-diff, 0)) OVER g = 0
-                             THEN CASE WHEN avg(greatest(diff, 0)) OVER g > 0 THEN 100.0 END
-                        ELSE 100.0 - 100.0 / (1 + avg(greatest(diff, 0)) OVER g
-                                                     / avg(greatest(-diff, 0)) OVER g)
+                WINDOW w AS (PARTITION BY code ORDER BY date)),
+            r AS (
+                SELECT code, date, rn,
+                       greatest(diff, 0)::DOUBLE AS ag,
+                       greatest(-diff, 0)::DOUBLE AS al
+                FROM d WHERE rn = 2
+                UNION ALL
+                SELECT d.code, d.date, d.rn,
+                       (r.ag * (n - 1) + greatest(d.diff, 0)) / n,
+                       (r.al * (n - 1) + greatest(-d.diff, 0)) / n
+                FROM r JOIN d ON d.code = r.code AND d.rn = r.rn + 1)
+            SELECT r.code, r.date, d.close,
+                   CASE WHEN r.al = 0 THEN CASE WHEN r.ag > 0 THEN 100.0 END
+                        WHEN r.ag = 0 THEN 0.0
+                        ELSE 100.0 - 100.0 / (1 + r.ag / r.al)
                    END AS rsi
-            FROM d
-            WINDOW g AS (PARTITION BY code ORDER BY date
-                         ROWS BETWEEN n PRECEDING AND CURRENT ROW)
+            FROM r JOIN d ON d.code = r.code AND d.date = r.date
         """)
         # MACD：双 EMA（递归 CTE）+ 信号线 EMA；fast/slow/sig 为周期参数
         con.execute("""

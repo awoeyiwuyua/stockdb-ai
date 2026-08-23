@@ -4,6 +4,19 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.5] — 2026-08-22（RSI 口径对齐 pybao + 全量回填通道放开）
+
+- **ta_rsi 重写为 Wilder 平滑·首差种子**（逆向实证 pybao zhibiao 口径：ag₀=首根价差
+  直接递推，无 SMA 种子窗）——RSI14 对账 1187 点全一致（最大差 0.0005）；初版简单
+  滚动口径与 pybao 可差 20 点，废弃。MA20/RSI14/MACD 三大指标异源对账**全部签字**
+  （docs/acceptance/warehouse-live-20260822.md）
+- **全量回填放开**：backfill 模式 days 上限 5→9999（服务层 + HTTP 口；前向缺口语义
+  不变）——日K 全历史（引擎 2000 年起 ~6400 交易日）一键回填就绪
+- **日检保留策略修复（全量回填实测发现）**：records._cleanup 改按文件**修改时间**
+  保留（此前按文件名业务日判定——历史回填写的 2000~2025 年日期记录写完即被
+  下一次清理误删）；回归测试锁定新旧语义
+- tick 探测结论（本机引擎）：get_ticks 恒返 "try again later"（历史 tick 不可用），
+  get_last_tick 仅实时快照——tick 数据集延后，登记 ROADMAP
 ## [0.10.4] — 2026-08-22（hotfix：run_sql 结果 DATE 列 JSON 序列化崩溃）
 
 - 实测暴露：`warehouse_run_sql` 经 MCP 通道查询含 DATE 列（如 `SELECT date FROM
