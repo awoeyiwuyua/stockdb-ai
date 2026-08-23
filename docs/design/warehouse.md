@@ -72,27 +72,31 @@ tick 盘中流式到达（逐码追加写同一文件），按日文件会写放
 - **空仓视图**：每个 dataset 独立 `v_<dataset>` 空视图（类型正确的空结果），
   沉淀后 refresh 换成 read_parquet 视图——与 v_daily 同模式（W3 已验证）
 
-### 2.4 周K聚合物化（0.10.11 落地，粒度阶梯第一级）
+### 2.4 周K/月K 聚合物化（0.10.11 week 落地；0.10.12 month 落地 + 当前周期派生）
 
-- **触发**：沉淀任务完成后自动——对每个覆盖到的自然周（周一~周五），**周完整才聚合**
-  （该周所有交易日 daily watermark 已覆盖；周内缺口/周五未到跳过，避免"先聚合后补全"
-  时周分区已存在无法重写）；节假日周（周五非交易日）以周内实际最后交易日判定
-- **聚合源**：该周 daily 分区 read_parquet glob（不重复拉引擎），market 经 hive 解析
-- **聚合语义（周K 口径）**：
+- **触发**：沉淀任务完成后自动——对每个覆盖到的自然周/月，**周期完整才聚合**
+  （该周期内每个交易日均已有 daily 分区文件或 empty 标记，0.10.12 修复：旧实现
+  只比较 watermark ≥ 周期最后交易日，数据缺口时 watermark 仍推进会误判完整——
+  残缺周期被聚合后幂等无法重写）；节假日周期以实际最后交易日判定
+- **聚合源**：该周期 daily 分区 read_parquet glob（不重复拉引擎），market 经 hive 解析
+- **聚合语义（周期K 口径，week/month 同一 SQL 骨架 `_kline_aggregate_sql`）**：
 
   | 列 | 规则 |
   |---|---|
-  | open / close | 周内首/末日（arg_min/arg_max by date） |
-  | high / low | 周内 max / min |
-  | volume / amount / turnover | 周内求和 |
-  | pct_chg | (周 close − 周首日 pre_close) / 周首日 pre_close（周涨跌幅，重算） |
-  | amplitude | (high − low) / 周首日 pre_close（周振幅，重算） |
-  | vol_ratio | NULL（周级无定义） |
-  | is_st / name / pb / pe_ttm / 市值类 | 周末日（arg_max by date） |
+  | open / close | 周期内首/末日（arg_min/arg_max by date） |
+  | high / low | 周期内 max / min |
+  | volume / amount / turnover | 周期内求和 |
+  | pct_chg | (周期末 close − 周期首日 pre_close) / 首日 pre_close（周期涨跌幅，重算） |
+  | amplitude | (high − low) / 首日 pre_close（周期振幅，重算） |
+  | vol_ratio | NULL（周期级无定义） |
+  | is_st / name / pb / pe_ttm / 市值类 | 周期末日（arg_max by date） |
   | adj_factor / *_fq | 物化列同规则聚合（open_fq=首日、close_fq=末日、high/low_fq=max/min） |
 
-- **幂等**：周分区已存在跳过（facts 只增不改）；watermark:week 只前进
-- **other 市场孤码不沉淀周K**；周分区与 daily 同构 26 列，查询面可复用 v_daily 模式
+- **幂等**：周期分区已存在跳过（facts 只增不改）；watermark:week / watermark:month 只前进
+- **other 市场孤码不沉淀**；周期分区与 daily 同构 26 列
+- **当前未走完周期 = 派生视图（股票软件"进行中的周/月K"语义）**：
+  `v_week_current` / `v_month_current` 查询时从 v_daily 实时聚合
+  （周期边界 = 本周一/本月1日 → current_date），历史周期固定落盘、当前周期滚动可见
 
 ### 2.3 复权：沉淀时物化，查询零计算（0.10.10 重构，取代查询时 ASOF）
 

@@ -179,14 +179,15 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                              "traded": rec["traded"], "issues": rec["issues"][:5],
                              "at": _now_iso()})
 
-        # 0.10.10 粒度阶梯：周K聚合物化——对沉淀覆盖到的每个"自然周结束日"（周五）
-        # 聚合该周 daily → facts/week（幂等：已存在周分区跳过，watermark:week 只前进）。
-        # 周五未到（周内补沉淀）时也聚合出"部分周"（周K以最新交易日为周结束日）。
+        # 0.10.10/0.10.12 粒度阶梯：周K/月K 聚合物化——对沉淀覆盖到的每个自然周/月
+        # （周完整/月完整才聚合，幂等；当前未走完的周期由 v_week_current/v_month_current
+        # 派生视图实时聚合，见 engine）
         try:
             if results:
                 _aggregate_weeks(root, results)
-        except Exception as exc:  # noqa: BLE001 - 周聚合失败不阻塞日K沉淀结论
-            log(f"⚠️ 仓库周K聚合失败（不阻塞日K）：{exc}")
+                _aggregate_months(root, results)
+        except Exception as exc:  # noqa: BLE001 - 聚合失败不阻塞日K沉淀结论
+            log(f"⚠️ 仓库周/月K聚合失败（不阻塞日K）：{exc}")
 
         if refresh_views is not None:
             try:
@@ -224,25 +225,26 @@ def _week_end_of(d: str) -> str:
 
 
 def _week_complete(root, week_end: str) -> bool:
-    """该周是否完整：周内所有交易日均已沉淀（daily watermark ≥ 周内最后交易日）。
+    """该周是否完整：周内每个交易日均已有 daily 分区文件（或空交易日标记）。
 
-    只聚合完整周——部分周（周内缺口/周五未到）跳过，避免"先聚合后补全"时
-    周分区已存在（幂等跳过）导致过期周无法重写。节假日周（周五非交易日）
-    以周内实际最后交易日判定，照常聚合。
+    0.10.12 修复：旧实现只比较 watermark ≥ 周内最后交易日——周内某交易日因故
+    缺失（数据缺口）时 watermark 仍可能推进，导致残缺周被聚合且幂等不再重写。
+    现在逐交易日校验文件/标记存在，缺任何一天 → 不完整 → 等补齐后下次沉淀聚合。
+    节假日周（周五非交易日）以 is_trading_day 判定，非交易日跳过。
     """
     from datetime import timedelta
-    wm = sink.catalog.get_watermark(root, "daily")
-    if wm is None:
-        return False
     friday = datetime.strptime(week_end, "%Y%m%d")
-    tds = []
-    for i in range(5):  # 周五→周一扫描
+    for i in range(5):  # 周一~周五（周五→周一扫描）
         d = friday - timedelta(days=i)
-        if is_trading_day is None or is_trading_day(d.date()):
-            tds.append(d.strftime("%Y%m%d"))
-    if not tds:
-        return False
-    return wm >= max(tds)  # watermark 覆盖周内最后交易日 = 周完整
+        if is_trading_day is not None and not is_trading_day(d.date()):
+            continue  # 非交易日（周末/节假日）跳过
+        d8 = d.strftime("%Y%m%d")
+        has_file = any(sink.layout.daily_partition(root, d8, m).exists()
+                       for m in ("sh", "sz", "bj", "hk"))
+        marked_empty = sink.catalog.get_meta(root, f"empty:{d8}") is not None
+        if not has_file and not marked_empty:
+            return False  # 该交易日缺失 → 周不完整
+    return True
 
 
 def _aggregate_weeks(root, results) -> None:
@@ -259,6 +261,59 @@ def _aggregate_weeks(root, results) -> None:
         seen.add(week_end)
         if _week_complete(root, week_end):
             sink.aggregate_weekly(root, week_end)
+
+
+def _month_end_of(d: str) -> str:
+    """日期所在自然月的月末（YYYYMMDD）。跨年安全（datetime 运算）。"""
+    from datetime import timedelta as _td
+    dt = datetime.strptime(d, "%Y%m%d")
+    year, month = dt.year, dt.month
+    if month == 12:
+        nxt = datetime(year + 1, 1, 1)
+    else:
+        nxt = datetime(year, month + 1, 1)
+    return (nxt - _td(days=1)).strftime("%Y%m%d")
+
+
+def _month_complete(root, month_end: str) -> bool:
+    """该月是否完整：月内每个交易日均已有 daily 分区文件（或空交易日标记）。
+
+    与 _week_complete 同策略（0.10.12）：逐交易日校验文件/标记存在，缺任何
+    一天 → 不完整 → 等补齐后下次沉淀聚合。月末是日历日（可能非交易日），
+    以 is_trading_day 判定跳过非交易日。
+    """
+    from datetime import timedelta as _td
+    month_end_dt = datetime.strptime(month_end, "%Y%m%d")
+    month_start_dt = datetime(month_end_dt.year, month_end_dt.month, 1)
+    cursor = month_start_dt
+    while cursor <= month_end_dt:
+        if is_trading_day is not None and not is_trading_day(cursor.date()):
+            cursor += _td(days=1)
+            continue  # 非交易日（周末/节假日）跳过
+        d8 = cursor.strftime("%Y%m%d")
+        has_file = any(sink.layout.daily_partition(root, d8, m).exists()
+                       for m in ("sh", "sz", "bj", "hk"))
+        marked_empty = sink.catalog.get_meta(root, f"empty:{d8}") is not None
+        if not has_file and not marked_empty:
+            return False  # 该交易日缺失 → 月不完整
+        cursor += _td(days=1)
+    return True
+
+
+def _aggregate_months(root, results) -> None:
+    """沉淀结果 → 自动月K聚合（0.10.12）：对每个覆盖到的自然月，月完整才聚合。
+    幂等由 sink.aggregate_monthly 保证（月分区存在跳过，watermark:month 只前进）。"""
+    seen: set[str] = set()
+    for r in results:
+        d = r.get("date")
+        if not d:
+            continue
+        month_end = _month_end_of(d)
+        if month_end in seen:
+            continue
+        seen.add(month_end)
+        if _month_complete(root, month_end):
+            sink.aggregate_monthly(root, month_end)
 
 
 def _adjust_rows(latest: str) -> list[dict]:

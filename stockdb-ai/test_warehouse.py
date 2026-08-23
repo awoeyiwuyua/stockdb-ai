@@ -334,6 +334,52 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertEqual(res["status"], "empty")
         self.assertEqual(res["rows"], 0)
 
+    def test_aggregate_monthly_semantics(self):
+        """0.10.12 月K聚合语义：与周K同口径——open=月首日、close=月末日、
+        high/low=max/min、量求和、pct_chg 重算。"""
+        # 8 月 4 个交易日（简化为 0817~0820 跨周同月）
+        for d, o, c in (("20260817", 10.0, 11.0), ("20260818", 11.0, 10.5),
+                        ("20260819", 10.5, 12.0), ("20260820", 12.0, 13.0)):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": o, "high": max(o, c) + 0.5, "low": min(o, c) - 0.5,
+                "close": c, "pre_close": o - 0.2,
+                "volume": 1000.0, "amount": 10000.0, "turnover": 1.0,
+            }])
+        res = sink.aggregate_monthly(self.root, "20260831")
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["rows"], 1)
+        con = duckdb.connect()
+        try:
+            p = layout.month_partition(self.root, "20260831", "sh")
+            row = con.execute(
+                f"SELECT open, high, low, close, volume, pct_chg "
+                f"FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            open_, high, low, close, vol, pct = row
+            self.assertAlmostEqual(open_, 10.0)   # 月首日开盘
+            self.assertAlmostEqual(close, 13.0)   # 月末日收盘
+            self.assertAlmostEqual(high, 13.5)    # 月内最高
+            self.assertAlmostEqual(low, 9.5)      # 月内最低（首日 low = min(10,11)-0.5）
+            self.assertAlmostEqual(vol, 4000.0)   # 求和
+            self.assertAlmostEqual(pct, (13.0 - 9.8) / 9.8 * 100)
+        finally:
+            con.close()
+        self.assertEqual(catalog.get_watermark(self.root, "month"), "20260831")
+
+    def test_aggregate_monthly_idempotent(self):
+        for d in ("20260817", "20260818"):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+            }])
+        first = sink.aggregate_monthly(self.root, "20260831")
+        again = sink.aggregate_monthly(self.root, "20260831")
+        self.assertEqual(first["status"], "written")
+        self.assertEqual(again["status"], "skipped")
+        self.assertEqual(catalog.get_watermark(self.root, "month"), "20260831")
+
 
 class WarehouseEngineTest(unittest.TestCase):
     """W3 验收：视图 / 宏数值正确性 / 三护栏 / 超时 / 状态清单。
@@ -485,6 +531,41 @@ class WarehouseEngineTest(unittest.TestCase):
             try:
                 r = eng.run_sql("SELECT count(*) FROM v_daily")
                 self.assertEqual(r["rows"][0][0], 0)
+            finally:
+                eng.close()
+
+    def test_week_month_views_and_current(self):
+        """0.10.11/0.10.12：v_week/v_month 读物化分区；v_week_current/v_month_current
+        从 v_daily 实时聚合当前未走完周期（历史固定落盘、当前滚动）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            # 单周单月数据（0817~0821 周 + 8 月）
+            for i, c in enumerate([10, 11, 12, 11, 10]):
+                sink.write_daily(root, f"202608{17 + i:02d}", [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": float(c), "high": float(c) + 1.0, "low": float(c) - 1.0,
+                    "close": float(c), "pre_close": float(c) - 0.1,
+                    "volume": 1000.0, "amount": 10000.0,
+                }], factor_map={"600000": 2.0})
+            sink.aggregate_weekly(root, "20260821")
+            sink.aggregate_monthly(root, "20260831")
+            eng = WarehouseEngine(root)
+            try:
+                r = eng.run_sql(
+                    "SELECT code, open, close, close_fq FROM v_week WHERE code='600000'")
+                self.assertEqual(r["rows"][0][1], 10.0)   # 周 open
+                self.assertEqual(r["rows"][0][2], 10.0)   # 周 close（周五 0821）
+                self.assertAlmostEqual(r["rows"][0][3], 20.0)  # close_fq 物化
+                r2 = eng.run_sql(
+                    "SELECT code, open, close FROM v_month WHERE code='600000'")
+                self.assertEqual(r2["rows"][0][1], 10.0)
+                self.assertEqual(r2["rows"][0][2], 10.0)
+                # current 视图可查（从 v_daily 实时聚合；真实 current_date 与测试数据
+                # 不在同一周期时返回空，不报错——结构正确性断言）
+                r3 = eng.run_sql("SELECT count(*) FROM v_week_current")
+                self.assertIsInstance(r3["rows"][0][0], int)
+                r4 = eng.run_sql("SELECT count(*) FROM v_month_current")
+                self.assertIsInstance(r4["rows"][0][0], int)
             finally:
                 eng.close()
 
@@ -807,6 +888,48 @@ class WarehouseTasksTest(unittest.TestCase):
                          ["20260817", "20260818", "20260819"])
         self.assertFalse(layout.week_partition(self.root, "20260821", "sh").exists())
         self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "week"))
+
+    def test_sediment_triggers_monthly_aggregation(self):
+        """0.10.12：月完整 → 自动月K聚合（facts/month + watermark:month 推进）。
+        直接铺满整月 daily 后调 _aggregate_months（编排层判定逻辑单测）。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        # 铺满 8 月全部交易日（0803~0831 的周一~周五）
+        from datetime import date as _date, timedelta as _td
+        cursor = _date(2026, 8, 3)
+        while cursor <= _date(2026, 8, 31):
+            if cursor.weekday() < 5:
+                sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                }])
+            cursor += _td(days=1)
+        self.wt._aggregate_months(self.root, [{"date": "20260831"}])
+        m = layout.month_partition(self.root, "20260831", "sh")
+        self.assertTrue(m.exists(), f"{m} 不存在")
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "month"), "20260831")
+
+    def test_incomplete_month_not_aggregated(self):
+        """0.10.12：月内缺口（只沉淀到月中）不聚合——等月完整后一次聚合。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        # 只铺 8 月上旬（0803~0814），月中起缺失 → 月不完整
+        from datetime import date as _date, timedelta as _td
+        cursor = _date(2026, 8, 3)
+        while cursor <= _date(2026, 8, 14):
+            if cursor.weekday() < 5:
+                sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                }])
+            cursor += _td(days=1)
+        self.wt._aggregate_months(self.root, [{"date": "20260814"}])
+        self.assertFalse(layout.month_partition(self.root, "20260831", "sh").exists())
+        self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "month"))
 
     def test_sediment_triggers_backup(self):
         """0.10.8：沉淀成功（有 results）后调用备份注入点；无沉淀时不调用。"""

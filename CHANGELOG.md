@@ -4,6 +4,21 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.12] — 2026-08-23（month 聚合落地 + 当前周期派生视图 + 完整性校验修复）
+
+- **月K聚合物化（sink.aggregate_monthly）**：与周K同口径（公共 `_kline_aggregate_sql`
+  骨架），facts/month/year=YYYY/market=xx/date=YYYYMMDD（月末）；自动触发：沉淀后
+  对覆盖到的自然月聚合，**月完整才聚合**
+- **完整性校验修复**：旧 `_week_complete` 只比较 watermark ≥ 周期最后交易日——数据
+  缺口时 watermark 仍推进会误判完整，残缺周期被聚合后幂等无法重写；现改为逐交易日
+  校验 daily 分区文件/empty 标记存在，缺任何一天 → 不完整 → 等补齐后下次聚合
+- **当前未走完周期 = 派生视图**（股票软件"进行中的周/月K"语义）：`v_week_current` /
+  `v_month_current` 查询时从 v_daily 实时聚合（周期边界 = 本周一/本月1日 →
+  current_date）；历史周期固定落盘、当前周期滚动可见
+- **真实链路验证**：8 月仅 W34 五天 → 月K 正确跳过（watermark:month=None 无残缺月）；
+  v_week 5182 行 + v_week_current 同周重合（历史/当前语义正确）
+- 227 测试全绿（新增月聚合语义/幂等/完整月触发/月内缺口跳过/current 视图）
+
 ## [0.10.11] — 2026-08-23（粒度阶梯第一级：week 聚合物化落地）
 
 - **周K聚合物化（sink.aggregate_weekly）**：沉淀任务完成后自动触发——对每个覆盖到的

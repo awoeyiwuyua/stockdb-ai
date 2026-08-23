@@ -85,12 +85,59 @@ class WarehouseEngine:
             "CREATE OR REPLACE VIEW v_daily_fq AS "
             "SELECT * FROM v_daily"
         )
+
+        # 0.10.11/0.10.12 粒度阶梯：周K/月K 视图（已完成周期落盘，查询期求值自动可见）
+        week_glob = (facts / "week" / "*" / "*" / "date=*.parquet").as_posix()
+        month_glob = (facts / "month" / "*" / "*" / "date=*.parquet").as_posix()
+        has_week = bool(list((facts / "week").rglob("date=*.parquet"))) if (facts / "week").is_dir() else False
+        has_month = bool(list((facts / "month").rglob("date=*.parquet"))) if (facts / "month").is_dir() else False
+        if has_week:
+            con.execute(
+                f"CREATE OR REPLACE VIEW v_week AS "
+                f"SELECT * FROM read_parquet('{week_glob}', hive_partitioning=true)"
+            )
+        else:
+            cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _DAILY_EMPTY_COLUMNS)
+            con.execute(f"CREATE OR REPLACE VIEW v_week AS SELECT {cols} WHERE FALSE")
+        if has_month:
+            con.execute(
+                f"CREATE OR REPLACE VIEW v_month AS "
+                f"SELECT * FROM read_parquet('{month_glob}', hive_partitioning=true)"
+            )
+        else:
+            cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _DAILY_EMPTY_COLUMNS)
+            con.execute(f"CREATE OR REPLACE VIEW v_month AS SELECT {cols} WHERE FALSE")
+
+        # 0.10.12：当前未走完周期派生视图——从 v_daily 实时聚合（股票软件"进行中的
+        # 周/月K"语义：历史周期固定落盘，当前周期滚动可见）。聚合口径与 sink 一致。
+        from storage.warehouse import sink as _wh_sink
+        self._register_period_current(con, "week", _wh_sink._kline_aggregate_sql,
+                                      f"v_daily")
+        self._register_period_current(con, "month", _wh_sink._kline_aggregate_sql,
+                                      f"v_daily")
+
         con.execute("CREATE TABLE IF NOT EXISTS codes (code TEXT PRIMARY KEY, name TEXT)")
         con.execute("CREATE OR REPLACE VIEW v_codes AS SELECT * FROM codes")
         # 用户研究区默认可用（工具文档建议放 research schema——实测首建前直接
         # CREATE TABLE research.x 会 CatalogException，故初始化即预建）
         con.execute("CREATE SCHEMA IF NOT EXISTS research")
         self._register_macros()
+
+    def _register_period_current(self, con, period: str, agg_sql_fn, source: str) -> None:
+        """注册 v_<period>_current 派生视图：查询时从 v_daily 实时聚合当前未完成周期。
+
+        周期边界：week = 本周一 → 最新交易日（current_date）；month = 本月1日 →
+        最新交易日。聚合口径与 sink._kline_aggregate_sql 一致（open=周期首日、
+        high/low=max/min、close=末日、量求和、pct_chg/amplitude 重算）。
+        """
+        if period == "week":
+            start_expr = "date_trunc('week', current_date)::DATE"
+        else:
+            start_expr = "date_trunc('month', current_date)::DATE"
+        sql = agg_sql_fn(start_expr, "current_date", source)
+        con.execute(
+            f"CREATE OR REPLACE VIEW v_{period}_current AS {sql}"
+        )
 
     def _register_macros(self) -> None:
         con = self._con
