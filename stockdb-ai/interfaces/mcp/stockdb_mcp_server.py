@@ -2468,8 +2468,9 @@ TOOLS: list[dict] = [
         "description": (
             "在本地列式仓库（DuckDB + Parquet，每日沉淀自引擎）上执行单条 SQL——读写均允许"
             "（个人研究库：可 CREATE TABLE/INSERT 建自己的研究表，建议放 research schema）。"
-            "常用对象：v_daily（日K）、v_adjust（复权因子）、v_daily_fq（ASOF 复权拼接，"
-            "open_fq/high_fq/low_fq/close_fq 列）、v_codes（代码表）；指标宏 ta_ma(n)/"
+            "常用对象：v_daily（日K，含物化复权列 adj_factor/open_fq/high_fq/low_fq/"
+            "close_fq——沉淀时一次计算，查询零 JOIN）、v_daily_fq（= v_daily）、"
+            "v_codes（代码表）；指标宏 ta_ma(n)/"
             "ta_rsi(n)/ta_macd(fast,slow,sig)（窗口按 code 分区、date 排序，窗口不满为 NULL，"
             "RSI 为简单版非 Wilder）。示例：SELECT * FROM ta_ma(20) WHERE code='600000' "
             "AND date>='2026-01-01'；横截面：SELECT code,close FROM v_daily WHERE "
@@ -2489,7 +2490,7 @@ TOOLS: list[dict] = [
     {
         "name": "warehouse_list_tables",
         "description": (
-            "列出仓库对象：表/视图（v_daily/v_adjust/v_daily_fq/v_codes/codes 及用户自建表）"
+            "列出仓库对象：表/视图（v_daily/v_daily_fq/v_codes/codes 及用户自建表）"
             "与指标宏清单（名称+参数）。写 SQL 前先看本清单确认对象名与可用性。"
         ),
         "inputSchema": {"type": "object", "properties": {}},

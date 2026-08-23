@@ -23,10 +23,11 @@
 ```
 DATA_DIR/                                                 本机开发 = 仓库根 data/，生产 = /data 卷
 ├── warehouse/                                            ← 列式仓库（本设计）
-│   ├── facts/daily/year=YYYY/market=sh/date=YYYYMMDD.parquet   日K：按日一文件，内按 code 排序
-│   ├── facts/adjust/snapshot=YYYYMMDD.parquet                  复权因子：低频全量快照（版本化追加）
-│   ├── facts/minute/code=xxxxxx/date=YYYYMMDD.parquet          分钟K：每码每日一文件（见 §2.2）
-│   ├── facts/lhb/date=YYYYMMDD.parquet                         龙虎榜：按日事件文件（见 §2.2）
+│   ├── facts/tick/code=xxxxxx/date=YYYYMMDD/part=HHMM/data.parquet   逐笔（唯一按码，见 §2.2）
+│   ├── facts/minute/period=5m/year=YYYY/market=xx/date=YYYYMMDD.parquet   分钟K（时间分层）
+│   ├── facts/hour/year=YYYY/market=xx/date=YYYYMMDD.parquet    小时K（60m，时间分层）
+│   ├── facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet   日K：按日一文件，内按 code 排序
+│   ├── facts/week|month|year/year=YYYY/market=xx/date=YYYYMMDD.parquet   聚合K（daily 聚合物化）
 │   ├── warehouse.duckdb                                        视图/宏 + 用户表 + meta（C4 单点）
 │   └── backups/warehouse-<stamp>-<uuid>.db                     warehouse.duckdb 在线备份（0.10.8，C5）
 ├── research/                                             研究成果 SQLite（research.db + backups/；旧根路径粘性兼容）
@@ -39,42 +40,70 @@ facts/ = 不可变事实（Parquet，只增不改），warehouse.duckdb = 可变
 内部 schema 分层：main 视图/宏 + research 用户表 + meta），backups/ = 恢复副本。
 duckdb 保持单文件（不拆多库：视图/宏/元数据原子性与备份简单优先，与 mydb 单文件多表同原则）。
 
-### 2.2 facts/<dataset> 分区策略矩阵（0.10.8 全量设计）
+### 2.2 facts/<dataset> 粒度阶梯（0.10.10 定稿：tick→minute→hour→daily→week→month→year）
 
-**核心规则：分区维度由数据的「访问形态」决定，不是由技术格式决定**——
-横截面优先（全市场单日查询是主场景）→ 按日分区；单码时序优先（单标的连续查询
-是主场景）→ 按码分区。每个 dataset 独立声明分区策略、watermark 键、写入通道。
+**核心规则一（用户拍板）：数据集按「粒度」命名，七级阶梯就是读写维度**——
+tick / minute / hour / daily / week / month / year，每级独立 dataset + 独立
+watermark 键。5m/15m/30m/60m 归 minute 家族（period 目录段），hour=60m。
 
-| dataset | 访问形态 | 分区 | 文件粒度 | 行量级/日 | 更新语义 | watermark 键 | 写入通道 |
-|---|---|---|---|---|---|---|---|
-| daily | 横截面优先 | `year=YYYY/market=xx/date=YYYYMMDD` | 全市场 5000 行/文件 | 5K | 日追加，只增不改 | `watermark:daily` | 快照通道（现役） |
-| adjust | 全量快照 | `snapshot=YYYYMMDD` | 全市场 1 文件 | 5K（低频） | 版本化追加，视图取最新 | `adjust:snapshot` | adjust_provider（延后） |
-| minute | **单码时序优先** | `code=xxxxxx/date=YYYYMMDD` | 单码单日 ~50-480 行/文件 | 5000×~780 | 日追加，只增不改 | `watermark:minute` | 分钟K 通道（引擎 HTTP 可拉，延后） |
-| lhb | 横截面事件 | `date=YYYYMMDD` | 单日 1 文件（内按 code 排序） | ~百行 | 日追加，只增不改 | `watermark:lhb` | 待引擎键空间（延后） |
-| hk_daily | 横截面优先 | `year=YYYY/market=hk/date=YYYYMMDD` | 全市场 1 文件 | ~2.5K | 日追加 | `watermark:hk_daily` | mydb 迁移（延后） |
-| fundamental | 单码快照 | `code=xxxxxx/date=YYYYMMDD` | 单码单日 1 文件 | 5K | 版本化追加 | `watermark:fundamental` | 待引擎键空间（延后） |
-| tick | **单码时序优先（流式）** | `code=xxxxxx/date=YYYYMMDD/part=HHMM` | 单码单日单窗口 1 文件 | 2400 万（全市场） | 流式追加，窗口内只增 | `watermark:tick` | 待接入（延后，见 ROADMAP） |
+**核心规则二（用户拍板）：只有 tick 按 code 分层，其余全部时间分层**——
+tick 盘中流式到达（逐码追加写同一文件），按日文件会写放大，故按码+日内 part 窗口；
+时间序列（minute/hour/daily/week/month/year）是批量拉取（按周期全市场一次写齐），
+二级目录统一从 `year=YYYY/market=xx` 切入——与 daily 完全同构，布局/sink/查询通用。
 
-**分钟K 粒度归一**：minute 内按 `period` 列区分 5m/15m/30m/60m（引擎原生字段
-`code/date(14位)/open/close/high/low/volume/amount`，实测 8 列），不做多 dataset
-拆分——同一访问形态（单码时序）共享同一分区策略，粒度只是列属性。
+| dataset | 粒度 | 分区 | 行量级/日 | 更新语义 | watermark 键 | 写入通道 |
+|---|---|---|---|---|---|---|
+| tick | 逐笔 | `code=xxxxxx/date=YYYYMMDD/part=HHMM` | 2400 万 | 流式追加，窗口内只增 | `watermark:tick` | 待接入（延后） |
+| minute | 1m/5m/15m/30m | `period=xx/year=YYYY/market=xx/date=YYYYMMDD` | 5000×~300 | 日追加，只增不改 | `watermark:minute` | 分钟K 通道（引擎 HTTP 可拉，延后） |
+| hour | 60m | `year=YYYY/market=xx/date=YYYYMMDD` | 5000×4 | 日追加 | `watermark:hour` | 分钟K 通道（延后） |
+| daily | 日K | `year=YYYY/market=xx/date=YYYYMMDD` | 5K×4市场 | 日追加，只增不改 | `watermark:daily` | 快照通道（现役） |
+| week | 周K | `year=YYYY/market=xx/date=YYYYMMDD`（周结束日） | 5K×4/周 | 周追加 | `watermark:week` | daily 聚合物化（延后） |
+| month | 月K | `year=YYYY/market=xx/date=YYYYMMDD`（月末） | 5K×4/月 | 月追加 | `watermark:month` | daily 聚合物化（延后） |
+| year | 年K | `year=YYYY/market=xx/date=YYYYMMDD`（年末） | 5K×4/年 | 年追加 | `watermark:year` | daily 聚合物化（延后） |
 
-**tick 的 part 窗口**：tick 量级 2400 万行/日，按日一文件过大且写放大（流式追加
-要反复重写文件）；`part=HHMM` 把窗口切到半小时级（沿 adjust 的「文件名段不生效、
-真实列承载」教训，part 以真实列写入）。tick 是**唯一**允许日内多文件的 dataset。
+- **minute 家族**：1m/5m/15m/30m 共享 `minute` dataset，period 为目录段（hive 解析出
+  period 列）——文件内单一周期避免混装过大；hour=60m 独立成 dataset（金融惯例 H1）
+- **week/month/year 由 daily 本地级联聚合物化**：沉淀 daily 后当场聚合落盘
+  （一次计算多次复用，不依赖 pybao SDK 的 1w/1M 通道），同骨架同列（含物化复权列）
+- **hk 并入 daily**：market=hk 分区（layout.market_of 已支持 hk 前缀/5 位代码），
+  由 mydb 迁入时直接写 `market=hk` 分区，不独立成 dataset
+- **事件/快照类（lhb/fundamental 等）暂不占位**：非 K 线尺度，接入时再定
+- **空仓视图**：每个 dataset 独立 `v_<dataset>` 空视图（类型正确的空结果），
+  沉淀后 refresh 换成 read_parquet 视图——与 v_daily 同模式（W3 已验证）
 
-**lhb 与 daily 同构**：横截面事件按日成文件（事件本身每日全市场可见），但量级
-小一个数量级，不做 year/market 嵌套——单层 `date=` 分区足够，避免过度分区。
+### 2.3 复权：沉淀时物化，查询零计算（0.10.10 重构，取代查询时 ASOF）
 
-**空仓视图**：每个 dataset 独立 `v_<dataset>` 空视图（类型正确的空结果），
-沉淀后 refresh 换成 read_parquet 视图——与 v_daily 同模式（W3 已验证）。
+**旧设计（已废弃）**：`adjust` 独立 dataset + `v_daily_fq` 查询时 `ASOF LEFT JOIN`
+现算因子×价格——每次查询重复计算，因子事件变化后历史价格漂移。
+
+**新设计（用户拍板：聚合层面一次计算、多次复用）**：
+
+```
+引擎复权事件（按码：div/give/trans/mult/cum 事件序列，追加只增）
+    ↓ 沉淀任务（周度/首刷）展开
+factor 序列：factor(code, date) = 截至 date 的最新 cum（每日累计因子）
+    ↓ sink.write_daily 同步物化（一次计算）
+daily 分区新增伴随列：adj_factor + open_fq/high_fq/low_fq/close_fq
+    ↓ 查询层
+v_daily_fq = v_daily 直接读物化列——零 JOIN、零计算、多查询复用
+```
+
+- **物化在 daily 分区内**：因子是日K的伴随属性，同文件同生命周期，原子写/幂等/
+  只增不改全部继承；不再是独立 dataset
+- **只增不改不破坏**：因子事件只追加（新分红追加新事件，历史 cum 不变）→ 物化列
+  历史值永不变；reconcile 增加"复权列回读"校验
+- **事件源是内存输入，不占 facts**：引擎事件经 adjust_provider 注入 →
+  `_build_factor_map` 展开为 {code: cum} 缓存（周度/首刷刷新），物化后即弃；
+  审计留档延后（如需可写 warehouse.duckdb 内表，低频量小）
+- **依赖顺序**：daily 物化依赖 factor_map 就绪（周一/首刷先行）；未就绪时
+  物化列 NULL（原价），事件到位后下次沉淀补齐该日——补写窗口内旧分区重写
+  （见 §3 不变量修订）
+- **week/month/year 聚合物化时同带复权列**：聚合产物 = 一次计算、带全信息
 
 - 文件粒度「年/市场/日」而非「每标的一文件」：日K约 5000 行/日，按日成文件保持追加语义，
   又避免每年数千小文件；单标的时序查询靠文件内 code 排序 + 行组统计裁剪
-- **DuckDB 只解析目录形式的 hive 分区**（文件名段的 `date=` 不生效）——adjust 的快照版本
-  以真实列 `snapshot` 写入 parquet（W2 实测结论）
 - 市场归类（layout.market_of）：sh（50/51/52/56/58/60/68 前缀）、sz（00/15/16/18/30）、
-  bj（43/83/87/88/92）、hk 预留、other 兜底——与 app._classify_code 同域
+  bj（43/83/87/88/92）、hk 并作 daily 的 market 分区、other 兜底——与 app._classify_code 同域
 
 ## 3. 不变量（W2 验收通过）
 
@@ -98,8 +127,7 @@ duckdb 保持单文件（不拆多库：视图/宏/元数据原子性与备份�
 | 视图 | 定义 |
 |---|---|
 | v_daily | `read_parquet(facts/daily/*/*/date=*.parquet, hive_partitioning=true)`（附 year/market 列）；空仓期为类型正确的空视图 |
-| v_adjust | 全部快照按 (code,date) 取 snapshot 最新（去重） |
-| v_daily_fq | `v_daily ASOF LEFT JOIN v_adjust`（code 相等、date ≥ 因子日取最近）→ adj_factor + open_fq/high_fq/low_fq/close_fq；无因子行 fq 列为 NULL（原价） |
+| v_daily_fq | `= v_daily`（复权列 adj_factor/open_fq/high_fq/low_fq/close_fq 沉淀时物化，查询零计算；事件未就绪为 NULL 原价） |
 | v_codes | codes 表（沉淀任务每日全量刷新，"当前状态"非事实） |
 
 ### 指标宏（表宏，窗口按 code 分区、date 排序；窗口不满 n 为 NULL——对齐 pandas rolling 语义）

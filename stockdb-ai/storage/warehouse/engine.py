@@ -9,7 +9,8 @@ SQL 面（读写全开 + 三护栏，用户拍板"最大权限"）：
   3. 行数上限/超时：SELECT 超 cap 截断（truncated 标记由信封承载）；
      超时经 watchdog 线程 interrupt()（尽力而为，见 docstring 已知限制）
 
-视图：v_daily（日K 全分区）/ v_adjust（最新快照去重）/ v_daily_fq（ASOF 复权拼接）/
+视图：v_daily（日K 全分区，含物化复权列 adj_factor/open_fq/high_fq/low_fq/close_fq）/
+v_daily_fq（= v_daily，复权列沉淀时一次计算，查询零 JOIN 零计算）/
 v_codes（代码表）。指标 = 表宏（PARTITION BY code 保证时序窗口正确性；
 ta_ma/ta_rsi/ta_macd），口径见 docs/design/warehouse.md。
 """
@@ -32,7 +33,6 @@ class GuardrailError(ValueError):
 
 
 _DAILY_GLOB = "daily/*/*/date=*.parquet"
-_ADJUST_GLOB = "adjust/snapshot=*.parquet"
 
 _DAILY_EMPTY_COLUMNS = [
     ("code", "TEXT"), ("date", "DATE"), ("name", "TEXT"), ("is_st", "BOOLEAN"),
@@ -42,6 +42,8 @@ _DAILY_EMPTY_COLUMNS = [
     ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
     ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
     ("total_mv", "DOUBLE"), ("float_mv", "DOUBLE"),
+    ("adj_factor", "DOUBLE"), ("open_fq", "DOUBLE"), ("high_fq", "DOUBLE"),
+    ("low_fq", "DOUBLE"), ("close_fq", "DOUBLE"),
 ]
 
 
@@ -65,9 +67,7 @@ class WarehouseEngine:
         con = self._con
         facts = layout.facts_dir(self.root)
         daily_glob = (facts / _DAILY_GLOB).as_posix()
-        adjust_glob = (facts / _ADJUST_GLOB).as_posix()
         has_daily = bool(list((facts / "daily").rglob("date=*.parquet"))) if (facts / "daily").is_dir() else False
-        has_adjust = bool(list((facts / "adjust").glob("snapshot=*.parquet"))) if (facts / "adjust").is_dir() else False
 
         # 空仓期给类型正确的空视图（沉淀后 refresh 换成 parquet 视图）
         if has_daily:
@@ -80,23 +80,10 @@ class WarehouseEngine:
             cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _DAILY_EMPTY_COLUMNS)
             con.execute(f"CREATE OR REPLACE VIEW v_daily AS SELECT {cols} WHERE FALSE")
 
-        if has_adjust:
-            con.execute(
-                f"CREATE OR REPLACE VIEW v_adjust AS "
-                f"SELECT code, date, factor FROM ("
-                f"  SELECT *, row_number() OVER (PARTITION BY code, date ORDER BY snapshot DESC) rn"
-                f"  FROM read_parquet('{adjust_glob}')) WHERE rn = 1"
-            )
-        else:
-            con.execute("CREATE OR REPLACE VIEW v_adjust AS "
-                        "SELECT NULL::VARCHAR code, NULL::DATE date, NULL::DOUBLE factor WHERE FALSE")
-
+        # 0.10.10 重构：v_daily_fq 直接读物化列（沉淀时一次计算，查询零 JOIN 零计算）
         con.execute(
             "CREATE OR REPLACE VIEW v_daily_fq AS "
-            "SELECT d.*, a.factor AS adj_factor, "
-            "       d.open * a.factor AS open_fq, d.high * a.factor AS high_fq, "
-            "       d.low * a.factor AS low_fq, d.close * a.factor AS close_fq "
-            "FROM v_daily d ASOF LEFT JOIN v_adjust a ON d.code = a.code AND d.date >= a.date"
+            "SELECT * FROM v_daily"
         )
         con.execute("CREATE TABLE IF NOT EXISTS codes (code TEXT PRIMARY KEY, name TEXT)")
         con.execute("CREATE OR REPLACE VIEW v_codes AS SELECT * FROM codes")
@@ -207,7 +194,7 @@ class WarehouseEngine:
         stmt = statements[0]
         stmt_sql = stmt.query
         if "facts/" in stmt_sql.lower().replace("\\", "/"):
-            raise GuardrailError("facts/ 为不可变事实区：只可经视图读取（v_daily/v_adjust），写入仅经沉淀任务")
+            raise GuardrailError("facts/ 为不可变事实区：只可经视图读取（v_daily/v_daily_fq），写入仅经沉淀任务")
 
         timeout = max(1, int(config.WAREHOUSE_QUERY_TIMEOUT))
         timer = threading.Timer(timeout, self._con.interrupt)
@@ -247,7 +234,6 @@ class WarehouseEngine:
             "sedimented_dates": len(dates),
             "first_date": dates[0] if dates else None,
             "latest_date": dates[-1] if dates else None,
-            "adjust_snapshot": catalog.get_meta(self.root, "adjust:snapshot"),
             "codes": self._count("codes"),
             "duckdb_version": self._duckdb.__version__,
         }

@@ -4,6 +4,22 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.10] — 2026-08-23（粒度阶梯定稿 + 复权沉淀时物化，取代 0.10.9 矩阵）
+
+- **七级粒度阶梯（用户拍板，取代 0.10.9 矩阵）**：tick→minute→hour→daily→week→
+  month→year，每级独立 dataset + watermark。**只有 tick 按 code 分层**（流式写入），
+  其余全部时间分层，二级目录统一 `year=YYYY/market=xx` 切入（与 daily 同构）；
+  minute 家族（1m/5m/15m/30m）以 period 目录段区分，hour=60m；hk 并入 daily 的
+  market=hk 分区。lhb/fundamental 等事件/快照类暂不占位。
+- **复权重构（用户拍板：聚合层面一次计算、多次复用）**：废弃独立 adjust dataset 与
+  查询时 ASOF JOIN——沉淀任务经 adjust_provider 注入因子事件 → factor_map 缓存 →
+  sink 物化 adj_factor+open_fq/high_fq/low_fq/close_fq 进 daily 分区；v_daily_fq =
+  v_daily 直读物化列（零 JOIN 零计算）。事件源是内存输入不占 facts；week/month/year
+  聚合物化时同带复权列。
+- **真实链路验证**：引擎快照 5179 行沉淀 + 真实因子物化（600000 cum=13.35 →
+  close_fq=120.82）对账全绿；旧 schema 分区（0.10.9 无物化列）已删除重沉淀。
+- 217 测试全绿（新增物化列落盘/NULL 语义/粒度阶梯路径断言）。
+
 ## [0.10.9] — 2026-08-23（facts/<dataset> 分区策略矩阵定稿）
 
 - **分区策略矩阵（docs/design/warehouse.md §2.2）**：分区维度由**访问形态**决定——

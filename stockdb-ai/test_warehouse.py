@@ -108,19 +108,31 @@ class WarehouseLayoutTest(unittest.TestCase):
             "facts/daily/year=2026/market=sh/date=20260822.parquet",
         )
 
-    def test_minute_and_lhb_partition_paths(self):
-        """0.10.8 dataset 矩阵：分钟K 按码分区（单码时序优先）；龙虎榜单层日期分区。"""
+    def test_granularity_ladder_partition_paths(self):
+        """0.10.10 粒度阶梯：时间序列统一 year/market 二级切入；tick 唯一按码分层。"""
         root = pathlib.Path("/tmp/wh")
-        m = layout.minute_partition(root, "600000", "20260822")
+        m = layout.minute_partition(root, "5m", "20260822", "sh")
         self.assertEqual(
             m.relative_to(root).as_posix(),
-            "facts/minute/code=600000/date=20260822.parquet",
+            "facts/minute/period=5m/year=2026/market=sh/date=20260822.parquet",
         )
-        l = layout.lhb_partition(root, "20260822")
+        h = layout.hour_partition(root, "20260822", "sz")
         self.assertEqual(
-            l.relative_to(root).as_posix(),
-            "facts/lhb/date=20260822.parquet",
+            h.relative_to(root).as_posix(),
+            "facts/hour/year=2026/market=sz/date=20260822.parquet",
         )
+        w = layout.week_partition(root, "20260822", "sh")
+        self.assertEqual(
+            w.relative_to(root).as_posix(),
+            "facts/week/year=2026/market=sh/date=20260822.parquet",
+        )
+        t = layout.tick_partition(root, "600000", "20260822", part="1030")
+        self.assertEqual(
+            t.relative_to(root).as_posix(),
+            "facts/tick/code=600000/date=20260822/part=1030/data.parquet",
+        )
+        with self.assertRaises(ValueError):
+            layout.minute_partition(root, "45m", "20260822", "sh")  # 非法周期
 
 
 class WarehouseSinkTest(unittest.TestCase):
@@ -197,14 +209,35 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertFalse(catalog.set_watermark(self.root, "daily", "20260822"))
         self.assertEqual(catalog.get_watermark(self.root, "daily"), "20260822")
 
-    def test_adjust_snapshot_versioned(self):
-        rows = [{"code": "600000", "factor": 1.0}, {"code": "000001", "factor": 2.5}]
-        r1 = sink.write_adjust_snapshot(self.root, "20260822", rows)
-        r2 = sink.write_adjust_snapshot(self.root, "20260822", rows)
+    def test_daily_factor_materialization(self):
+        """0.10.10：复权物化——factor_map 沉淀时一次计算落盘（adj_factor + fq 列），
+        无因子行 fq 列 NULL；幂等重写不改变已物化值。"""
+        rows = _sample_rows()[:1]  # 600000
+        r1 = sink.write_daily(self.root, "20260822", rows, factor_map={"600000": 2.0})
         self.assertEqual(r1["status"], "written")
-        self.assertEqual(r2["status"], "skipped")  # 同日快照幂等
-        self.assertTrue(layout.adjust_snapshot_path(self.root, "20260822").exists())
-        self.assertEqual(catalog.get_meta(self.root, "adjust:snapshot"), "20260822")
+        con = duckdb.connect()
+        try:
+            p = layout.daily_partition(self.root, "20260822", "sh")
+            got = con.execute(
+                f"SELECT close, adj_factor, close_fq FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            self.assertAlmostEqual(got[0], 10.2)
+            self.assertAlmostEqual(got[1], 2.0)
+            self.assertAlmostEqual(got[2], 20.4)  # close × factor 物化
+        finally:
+            con.close()
+        # 无 factor_map：fq 列 NULL（事件未就绪 → 原价）
+        sink.write_daily(self.root, "20260825", rows[:1], factor_map=None)
+        con = duckdb.connect()
+        try:
+            p2 = layout.daily_partition(self.root, "20260825", "sh")
+            got2 = con.execute(
+                f"SELECT adj_factor, close_fq FROM read_parquet('{p2.as_posix()}')"
+            ).fetchone()
+            self.assertIsNone(got2[0])
+            self.assertIsNone(got2[1])
+        finally:
+            con.close()
 
     def test_write_codes(self):
         r = sink.write_codes(self.root, [{"code": "600000", "name": "浦发银行"},
@@ -238,14 +271,14 @@ class WarehouseEngineTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self._tmp.name)
         # 每日一行 × 10 个交易日（生产语义：一个分区 = 一日全市场行）
+        # 0.10.10 物化语义：因子 2.0 经 factor_map 在沉淀时一次计算物化进分区
         for i, c in enumerate(self.CLOSES):
             sink.write_daily(self.root, f"202608{11 + i:02d}", [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": c - 0.1, "high": c + 0.5, "low": c - 0.5, "close": float(c),
                 "pre_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
                 "volume": 1000.0 + i, "amount": 10000.0 + i,
-            }])
-        sink.write_adjust_snapshot(self.root, "20260811", [{"code": "600000", "factor": 2.0}])
+            }], factor_map={"600000": 2.0})
         sink.write_codes(self.root, [{"code": "600000", "name": "样本"}])
         self.engine = WarehouseEngine(self.root)
 
@@ -257,12 +290,31 @@ class WarehouseEngineTest(unittest.TestCase):
         r = self.engine.run_sql("SELECT count(*), min(close), max(close) FROM v_daily")
         self.assertEqual(r["rows"][0][0], 10)
         self.assertAlmostEqual(r["rows"][0][1], 10.0)
-        # ASOF 复权拼接：因子 2.0 从 08-11 起生效 → close_fq = close * 2
+        # 0.10.10 物化语义：close_fq 是沉淀时算好落盘的列，查询零计算
         r2 = self.engine.run_sql(
             "SELECT close, close_fq, adj_factor FROM v_daily_fq WHERE date = '2026-08-15'")
         close = r2["rows"][0][0]
         self.assertAlmostEqual(r2["rows"][0][1], close * 2.0)
         self.assertAlmostEqual(r2["rows"][0][2], 2.0)
+
+    def test_daily_fq_null_when_factor_absent(self):
+        """物化缺失语义：无 factor_map 的行复权列 NULL（原价），查询仍可用。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            sink.write_daily(root, "20260822", [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2,
+                "pre_close": 10.0, "volume": 1.0, "amount": 1.0,
+            }])
+            eng = WarehouseEngine(root)
+            try:
+                r = eng.run_sql(
+                    "SELECT close, close_fq, adj_factor FROM v_daily_fq "
+                    "WHERE date = '2026-08-22'")
+                self.assertEqual(r["rows"][0][1], None)  # 原价列空
+                self.assertEqual(r["rows"][0][2], None)
+            finally:
+                eng.close()
 
     def test_ta_ma_window_semantics(self):
         """MA5 第 5 日起有值，且等于近 5 收盘均值（窗口 PARTITION/ORDER 正确性）。"""
@@ -344,7 +396,6 @@ class WarehouseEngineTest(unittest.TestCase):
         s = self.engine.status()
         self.assertEqual(s["watermark_daily"], "20260820")
         self.assertEqual(s["sedimented_dates"], 10)
-        self.assertEqual(s["adjust_snapshot"], "20260811")
         self.assertEqual(s["codes"], 1)
         objs = self.engine.list_objects()
         self.assertIn("v_daily", objs["tables"])

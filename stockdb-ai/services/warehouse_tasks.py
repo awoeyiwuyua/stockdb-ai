@@ -2,9 +2,12 @@
 
 用例：warehouse_run（每日沉淀，默认 16:40 触发）/ warehouse_scheduler_loop（调度线程）。
 流程：就绪门（data_latest >= today）→ 全市场快照（TRADED 行 = 当日日K）→
-sink 写分区 + codes 刷新 → reconcile 对账（三板斧）→ records 日检 + 告警。
-复权快照：周一（或首次）触发，依赖注入的 adjust_provider（引擎键空间无批量端点，
-SDK 通道接入前为 None → 跳过，ROADMAP 延后项登记）。
+sink 写分区（factor_map 物化复权列）+ codes 刷新 → reconcile 对账（三板斧）→
+records 日检 + 告警。
+复权（0.10.10）：周一/首刷经 adjust_provider 注入因子事件 → _build_factor_map 展开为
+{code: cum} 缓存，沉淀时物化 adj_factor+fq 列（一次计算多次复用，查询零 JOIN）；
+事件不落 facts（内存输入，审计留档延后）。SDK 通道接入前 adjust_provider=None →
+物化列 NULL 原价，不阻塞沉淀。
 
 依赖纪律：不 import storage.warehouse（C3，层边界测试强制）——sink/reconcile/
 availability 经注入点由 app.py（组合根）绑定；引擎快照/交易日判定同打板注入模式。
@@ -30,9 +33,9 @@ warehouse_root = None   # () -> Path（storage.warehouse.layout.root_dir）
 availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
 backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：warehouse.duckdb 日级备份）
-adjust_provider = None  # () -> list[dict]（复权因子全量行；未接 SDK 通道前为 None → 跳过快照）
-
-# 周度复权快照：周一沉淀日顺带全量刷新（快照小、全量幂等）
+adjust_provider = None  # () -> list[dict]（复权因子事件序列：{code,date,div,give,trans,mult,cum}；
+                        # 未接 SDK 通道前为 None → 物化列 NULL 原价，延后项）
+# 周度复权事件刷新：周一沉淀日顺带全量（事件小、全量幂等）
 _ADJUST_WEEKDAYS = {0}
 
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
@@ -41,9 +44,31 @@ _RETRY_INTERVAL = 600  # 未就绪/失败重试间隔（10 分钟）
 _BACKFILL_FLOOR = "20000101"  # 回填下界（引擎日K实测起点 2000 年）
 _RETRY_UNTIL = "20:00"  # 超过此时刻放弃当日沉淀（告警收口）
 
+# 0.10.10：每日累计因子缓存 {code: cum}（周度/首刷刷新；沉淀物化复用，一次计算）
+_factor_map_cache: dict[str, float] = {}
+
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _build_factor_map(events: list[dict]) -> dict[str, float]:
+    """复权事件序列 → {code: 截至当日最新累计因子 cum}（0.10.10 物化输入）。
+
+    引擎事件按码返回（div/give/trans/mult/cum 每次分红/送转一条，cum 为累计因子）；
+    事件未带 date 时以注入的刷新日为准。缺码/非有限值 → 不进入 map（物化列 NULL 原价）。
+    """
+    out: dict[str, float] = {}
+    for ev in events or []:
+        code = str(ev.get("code") or "").strip()
+        cum = ev.get("cum")
+        try:
+            cum = float(cum)
+        except (TypeError, ValueError):
+            continue
+        if code and cum is not None and cum == cum and abs(cum) != float("inf"):
+            out[code] = cum
+    return out
 
 
 def _snapshot_points(date: str) -> list[dict]:
@@ -115,6 +140,18 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     break  # 只补 watermark 之后的缺口，不重复沉淀
                 targets.append(target)
                 target = _prev_date(target)
+        # 周度/首刷复权刷新（周一 or 缓存空）：事件经 adjust_provider 注入，
+        # 展开为 factor_map（0.10.10：内存输入，不占 facts；审计留档延后）
+        global _factor_map_cache
+        try:
+            if (datetime.now().weekday() in _ADJUST_WEEKDAYS or not _factor_map_cache):
+                adjust_rows = _adjust_rows(latest)
+                if adjust_rows:
+                    _factor_map_cache = _build_factor_map(adjust_rows)
+        except Exception as exc:  # noqa: BLE001 - 复权刷新失败不阻塞日K沉淀
+            log(f"⚠️ 仓库复权刷新失败（不阻塞日K）：{exc}")
+
+        # 每日沉淀：factor_map 物化复权列（一次计算多次复用；事件未就绪 → 原价 NULL）
         for t in sorted(targets):  # 旧 → 新（缺口感知语义下 targets 已升序，幂等保序）
             points = [p for p in _snapshot_points(t)
                       if isinstance(p, dict) and p.get("status") == "TRADED"]
@@ -126,7 +163,7 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     pass
                 results.append({"date": t, "status": "empty"})
                 continue
-            w = sink.write_daily(root, t, points)
+            w = sink.write_daily(root, t, points, factor_map=_factor_map_cache)
             sink.write_codes(root, [{"code": p.get("code"), "name": p.get("name")}
                                     for p in points])
             rec = reconcile_daily(root, t, points,
@@ -141,15 +178,6 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                              "ok": rec["ok"], "rows": w.get("rows", 0),
                              "traded": rec["traded"], "issues": rec["issues"][:5],
                              "at": _now_iso()})
-
-        # 周度复权快照（周一 or 从未刷新）：复权因子表小，全量幂等
-        try:
-            if datetime.now().weekday() in _ADJUST_WEEKDAYS or not sink.catalog.get_meta(root, "adjust:snapshot"):
-                adjust_rows = _adjust_rows(latest)
-                if adjust_rows:
-                    sink.write_adjust_snapshot(root, latest, adjust_rows)
-        except Exception as exc:  # noqa: BLE001 - 复权快照失败不阻塞日K沉淀
-            log(f"⚠️ 仓库复权快照失败（不阻塞日K）：{exc}")
 
         if refresh_views is not None:
             try:
@@ -179,7 +207,7 @@ def _prev_date(d: str) -> str:
 
 
 def _adjust_rows(latest: str) -> list[dict]:
-    """复权因子全量行（经注入的 adjust_provider；None → 首版跳过快照，见模块头注）。"""
+    """复权因子事件序列（经注入的 adjust_provider；None → 未接通道，物化列 NULL 原价）。"""
     if adjust_provider is None:
         return []
     return adjust_provider() or []
@@ -217,7 +245,7 @@ def warehouse_status() -> dict:
     if available and root is not None and sink is not None:
         try:
             out["watermark_daily"] = sink.catalog.get_watermark(root, "daily")
-            out["adjust_snapshot"] = sink.catalog.get_meta(root, "adjust:snapshot")
+            out["factor_map_size"] = len(_factor_map_cache)  # 0.10.10：复权物化缓存规模
         except Exception as exc:  # noqa: BLE001 - 状态查询不抛
             out["catalog_error"] = str(exc)
     return out

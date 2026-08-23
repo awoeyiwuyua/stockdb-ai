@@ -1,22 +1,31 @@
-"""storage.warehouse.layout — 分区路径与市场归类（0.10.0 W2，D12；0.10.8 dataset 矩阵）。
+"""storage.warehouse.layout — 分区路径与市场归类（0.10.0 W2，D12；0.10.10 粒度阶梯定稿）。
 
-磁盘布局：
-  <root>/facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet   日K（按日一文件，内按 code 排序）
-  <root>/facts/adjust/snapshot=YYYYMMDD.parquet                  复权因子（低频全量快照，版本化追加）
-  <root>/facts/minute/code=xxxxxx/date=YYYYMMDD.parquet          分钟K（单码时序优先，见 docs §2.2）
-  <root>/facts/lhb/date=YYYYMMDD.parquet                         龙虎榜（横截面事件）
+磁盘布局（七级粒度阶梯，docs/design/warehouse.md §2.2）：
+  <root>/facts/tick/code=xxxxxx/date=YYYYMMDD/part=HHMM.parquet  逐笔（唯一按码：流式写入）
+  <root>/facts/minute/period=5m/year=YYYY/market=xx/date=YYYYMMDD.parquet  分钟K（时间分层）
+  <root>/facts/hour/year=YYYY/market=xx/date=YYYYMMDD.parquet    小时K（60m，时间分层）
+  <root>/facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet   日K（时间分层，现役）
+  <root>/facts/week/year=YYYY/market=xx/date=YYYYMMDD.parquet    周K（daily 聚合物化）
+  <root>/facts/month/year=YYYY/market=xx/date=YYYYMMDD.parquet   月K（daily 聚合物化）
+  <root>/facts/year/year=YYYY/market=xx/date=YYYYMMDD.parquet    年K（daily 聚合物化）
   <root>/warehouse.duckdb                                        视图/宏 + research schema + meta 表
   <root>/backups/                                                warehouse.duckdb 备份
 
-分区策略矩阵（docs/design/warehouse.md §2.2）：分区维度由**访问形态**决定——
-横截面优先 → 按日（daily/lhb）；单码时序优先 → 按码（minute/tick）；
-全量快照 → 版本化（adjust）。每个 dataset 独立 watermark 键。
+分层规则（0.10.10 用户拍板）：
+  - 粒度阶梯：tick → minute → hour → daily → week → month → year，每级独立 dataset + watermark
+  - 只有 tick 按 code 分层（流式写入，盘中逐码追加，避免按日写放大）；
+    其余全部时间分层，且二级目录统一从 year=YYYY/market=xx 切入（与 daily 完全同构）——
+    minute 家族（1m/5m/15m/30m）以 period 目录段区分，hour=60m
+  - week/month/year 由 daily 本地级联聚合物化（沉淀时一次计算多次复用），同骨架同列
+  - 复权：沉淀时经 factor_map 物化 adj_factor+fq 列进各粒度分区（查询零计算）；
+    事件源是内存输入，不占 facts 目录
+  - lhb/fundamental 等事件/快照类暂不占位（延后，接入时再定）
 
 文件粒度选「年/市场/日」而非「每标的一文件」：全市场日K约 5000 行/日，
 按日成文件既保持只增不改的追加语义，又避免每年数千小文件拖慢全表扫描；
 单标的时序查询靠文件内 code 排序 + Parquet 行组统计裁剪。
 
-市场归类与 app._classify_code 同域（交易所维度 sh/sz/bj；hk 留作将来港股数据集）。
+市场归类与 app._classify_code 同域（交易所维度 sh/sz/bj；hk 并作 daily 的市场分区）。
 """
 from __future__ import annotations
 
@@ -31,6 +40,9 @@ _DATE_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 _SH_PREFIXES = ("50", "51", "52", "56", "58", "60", "68")  # 沪主板/科创板/沪 ETF·LOF
 _SZ_PREFIXES = ("00", "15", "16", "18", "30")  # 深主板/创业板/深 ETF·LOF·REITs
 _BJ_PREFIXES = ("43", "83", "87", "88", "92")  # 北交所
+
+# 分钟K 周期（period 目录段；hour=60m 独立 dataset）
+MINUTE_PERIODS = ("1m", "5m", "15m", "30m")
 
 
 def root_dir() -> Path:
@@ -80,29 +92,58 @@ def backups_dir(root: Path) -> Path:
     return Path(root) / "backups"
 
 
+def _ts_dir(root: Path, dataset: str, date, market: str, period: str | None = None) -> Path:
+    """时间序列统一骨架：facts/<dataset>[/period=xx]/year=YYYY/market=xx/date=YYYYMMDD.parquet
+    （0.10.10：除 tick 外全部时间分层，二级目录统一 year/market 切入）。"""
+    d = normalize_date(date)
+    base = facts_dir(root) / dataset
+    if period is not None:
+        base = base / f"period={period}"
+    return base / f"year={d[:4]}" / f"market={market}" / f"date={d}.parquet"
+
+
 def daily_partition(root: Path, date, market: str) -> Path:
-    """日K分区文件路径：facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet（按市场分目录）。"""
+    """日K分区：facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet（时间分层，现役）。"""
+    return _ts_dir(root, "daily", date, market)
+
+
+def minute_partition(root: Path, period: str, date, market: str) -> Path:
+    """分钟K分区：facts/minute/period=5m/year=YYYY/market=xx/date=YYYYMMDD.parquet
+    （period 目录段区分 1m/5m/15m/30m；hive 解析出 period 列）。"""
+    period = str(period).lower()
+    if period not in MINUTE_PERIODS:
+        raise ValueError(f"invalid minute period: {period!r}（须在 {MINUTE_PERIODS}）")
+    return _ts_dir(root, "minute", date, market, period=period)
+
+
+def hour_partition(root: Path, date, market: str) -> Path:
+    """小时K分区：facts/hour/year=YYYY/market=xx/date=YYYYMMDD.parquet（60m，时间分层）。"""
+    return _ts_dir(root, "hour", date, market)
+
+
+def week_partition(root: Path, date, market: str) -> Path:
+    """周K分区：facts/week/year=YYYY/market=xx/date=YYYYMMDD.parquet（date=周结束日，daily 聚合）。"""
+    return _ts_dir(root, "week", date, market)
+
+
+def month_partition(root: Path, date, market: str) -> Path:
+    """月K分区：facts/month/year=YYYY/market=xx/date=YYYYMMDD.parquet（date=月末，daily 聚合）。"""
+    return _ts_dir(root, "month", date, market)
+
+
+def year_partition(root: Path, date, market: str) -> Path:
+    """年K分区：facts/year/year=YYYY/market=xx/date=YYYYMMDD.parquet（date=年末，daily 聚合）。"""
+    return _ts_dir(root, "year", date, market)
+
+
+def tick_partition(root: Path, code, date, part: str | None = None) -> Path:
+    """逐笔分区：facts/tick/code=xxxxxx/date=YYYYMMDD[/part=HHMM]/data.parquet
+    （唯一按码分层：流式写入、日内多窗口；part 为半小时窗口，接入时定粒度）。"""
     d = normalize_date(date)
-    code_dir = facts_dir(root) / "daily" / f"year={d[:4]}" / f"market={market}"
-    return code_dir / f"date={d}.parquet"
-
-
-def adjust_snapshot_path(root: Path, date) -> Path:
-    """复权因子快照路径：facts/adjust/snapshot=YYYYMMDD.parquet（全量刷新、版本化追加）。"""
-    d = normalize_date(date)
-    return facts_dir(root) / "adjust" / f"snapshot={d}.parquet"
-
-
-def minute_partition(root: Path, code, date) -> Path:
-    """分钟K分区路径：facts/minute/code=xxxxxx/date=YYYYMMDD.parquet（单码时序优先，0.10.8）。"""
-    d = normalize_date(date)
-    return facts_dir(root) / "minute" / f"code={code}" / f"date={d}.parquet"
-
-
-def lhb_partition(root: Path, date) -> Path:
-    """龙虎榜分区路径：facts/lhb/date=YYYYMMDD.parquet（横截面事件，单层日期分区，0.10.8）。"""
-    d = normalize_date(date)
-    return facts_dir(root) / "lhb" / f"date={d}.parquet"
+    base = facts_dir(root) / "tick" / f"code={code}" / f"date={d}"
+    if part is not None:
+        base = base / f"part={part}"
+    return base / "data.parquet"
 
 
 def list_daily_dates(root: Path) -> list[str]:

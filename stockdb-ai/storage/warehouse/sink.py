@@ -17,6 +17,8 @@ from pathlib import Path
 from . import catalog, layout
 
 # 日K列定义（引擎日K字段原样：date 转 DATE 类型便于 SQL 区间/年份运算）
+# 0.10.10：末尾追加物化复权伴随列（adj_factor + 4 fq 价格）——沉淀时一次计算、
+# 查询零计算（取代查询时 ASOF JOIN）；事件未就绪时 5 列为 NULL（原价）
 _DAILY_COLUMNS = (
     # 引擎日K原生字段（21 列，0.10.7 起原样镜像：不改名/不裁剪——此前 11 列且
     # pre_close 被改名 prev_close，直连通道全量被护栏误拒的根因）
@@ -27,16 +29,11 @@ _DAILY_COLUMNS = (
     ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
     ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
     ("total_mv", "DOUBLE"), ("float_mv", "DOUBLE"),
+    # 物化复权伴随列（0.10.10）：adj_factor=当日累计因子；*_fq = 原价 × factor
+    ("adj_factor", "DOUBLE"), ("open_fq", "DOUBLE"), ("high_fq", "DOUBLE"),
+    ("low_fq", "DOUBLE"), ("close_fq", "DOUBLE"),
 )
 _NUMERIC_FIELDS = ("open", "high", "low", "close", "prev_close", "volume", "amount")
-
-_ADJUST_COLUMNS = (
-    ("code", "TEXT"),
-    ("date", "DATE"),
-    ("factor", "DOUBLE"),
-    # 快照版本列（真实列而非 hive 解析：DuckDB 不解析文件名段的 key=value）
-    ("snapshot", "DATE"),
-)
 
 
 def _finite(value) -> bool:
@@ -96,8 +93,13 @@ def _write_parquet_atomic(rows: list[tuple], columns, target: Path) -> None:
             tmp.unlink()
 
 
-def write_daily(root: Path, date, rows: list[dict]) -> dict:
+def write_daily(root: Path, date, rows: list[dict],
+                factor_map: dict[str, float] | None = None) -> dict:
     """沉淀一个交易日的全市场日K（按市场分分区文件，幂等）。
+
+    factor_map（0.10.10）：{code: 当日累计因子}——沉淀时一次计算物化复权列
+    （adj_factor + open_fq/high_fq/low_fq/close_fq = 原价 × factor）；
+    None/缺码 → 复权列 NULL（原价，事件未就绪）。查询层零计算。
 
     返回 {status: written|skipped|empty, markets, rows, dropped_nonfinite, watermark}。
     """
@@ -107,6 +109,21 @@ def write_daily(root: Path, date, rows: list[dict]) -> dict:
     for r in rows:
         market = layout.market_of(r.get("code", ""))
         row = {"date": date, **r}  # 快照行不带日期，由任务层日期注入
+        code = str(r.get("code") or "")
+        factor = (factor_map or {}).get(code)
+        if factor is not None:
+            try:
+                factor = float(factor)
+            except (TypeError, ValueError):
+                factor = None
+            if factor is not None and not math.isfinite(factor):
+                factor = None
+        if factor is not None:
+            row.update(adj_factor=factor,
+                       open_fq=row.get("open") * factor,
+                       high_fq=row.get("high") * factor,
+                       low_fq=row.get("low") * factor,
+                       close_fq=row.get("close") * factor)
         normalized, d = _normalize_rows([row], _DAILY_COLUMNS)
         dropped += d  # 0.10.7 起为消毒单元格计数（不再丢行）
         if normalized:
@@ -136,25 +153,6 @@ def write_daily(root: Path, date, rows: list[dict]) -> dict:
         "dropped_nonfinite": dropped,
         "watermark_advanced": advanced,
     }
-
-
-def write_adjust_snapshot(root: Path, date, rows: list[dict]) -> dict:
-    """复权因子全量快照（版本化追加：snapshot=YYYYMMDD.parquet，幂等）。
-
-    快照语义：每次刷新写入当日版本文件，视图读 catalog 指针指向的最新快照
-    （facts 仍只增不改；旧快照留档可审计）。
-    """
-    date = layout.normalize_date(date)
-    target = layout.adjust_snapshot_path(root, date)
-    rows = [{"date": date, "snapshot": date, **r} for r in rows]
-    normalized, dropped = _normalize_rows(rows, _ADJUST_COLUMNS)
-    if not normalized:
-        return {"status": "empty", "rows": 0, "dropped_nonfinite": dropped}
-    if target.exists():
-        return {"status": "skipped", "rows": len(normalized), "dropped_nonfinite": dropped}
-    _write_parquet_atomic(normalized, _ADJUST_COLUMNS, target)
-    catalog.set_meta(root, "adjust:snapshot", date)
-    return {"status": "written", "rows": len(normalized), "dropped_nonfinite": dropped}
 
 
 def write_codes(root: Path, rows: list[dict]) -> dict:
