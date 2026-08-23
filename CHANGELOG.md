@@ -4,6 +4,17 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.9] — 2026-08-23（facts/<dataset> 分区策略矩阵定稿）
+
+- **分区策略矩阵（docs/design/warehouse.md §2.2）**：分区维度由**访问形态**决定——
+  横截面优先按日（daily/lhb），单码时序优先按码（minute/tick），全量快照版本化
+  （adjust）。7 个 dataset 全量登记：daily（现役）/adjust（现役）/minute/lhb/
+  hk_daily/fundamental/tick（延后，各自 watermark 键与写入通道）。
+- 分钟K 粒度归一：5m/15m/30m/60m 共享 minute dataset（period 列区分，引擎原生
+  8 列），不拆多 dataset；tick 是唯一允许日内多文件（part=HHMM 窗口）的 dataset。
+- layout.py 新增 minute_partition / lhb_partition（统一路径入口，sink/查询共用）；
+  布局测试补 dataset 矩阵路径断言。
+
 ## [0.10.8] — 2026-08-23（root 锁定 + warehouse.duckdb 日级备份 + 回填脚本修复）
 
 - **root 锁定（用户 2026-08-23 拍板）**：所有数据存放于 `<repo>/data`，仓库根 =

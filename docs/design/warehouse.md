@@ -25,6 +25,8 @@ DATA_DIR/                                                 本机开发 = 仓库�
 ├── warehouse/                                            ← 列式仓库（本设计）
 │   ├── facts/daily/year=YYYY/market=sh/date=YYYYMMDD.parquet   日K：按日一文件，内按 code 排序
 │   ├── facts/adjust/snapshot=YYYYMMDD.parquet                  复权因子：低频全量快照（版本化追加）
+│   ├── facts/minute/code=xxxxxx/date=YYYYMMDD.parquet          分钟K：每码每日一文件（见 §2.2）
+│   ├── facts/lhb/date=YYYYMMDD.parquet                         龙虎榜：按日事件文件（见 §2.2）
 │   ├── warehouse.duckdb                                        视图/宏 + 用户表 + meta（C4 单点）
 │   └── backups/warehouse-<stamp>-<uuid>.db                     warehouse.duckdb 在线备份（0.10.8，C5）
 ├── research/                                             研究成果 SQLite（research.db + backups/；旧根路径粘性兼容）
@@ -35,8 +37,37 @@ DATA_DIR/                                                 本机开发 = 仓库�
 **分层原则（0.10.8 确认）**：按「生命周期与角色」分目录，而非按技术格式——
 facts/ = 不可变事实（Parquet，只增不改），warehouse.duckdb = 可变状态+派生（单文件，
 内部 schema 分层：main 视图/宏 + research 用户表 + meta），backups/ = 恢复副本。
-新数据集（分钟K/基本面/龙虎榜/hk）直接加 facts/<dataset>/ 子目录；duckdb 保持单文件
-（不拆多库：视图/宏/元数据原子性与备份简单优先，与 mydb 单文件多表同原则）。
+duckdb 保持单文件（不拆多库：视图/宏/元数据原子性与备份简单优先，与 mydb 单文件多表同原则）。
+
+### 2.2 facts/<dataset> 分区策略矩阵（0.10.8 全量设计）
+
+**核心规则：分区维度由数据的「访问形态」决定，不是由技术格式决定**——
+横截面优先（全市场单日查询是主场景）→ 按日分区；单码时序优先（单标的连续查询
+是主场景）→ 按码分区。每个 dataset 独立声明分区策略、watermark 键、写入通道。
+
+| dataset | 访问形态 | 分区 | 文件粒度 | 行量级/日 | 更新语义 | watermark 键 | 写入通道 |
+|---|---|---|---|---|---|---|---|
+| daily | 横截面优先 | `year=YYYY/market=xx/date=YYYYMMDD` | 全市场 5000 行/文件 | 5K | 日追加，只增不改 | `watermark:daily` | 快照通道（现役） |
+| adjust | 全量快照 | `snapshot=YYYYMMDD` | 全市场 1 文件 | 5K（低频） | 版本化追加，视图取最新 | `adjust:snapshot` | adjust_provider（延后） |
+| minute | **单码时序优先** | `code=xxxxxx/date=YYYYMMDD` | 单码单日 ~50-480 行/文件 | 5000×~780 | 日追加，只增不改 | `watermark:minute` | 分钟K 通道（引擎 HTTP 可拉，延后） |
+| lhb | 横截面事件 | `date=YYYYMMDD` | 单日 1 文件（内按 code 排序） | ~百行 | 日追加，只增不改 | `watermark:lhb` | 待引擎键空间（延后） |
+| hk_daily | 横截面优先 | `year=YYYY/market=hk/date=YYYYMMDD` | 全市场 1 文件 | ~2.5K | 日追加 | `watermark:hk_daily` | mydb 迁移（延后） |
+| fundamental | 单码快照 | `code=xxxxxx/date=YYYYMMDD` | 单码单日 1 文件 | 5K | 版本化追加 | `watermark:fundamental` | 待引擎键空间（延后） |
+| tick | **单码时序优先（流式）** | `code=xxxxxx/date=YYYYMMDD/part=HHMM` | 单码单日单窗口 1 文件 | 2400 万（全市场） | 流式追加，窗口内只增 | `watermark:tick` | 待接入（延后，见 ROADMAP） |
+
+**分钟K 粒度归一**：minute 内按 `period` 列区分 5m/15m/30m/60m（引擎原生字段
+`code/date(14位)/open/close/high/low/volume/amount`，实测 8 列），不做多 dataset
+拆分——同一访问形态（单码时序）共享同一分区策略，粒度只是列属性。
+
+**tick 的 part 窗口**：tick 量级 2400 万行/日，按日一文件过大且写放大（流式追加
+要反复重写文件）；`part=HHMM` 把窗口切到半小时级（沿 adjust 的「文件名段不生效、
+真实列承载」教训，part 以真实列写入）。tick 是**唯一**允许日内多文件的 dataset。
+
+**lhb 与 daily 同构**：横截面事件按日成文件（事件本身每日全市场可见），但量级
+小一个数量级，不做 year/market 嵌套——单层 `date=` 分区足够，避免过度分区。
+
+**空仓视图**：每个 dataset 独立 `v_<dataset>` 空视图（类型正确的空结果），
+沉淀后 refresh 换成 read_parquet 视图——与 v_daily 同模式（W3 已验证）。
 
 - 文件粒度「年/市场/日」而非「每标的一文件」：日K约 5000 行/日，按日成文件保持追加语义，
   又避免每年数千小文件；单标的时序查询靠文件内 code 排序 + 行组统计裁剪

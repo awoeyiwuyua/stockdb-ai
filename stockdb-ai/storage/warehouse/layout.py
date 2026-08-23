@@ -1,10 +1,16 @@
-"""storage.warehouse.layout — 分区路径与市场归类（0.10.0 W2，D12）。
+"""storage.warehouse.layout — 分区路径与市场归类（0.10.0 W2，D12；0.10.8 dataset 矩阵）。
 
 磁盘布局：
-  <root>/facts/daily/year=YYYY/market=sh/date=YYYYMMDD.parquet   日K（按日一文件，内按 code 排序）
+  <root>/facts/daily/year=YYYY/market=xx/date=YYYYMMDD.parquet   日K（按日一文件，内按 code 排序）
   <root>/facts/adjust/snapshot=YYYYMMDD.parquet                  复权因子（低频全量快照，版本化追加）
+  <root>/facts/minute/code=xxxxxx/date=YYYYMMDD.parquet          分钟K（单码时序优先，见 docs §2.2）
+  <root>/facts/lhb/date=YYYYMMDD.parquet                         龙虎榜（横截面事件）
   <root>/warehouse.duckdb                                        视图/宏 + research schema + meta 表
   <root>/backups/                                                warehouse.duckdb 备份
+
+分区策略矩阵（docs/design/warehouse.md §2.2）：分区维度由**访问形态**决定——
+横截面优先 → 按日（daily/lhb）；单码时序优先 → 按码（minute/tick）；
+全量快照 → 版本化（adjust）。每个 dataset 独立 watermark 键。
 
 文件粒度选「年/市场/日」而非「每标的一文件」：全市场日K约 5000 行/日，
 按日成文件既保持只增不改的追加语义，又避免每年数千小文件拖慢全表扫描；
@@ -85,6 +91,18 @@ def adjust_snapshot_path(root: Path, date) -> Path:
     """复权因子快照路径：facts/adjust/snapshot=YYYYMMDD.parquet（全量刷新、版本化追加）。"""
     d = normalize_date(date)
     return facts_dir(root) / "adjust" / f"snapshot={d}.parquet"
+
+
+def minute_partition(root: Path, code, date) -> Path:
+    """分钟K分区路径：facts/minute/code=xxxxxx/date=YYYYMMDD.parquet（单码时序优先，0.10.8）。"""
+    d = normalize_date(date)
+    return facts_dir(root) / "minute" / f"code={code}" / f"date={d}.parquet"
+
+
+def lhb_partition(root: Path, date) -> Path:
+    """龙虎榜分区路径：facts/lhb/date=YYYYMMDD.parquet（横截面事件，单层日期分区，0.10.8）。"""
+    d = normalize_date(date)
+    return facts_dir(root) / "lhb" / f"date={d}.parquet"
 
 
 def list_daily_dates(root: Path) -> list[str]:

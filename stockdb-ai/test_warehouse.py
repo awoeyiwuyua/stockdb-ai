@@ -108,6 +108,20 @@ class WarehouseLayoutTest(unittest.TestCase):
             "facts/daily/year=2026/market=sh/date=20260822.parquet",
         )
 
+    def test_minute_and_lhb_partition_paths(self):
+        """0.10.8 dataset 矩阵：分钟K 按码分区（单码时序优先）；龙虎榜单层日期分区。"""
+        root = pathlib.Path("/tmp/wh")
+        m = layout.minute_partition(root, "600000", "20260822")
+        self.assertEqual(
+            m.relative_to(root).as_posix(),
+            "facts/minute/code=600000/date=20260822.parquet",
+        )
+        l = layout.lhb_partition(root, "20260822")
+        self.assertEqual(
+            l.relative_to(root).as_posix(),
+            "facts/lhb/date=20260822.parquet",
+        )
+
 
 class WarehouseSinkTest(unittest.TestCase):
     """W2 验收：幂等 / 原子 / 独立可读 / NaN 护栏 / watermark 推进。"""

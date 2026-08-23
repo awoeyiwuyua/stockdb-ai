@@ -71,7 +71,8 @@
   C4 元数据唯一存 warehouse.duckdb meta；C5 warehouse.duckdb 纳入每日备份
   （0.10.8 落地：COPY FROM DATABASE 在线快照 + 保留 14 份，见 docs/design/warehouse.md §5.1）
 - **延后项登记（防无限挂起）**：仓库历史回填（用户 2026-08-22 延后，另行讨论）；
-  分钟K/基本面/龙虎榜数据集（dataset 维度已预留，按需逐个加 sink）；
+  分钟K/基本面/龙虎榜/hk日k/tick 数据集——**分区策略矩阵已定稿（0.10.9，
+  docs/design/warehouse.md §2.2，含各自 watermark 键与写入通道）**，按需逐个加 sink；
   hk日k 迁仓库（仓库稳定后，mydb 届时只剩自定义表）；M2 打板情绪衍生指标、
   M3 数据质量看护（仓库 watermark 就绪后对账可复用）继续延后
 - 1.0.0 = 数据契约冻结评审通过（架构总纲见 docs/architecture.md）。
