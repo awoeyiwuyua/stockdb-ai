@@ -2,9 +2,12 @@
 
 用例：warehouse_run（每日沉淀，默认 16:40 触发）/ warehouse_scheduler_loop（调度线程）。
 流程：就绪门（data_latest >= today）→ 全市场快照（TRADED 行 = 当日日K）→
-sink 写分区 + codes 刷新 → reconcile 对账（三板斧）→ records 日检 + 告警。
-复权快照：周一（或首次）触发，依赖注入的 adjust_provider（引擎键空间无批量端点，
-SDK 通道接入前为 None → 跳过，ROADMAP 延后项登记）。
+sink 写分区（factor_map 物化复权列）+ codes 刷新 → reconcile 对账（三板斧）→
+records 日检 + 告警。
+复权（0.10.10）：周一/首刷经 adjust_provider 注入因子事件 → _build_factor_map 展开为
+{code: cum} 缓存，沉淀时物化 adj_factor+fq 列（一次计算多次复用，查询零 JOIN）；
+事件不落 facts（内存输入，审计留档延后）。SDK 通道接入前 adjust_provider=None →
+物化列 NULL 原价，不阻塞沉淀。
 
 依赖纪律：不 import storage.warehouse（C3，层边界测试强制）——sink/reconcile/
 availability 经注入点由 app.py（组合根）绑定；引擎快照/交易日判定同打板注入模式。
@@ -29,9 +32,10 @@ reconcile_daily = None  # storage.warehouse.reconcile.reconcile_daily
 warehouse_root = None   # () -> Path（storage.warehouse.layout.root_dir）
 availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
-adjust_provider = None  # () -> list[dict]（复权因子全量行；未接 SDK 通道前为 None → 跳过快照）
-
-# 周度复权快照：周一沉淀日顺带全量刷新（快照小、全量幂等）
+backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：warehouse.duckdb 日级备份）
+adjust_provider = None  # () -> list[dict]（复权因子事件序列：{code,date,div,give,trans,mult,cum}；
+                        # 未接 SDK 通道前为 None → 物化列 NULL 原价，延后项）
+# 周度复权事件刷新：周一沉淀日顺带全量（事件小、全量幂等）
 _ADJUST_WEEKDAYS = {0}
 
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
@@ -40,14 +44,40 @@ _RETRY_INTERVAL = 600  # 未就绪/失败重试间隔（10 分钟）
 _BACKFILL_FLOOR = "20000101"  # 回填下界（引擎日K实测起点 2000 年）
 _RETRY_UNTIL = "20:00"  # 超过此时刻放弃当日沉淀（告警收口）
 
+# 0.10.10：每日累计因子缓存 {code: cum}（周度/首刷刷新；沉淀物化复用，一次计算）
+_factor_map_cache: dict[str, float] = {}
+
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _build_factor_map(events: list[dict]) -> dict[str, float]:
+    """复权事件序列 → {code: 截至当日最新累计因子 cum}（0.10.10 物化输入）。
+
+    引擎事件按码返回（div/give/trans/mult/cum 每次分红/送转一条，cum 为累计因子）；
+    事件未带 date 时以注入的刷新日为准。缺码/非有限值 → 不进入 map（物化列 NULL 原价）。
+    """
+    out: dict[str, float] = {}
+    for ev in events or []:
+        code = str(ev.get("code") or "").strip()
+        cum = ev.get("cum")
+        try:
+            cum = float(cum)
+        except (TypeError, ValueError):
+            continue
+        if code and cum is not None and cum == cum and abs(cum) != float("inf"):
+            out[code] = cum
+    return out
+
+
 def _snapshot_points(date: str) -> list[dict]:
-    """全市场单日快照（limit=0 = 不截断，一次往返；快照内部已走 SDK 批量快路径）。"""
-    return (query_snapshot({"date": date, "limit": 0}) or {}).get("points") or []
+    """全市场单日快照（limit=0 = 不截断，一次往返）+ 字段适配。
+
+    快照通道的 prev_close 映射为引擎原生 pre_close（0.10.7 sink 纯镜像引擎字段，
+    改名适配归通道侧）。"""
+    points = (query_snapshot({"date": date, "limit": 0}) or {}).get("points") or []
+    return [{**p, "pre_close": p.get("pre_close", p.get("prev_close"))} for p in points]
 
 
 def warehouse_run(days: int = 1, reconcile_sample: int = 10,
@@ -110,6 +140,18 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     break  # 只补 watermark 之后的缺口，不重复沉淀
                 targets.append(target)
                 target = _prev_date(target)
+        # 周度/首刷复权刷新（周一 or 缓存空）：事件经 adjust_provider 注入，
+        # 展开为 factor_map（0.10.10：内存输入，不占 facts；审计留档延后）
+        global _factor_map_cache
+        try:
+            if (datetime.now().weekday() in _ADJUST_WEEKDAYS or not _factor_map_cache):
+                adjust_rows = _adjust_rows(latest)
+                if adjust_rows:
+                    _factor_map_cache = _build_factor_map(adjust_rows)
+        except Exception as exc:  # noqa: BLE001 - 复权刷新失败不阻塞日K沉淀
+            log(f"⚠️ 仓库复权刷新失败（不阻塞日K）：{exc}")
+
+        # 每日沉淀：factor_map 物化复权列（一次计算多次复用；事件未就绪 → 原价 NULL）
         for t in sorted(targets):  # 旧 → 新（缺口感知语义下 targets 已升序，幂等保序）
             points = [p for p in _snapshot_points(t)
                       if isinstance(p, dict) and p.get("status") == "TRADED"]
@@ -121,7 +163,7 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     pass
                 results.append({"date": t, "status": "empty"})
                 continue
-            w = sink.write_daily(root, t, points)
+            w = sink.write_daily(root, t, points, factor_map=_factor_map_cache)
             sink.write_codes(root, [{"code": p.get("code"), "name": p.get("name")}
                                     for p in points])
             rec = reconcile_daily(root, t, points,
@@ -137,20 +179,29 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                              "traded": rec["traded"], "issues": rec["issues"][:5],
                              "at": _now_iso()})
 
-        # 周度复权快照（周一 or 从未刷新）：复权因子表小，全量幂等
+        # 0.10.10/0.10.12 粒度阶梯：周K/月K 聚合物化——对沉淀覆盖到的每个自然周/月
+        # （周完整/月完整才聚合，幂等；当前未走完的周期由 v_week_current/v_month_current
+        # 派生视图实时聚合，见 engine）
         try:
-            if datetime.now().weekday() in _ADJUST_WEEKDAYS or not sink.catalog.get_meta(root, "adjust:snapshot"):
-                adjust_rows = _adjust_rows(latest)
-                if adjust_rows:
-                    sink.write_adjust_snapshot(root, latest, adjust_rows)
-        except Exception as exc:  # noqa: BLE001 - 复权快照失败不阻塞日K沉淀
-            log(f"⚠️ 仓库复权快照失败（不阻塞日K）：{exc}")
+            if results:
+                _aggregate_weeks(root, results)
+                _aggregate_months(root, results)
+        except Exception as exc:  # noqa: BLE001 - 聚合失败不阻塞日K沉淀结论
+            log(f"⚠️ 仓库周/月K聚合失败（不阻塞日K）：{exc}")
 
         if refresh_views is not None:
             try:
                 refresh_views()
             except Exception:  # noqa: BLE001 - 视图刷新失败下次重建
                 pass
+        # 0.10.8：warehouse.duckdb 日级备份（沿 research_store 模式；失败静默不阻塞）
+        if backup_duckdb is not None and results:
+            try:
+                path = backup_duckdb(root)
+                if path is not None:
+                    log(f"🗄️ warehouse.duckdb 备份完成：{path.name}")
+            except Exception:  # noqa: BLE001 - 备份失败不影响沉淀结论
+                log("⚠️ warehouse.duckdb 备份失败（已静默，不影响沉淀）")
         ok = all(r.get("reconcile", {}).get("ok", True) for r in results)
         return {"ok": ok, "days": results, "finished_at": _now_iso()}
     except Exception as exc:  # noqa: BLE001 - 单块降级
@@ -165,8 +216,108 @@ def _prev_date(d: str) -> str:
     return dt.strftime("%Y%m%d")
 
 
+def _week_end_of(d: str) -> str:
+    """日期所在自然周的周五（YYYYMMDD）。周一=周五-4；跨月/跨年安全（datetime 运算）。"""
+    from datetime import timedelta
+    dt = datetime.strptime(d, "%Y%m%d")
+    friday = dt + timedelta(days=(4 - dt.weekday()))
+    return friday.strftime("%Y%m%d")
+
+
+def _week_complete(root, week_end: str) -> bool:
+    """该周是否完整：周内每个交易日均已有 daily 分区文件（或空交易日标记）。
+
+    0.10.12 修复：旧实现只比较 watermark ≥ 周内最后交易日——周内某交易日因故
+    缺失（数据缺口）时 watermark 仍可能推进，导致残缺周被聚合且幂等不再重写。
+    现在逐交易日校验文件/标记存在，缺任何一天 → 不完整 → 等补齐后下次沉淀聚合。
+    节假日周（周五非交易日）以 is_trading_day 判定，非交易日跳过。
+    """
+    from datetime import timedelta
+    friday = datetime.strptime(week_end, "%Y%m%d")
+    for i in range(5):  # 周一~周五（周五→周一扫描）
+        d = friday - timedelta(days=i)
+        if is_trading_day is not None and not is_trading_day(d.date()):
+            continue  # 非交易日（周末/节假日）跳过
+        d8 = d.strftime("%Y%m%d")
+        has_file = any(sink.layout.daily_partition(root, d8, m).exists()
+                       for m in ("sh", "sz", "bj", "hk"))
+        marked_empty = sink.catalog.get_meta(root, f"empty:{d8}") is not None
+        if not has_file and not marked_empty:
+            return False  # 该交易日缺失 → 周不完整
+    return True
+
+
+def _aggregate_weeks(root, results) -> None:
+    """沉淀结果 → 自动周K聚合（0.10.10）：对每个覆盖到的自然周，周完整才聚合。
+    幂等由 sink.aggregate_weekly 保证（周分区存在跳过，watermark:week 只前进）。"""
+    seen: set[str] = set()
+    for r in results:
+        d = r.get("date")
+        if not d:
+            continue
+        week_end = _week_end_of(d)
+        if week_end in seen:
+            continue
+        seen.add(week_end)
+        if _week_complete(root, week_end):
+            sink.aggregate_weekly(root, week_end)
+
+
+def _month_end_of(d: str) -> str:
+    """日期所在自然月的月末（YYYYMMDD）。跨年安全（datetime 运算）。"""
+    from datetime import timedelta as _td
+    dt = datetime.strptime(d, "%Y%m%d")
+    year, month = dt.year, dt.month
+    if month == 12:
+        nxt = datetime(year + 1, 1, 1)
+    else:
+        nxt = datetime(year, month + 1, 1)
+    return (nxt - _td(days=1)).strftime("%Y%m%d")
+
+
+def _month_complete(root, month_end: str) -> bool:
+    """该月是否完整：月内每个交易日均已有 daily 分区文件（或空交易日标记）。
+
+    与 _week_complete 同策略（0.10.12）：逐交易日校验文件/标记存在，缺任何
+    一天 → 不完整 → 等补齐后下次沉淀聚合。月末是日历日（可能非交易日），
+    以 is_trading_day 判定跳过非交易日。
+    """
+    from datetime import timedelta as _td
+    month_end_dt = datetime.strptime(month_end, "%Y%m%d")
+    month_start_dt = datetime(month_end_dt.year, month_end_dt.month, 1)
+    cursor = month_start_dt
+    while cursor <= month_end_dt:
+        if is_trading_day is not None and not is_trading_day(cursor.date()):
+            cursor += _td(days=1)
+            continue  # 非交易日（周末/节假日）跳过
+        d8 = cursor.strftime("%Y%m%d")
+        has_file = any(sink.layout.daily_partition(root, d8, m).exists()
+                       for m in ("sh", "sz", "bj", "hk"))
+        marked_empty = sink.catalog.get_meta(root, f"empty:{d8}") is not None
+        if not has_file and not marked_empty:
+            return False  # 该交易日缺失 → 月不完整
+        cursor += _td(days=1)
+    return True
+
+
+def _aggregate_months(root, results) -> None:
+    """沉淀结果 → 自动月K聚合（0.10.12）：对每个覆盖到的自然月，月完整才聚合。
+    幂等由 sink.aggregate_monthly 保证（月分区存在跳过，watermark:month 只前进）。"""
+    seen: set[str] = set()
+    for r in results:
+        d = r.get("date")
+        if not d:
+            continue
+        month_end = _month_end_of(d)
+        if month_end in seen:
+            continue
+        seen.add(month_end)
+        if _month_complete(root, month_end):
+            sink.aggregate_monthly(root, month_end)
+
+
 def _adjust_rows(latest: str) -> list[dict]:
-    """复权因子全量行（经注入的 adjust_provider；None → 首版跳过快照，见模块头注）。"""
+    """复权因子事件序列（经注入的 adjust_provider；None → 未接通道，物化列 NULL 原价）。"""
     if adjust_provider is None:
         return []
     return adjust_provider() or []
@@ -204,7 +355,7 @@ def warehouse_status() -> dict:
     if available and root is not None and sink is not None:
         try:
             out["watermark_daily"] = sink.catalog.get_watermark(root, "daily")
-            out["adjust_snapshot"] = sink.catalog.get_meta(root, "adjust:snapshot")
+            out["factor_map_size"] = len(_factor_map_cache)  # 0.10.10：复权物化缓存规模
         except Exception as exc:  # noqa: BLE001 - 状态查询不抛
             out["catalog_error"] = str(exc)
     return out

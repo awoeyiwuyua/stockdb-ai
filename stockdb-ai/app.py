@@ -1820,6 +1820,7 @@ def _wire_warehouse_tasks() -> None:
     _warehouse_tasks.is_trading_day = is_trading_day
     try:
         from storage import warehouse as _wh_pkg
+        from storage.warehouse import backup as _wh_backup
         from storage.warehouse import layout as _wh_layout
         from storage.warehouse import reconcile as _wh_reconcile
         from storage.warehouse import sink as _wh_sink
@@ -1827,6 +1828,7 @@ def _wire_warehouse_tasks() -> None:
         _warehouse_tasks.reconcile_daily = _wh_reconcile.reconcile_daily
         _warehouse_tasks.warehouse_root = _wh_layout.root_dir
         _warehouse_tasks.availability = _wh_pkg.availability
+        _warehouse_tasks.backup_duckdb = _wh_backup.backup_duckdb  # 0.10.8：warehouse.duckdb 日级备份
 
         def _wh_refresh_views():
             from storage.warehouse.engine import get_engine as _wh_get_engine

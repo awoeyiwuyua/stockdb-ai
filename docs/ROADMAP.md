@@ -69,9 +69,13 @@
 - **收敛清单（0.10.0 落地时一并执行）**：C1 引擎 HTTP 双轨收归 free_stockdb 闸口；
   C2 查询面收敛（指标一律 SQL 宏，不加单指标工具）；C3 services→warehouse 走注入；
   C4 元数据唯一存 warehouse.duckdb meta；C5 warehouse.duckdb 纳入每日备份
+  （0.10.8 落地：COPY FROM DATABASE 在线快照 + 保留 14 份，见 docs/design/warehouse.md §5.1）
 - **延后项登记（防无限挂起）**：仓库历史回填（用户 2026-08-22 延后，另行讨论）；
-  分钟K/基本面/龙虎榜数据集（dataset 维度已预留，按需逐个加 sink）；
-  hk日k 迁仓库（仓库稳定后，mydb 届时只剩自定义表）；M2 打板情绪衍生指标、
+  minute/hour/week/month/year/tick 数据集——**粒度阶梯已定稿（0.10.10，
+  docs/design/warehouse.md §2.2：tick 按码、其余时间分层、统一 year/market 二级）**，
+  按需逐个加 sink（minute/hour 引擎 HTTP 可拉，week/month/year 由 daily 聚合物化，
+  tick 待接入）；hk 日K 并入 daily 的 market=hk 分区（mydb 迁入）；
+  lhb/fundamental 事件/快照类接入时再定；M2 打板情绪衍生指标、
   M3 数据质量看护（仓库 watermark 就绪后对账可复用）继续延后
 - 1.0.0 = 数据契约冻结评审通过（架构总纲见 docs/architecture.md）。
 - 发布纪律见 `docs/release-policy.md`。

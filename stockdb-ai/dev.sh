@@ -18,14 +18,17 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 : "${STOCKDB_PORT:=7899}"
 : "${WEBUI_PORT:=8080}"
 # 0.10.0 治理批：数据落仓库根可见的 data/（gitignore；旧隐藏目录 .dev-data 已废）
+# 0.10.8 root 锁定（用户拍板）：所有数据存放于 <repo>/data，仓库根 = <repo>/data/warehouse
 : "${DATA_DIR:=$(cd "$DIR/.." && pwd)/data}"
+: "${WAREHOUSE_DIR:=$DATA_DIR/warehouse}"
 
-mkdir -p "$DATA_DIR"
-export STOCKDB_HOST STOCKDB_PORT WEBUI_PORT DATA_DIR
+mkdir -p "$DATA_DIR" "$WAREHOUSE_DIR"
+export STOCKDB_HOST STOCKDB_PORT WEBUI_PORT DATA_DIR WAREHOUSE_DIR
 
 echo "→ webui    http://127.0.0.1:${WEBUI_PORT}"
 echo "  stockdb  ${STOCKDB_HOST}:${STOCKDB_PORT}"
 echo "  本地数据  ${DATA_DIR}（同步历史/日志落盘，不碰 NAS 数据卷）"
+echo "  仓库根    ${WAREHOUSE_DIR}（facts/ + warehouse.duckdb + backups/，root 锁定）"
 echo "  注意：同步与进程控制仅在 NAS 单镜像容器内可用，本地对应接口返回降级提示"
 
 exec python3 "$DIR/app.py"
