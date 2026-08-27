@@ -47,6 +47,7 @@ RUN set -eu; \
     echo "${SHA256}  /tmp/pkg.tar" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xf /tmp/pkg.tar -C /out; \
+    chmod +x "/out/stockdb/stockdb" "/out/stockdb/数据更新"; \
     test -x "/out/stockdb/stockdb" || { echo "stockdb server missing" >&2; ls -la /out/stockdb; exit 1; }; \
     test -x "/out/stockdb/数据更新" || { echo "sync binary missing" >&2; ls -la /out/stockdb; exit 1; }; \
     test -d "/out/stockdb/pybao" || { echo "pybao missing" >&2; ls -la /out/stockdb; exit 1; }
