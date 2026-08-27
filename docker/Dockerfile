@@ -17,7 +17,7 @@
 #   - Python 3.14 GIL：上游 3.14t(free-threaded) 的 abi3t 变体实测 ABI 不匹配
 #     （_PyType_FromSlots 符号缺失），待上游修复后评估升级。
 
-ARG VERSION=0.3.1
+ARG VERSION=0.3.2
 ARG TARGETARCH
 
 # ================= 构建阶段：下载 stockdb 发布包（含服务端/同步器/pybao） =================
@@ -25,7 +25,7 @@ FROM alpine:3.20 AS build
 
 ARG VERSION
 ARG TARGETARCH
-ARG GH_TAG_ENCODED=%E6%B5%8B%E8%AF%95%E7%89%88%E6%9C%AC0.3.1
+ARG GH_TAG_ENCODED=%E6%B5%8B%E8%AF%950.3.2
 
 RUN apk add --no-cache curl tar
 
@@ -33,10 +33,10 @@ RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) \
         PLATFORM=manylinux-x64; \
-        SHA256=16eef82d88dceb3724a81701872277a115df7c3cac171fe041eb5de64db8e525 ;; \
+        SHA256=be5d9d6dec736982e95d3def81736bd99587dfdd41b9146d73be8336cae24ce1 ;; \
       arm64) \
         PLATFORM=alpine-arm64; \
-        SHA256=eba14a57d6debf4db57070816b30f7e18374b58f08ce134628e2bbcb98f467b3 ;; \
+        SHA256=def0bcbec0acc54a569bff114a0ae31dff1a7c77d1e016e48369211284fd6bc1 ;; \
       *) \
         echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
