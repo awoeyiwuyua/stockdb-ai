@@ -26,7 +26,7 @@ on:
       version:
         description: '发布版本号（镜像 tag；默认取 stockdb-ai/config.py 的 WEBUI_VERSION）'
         required: false
-        default: '0.9.10'
+        default: ''
 
 env:
   REGISTRY: ghcr.io
@@ -119,16 +119,20 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
             -c "import stockdb, zb_core, zhibiao; import sys; sys.path.insert(0, '/opt/webui'); import storage.providers.quote_sources, core.auction_metrics, core.auction_list; import duckdb; print('amd64 pybao + warehouse ok')"
 
+      # duckdb 官方无 musl arm64 轮子，arm64 镜像内可能不可用（引擎侧降级运行），
+      # 故拆成两步：pybao 三模块必须可导入；duckdb 仅记录可用性。
       - name: Verify pybao import (linux/arm64)
         run: |
           docker run --rm --entrypoint python \
             --platform linux/arm64 \
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
-            -c "import stockdb, zb_core, zhibiao; import sys; sys.path.insert(0, '/opt/webui'); import storage.providers.quote_sources, core.auction_metrics, core.auction_list; import sys as s; exec(\"try:
- import duckdb
- print('arm64 pybao + warehouse ok')
-except ImportError:
- print('arm64 pybao ok, duckdb unavailable')\")"
+            -c "import stockdb, zb_core, zhibiao; import sys; sys.path.insert(0, '/opt/webui'); import storage.providers.quote_sources, core.auction_metrics, core.auction_list; print('arm64 pybao ok')"
+      - name: Check duckdb availability (linux/arm64)
+        run: |
+          docker run --rm --entrypoint python \
+            --platform linux/arm64 \
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest \
+            -c "import duckdb; print('arm64 warehouse ok')" || echo "::warning::duckdb 在 arm64 不可用，仓库层将降级"
 
   test-spa:
     name: SPA 前端构建 + 单测（Node，离线）
