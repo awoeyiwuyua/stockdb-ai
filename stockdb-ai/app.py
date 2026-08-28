@@ -177,6 +177,7 @@ def append_history(entry: dict) -> None:
 def _default_schedule() -> dict:
     return {"enabled": False, "times": ["15:30"], "trading_only": True,
             "fired": {}, "retried": {}, "retry_pending": None,
+            "stale_retried": {}, "stale_retry_pending": None,
             "last_trigger": None, "next_trigger": None}
 
 
@@ -275,6 +276,10 @@ def load_schedule() -> dict:
     if not isinstance(retried, dict):
         retried = {}
     rp = data.get("retry_pending")
+    stale_retried = data.get("stale_retried")
+    if not isinstance(stale_retried, dict):
+        stale_retried = {}
+    srp = data.get("stale_retry_pending")
     norm_times = _normalize_times(times)
     return {
         "enabled": bool(data.get("enabled")),
@@ -283,6 +288,8 @@ def load_schedule() -> dict:
         "fired": fired,
         "retried": retried,
         "retry_pending": rp if isinstance(rp, str) else None,
+        "stale_retried": stale_retried,
+        "stale_retry_pending": srp if isinstance(srp, str) else None,
         "last_trigger": last,
         "next_trigger": compute_next_trigger(norm_times, trading_only=bool(data.get("trading_only", True))),
     }
@@ -309,6 +316,9 @@ def save_schedule(enabled: bool, times, trading_only: bool = True) -> dict:
             cfg["fired"] = old.get("fired") if isinstance(old.get("fired"), dict) else {}
             cfg["retried"] = old.get("retried") if isinstance(old.get("retried"), dict) else {}
             cfg["retry_pending"] = old.get("retry_pending") if isinstance(old.get("retry_pending"), str) else None
+            cfg["stale_retried"] = old.get("stale_retried") if isinstance(old.get("stale_retried"), dict) else {}
+            cfg["stale_retry_pending"] = (old.get("stale_retry_pending")
+                                          if isinstance(old.get("stale_retry_pending"), str) else None)
             cfg["last_trigger"] = old.get("last_trigger") if isinstance(old.get("last_trigger"), dict) else None
             cfg["next_trigger"] = compute_next_trigger(cfg["times"], trading_only=trading_only)
             _write_schedule(cfg)
@@ -322,9 +332,9 @@ def _today_key() -> str:
 
 
 def _prune_fired(cfg: dict) -> dict:
-    """清理 fired/retried 里早于今天的日期（只保留最近记录，防累积）。"""
+    """清理 fired/retried/stale_retried 里早于今天的日期（只保留最近记录，防累积）。"""
     today = _today_key()
-    for k in ("fired", "retried"):
+    for k in ("fired", "retried", "stale_retried"):
         d = cfg.get(k) or {}
         stale = [day for day in d if day < today]
         for day in stale:
@@ -388,6 +398,51 @@ def _clear_retry_pending() -> None:
             cfg = load_schedule()
             cfg["retry_pending"] = None
             _write_schedule(cfg)
+        except Exception:
+            pass
+
+
+def _arm_stale_retry(latest: str | None, expected: str) -> bool:
+    """登记滞后自检重试（0.10.13）：同步 exit 0 但数据未到应至交易日。
+
+    复用调度线程的到点执行机制（stale_retry_pending），与失败重试（retry_pending）
+    相互独立：exit!=0 走失败重试，exit=0 但数据未前进走本重试。当日上限
+    STALE_RETRY_MAX 次、截止 STALE_RETRY_UNTIL——双保险防深夜空转；窗口用尽
+    静默收口（晚间兜底告警会推给人）。返回是否成功登记（测试用）。
+    """
+    with _schedule_lock:
+        try:
+            cfg = load_schedule()
+            today = _today_key()
+            stale_retried = dict(cfg.get("stale_retried") or {})
+            n = int(stale_retried.get(today, 0)) + 1
+            if n > STALE_RETRY_MAX or datetime.now().strftime("%H:%M") >= STALE_RETRY_UNTIL:
+                if cfg.get("stale_retry_pending"):
+                    cfg["stale_retry_pending"] = None
+                    _write_schedule(cfg)
+                return False
+            stale_retried[today] = n
+            cfg["stale_retried"] = stale_retried
+            cfg["stale_retry_pending"] = (datetime.now()
+                                          + timedelta(minutes=STALE_RETRY_INTERVAL_MIN)
+                                          ).strftime("%Y-%m-%d %H:%M:%S")
+            cfg = _prune_fired(cfg)
+            _write_schedule(cfg)
+            log(f"↻ 滞后自检重试已登记（{n}/{STALE_RETRY_MAX}）：数据最新 {latest} < 应至 {expected}，"
+                f"{STALE_RETRY_INTERVAL_MIN} 分钟后再试")
+            return True
+        except Exception as exc:
+            log(f"↻ 滞后重试登记失败: {exc}")
+            return False
+
+
+def _clear_stale_retry_pending() -> None:
+    with _schedule_lock:
+        try:
+            cfg = load_schedule()
+            if cfg.get("stale_retry_pending"):
+                cfg["stale_retry_pending"] = None
+                _write_schedule(cfg)
         except Exception:
             pass
 
@@ -1258,6 +1313,22 @@ def run_sync(hot: bool = True, trigger: str = "manual", retry: bool = False) -> 
                 _update_schedule_trigger_exit(_sync_state.get("exit_code"), retry=retry)
         except Exception:
             pass
+        # 0.10.13 数据晚到自愈（两钩子，各自容错，不影响同步收尾）：
+        # ① exit 0 但数据未到应至交易日（镜像晚发布）→ 登记滞后自检重试；
+        # ② 数据前进 → 仓库补沉淀（水印落后时触发，幂等单飞）
+        if _sync_state.get("exit_code") == 0:
+            try:
+                expected = _expected_latest_date()
+                latest_now = data_latest_date(force=True)
+                if expected and (latest_now or "") < expected:
+                    _arm_stale_retry(latest_now, expected)
+            except Exception:
+                pass
+            try:
+                from services import warehouse_tasks as _wt
+                _wt.maybe_catchup_sediment()
+            except Exception:
+                pass
         _sync_state["running"] = False
         _sync_state["last_end"] = time.time()
         _sync_state["phase"] = "done"
@@ -1355,6 +1426,28 @@ def scheduler_loop() -> None:
                                 and lt_t and lt_t not in retried):
                             _mark_retried(lt_t)
                             log(f"↻ 定时同步上次失败（exit={lt.get('exit')}），安排 10 分钟后自动重试 ...")
+                # 0.10.13：滞后自检重试（exit 0 但数据未前进——镜像晚发布场景）。
+                # 到点先验证是否仍滞后（追平则取消）；窗口/上限用尽由登记侧收口。
+                srp = cfg.get("stale_retry_pending")
+                if (srp and now.strftime("%Y-%m-%d %H:%M:%S") >= srp
+                        and not _sync_state["running"]):
+                    _clear_stale_retry_pending()
+                    try:
+                        expected = _expected_latest_date(now)
+                        latest_now = data_latest_date(force=True)
+                        if not expected or (latest_now or "") >= expected:
+                            log(f"↻ 滞后重试取消：数据已到位（最新 {latest_now}）")
+                        elif now.strftime("%H:%M") >= STALE_RETRY_UNTIL:
+                            log(f"↻ 滞后重试窗口已过（{STALE_RETRY_UNTIL}），交由晚间兜底告警收口")
+                        else:
+                            log("↻ 滞后重试执行（上次成功但数据未前进）——stockdb 保持运行，热更新")
+                            threading.Thread(
+                                target=run_sync,
+                                kwargs={"hot": True, "trigger": "scheduled-stale-retry"},
+                                daemon=True,
+                            ).start()
+                    except Exception as exc:
+                        log(f"↻ 滞后重试评估异常: {exc}")
         except Exception as exc:
             log(f"⏰ 定时线程异常: {exc}")
         time.sleep(30)
@@ -1483,6 +1576,29 @@ def _now_iso() -> str:
 # ---- 数据新鲜度告警（迁移自 test_ops.py 可执行规格，行为基线一致） ----
 FRESHNESS_LAG_THRESHOLD = 2   # 数据新鲜度滞后阈值（交易日滞后 > 2 天告警）
 
+# ---- 数据晚到自愈（0.10.13：0.10.6 试运行 08-28 实证——镜像晚于 15:50 发布当日日K，
+#      定时同步 exit 0 但数据未前进，旧重试只认 exit!=0，数据挂到次日；见 CHANGELOG） ----
+STALE_RETRY_INTERVAL_MIN = 30  # 滞后自检重试间隔（分钟）
+STALE_RETRY_UNTIL = "23:00"    # 当日滞后重试截止时刻（其后交由晚间兜底告警）
+STALE_RETRY_MAX = 6            # 当日滞后重试上限（30 分钟 × 6，与截止时刻双保险）
+EVENING_STALE_ALERT_AFTER = "21:00"  # 交易日此时刻后数据仍滞后 → 晚间兜底告警
+
+
+def _expected_latest_date(now_dt: datetime | None = None) -> str | None:
+    """当前时刻数据「理应」达到的最新交易日（8 位；0.10.13）。
+
+    15:00 收盘后当日数据应到位（镜像发布延迟由滞后重试吸收）；盘前/盘中
+    以前一交易日为准。回退最多 10 天找最近交易日；日历异常返回 None（调用方
+    视为无法判定，不触发重试/告警——宁可漏报不误报）。
+    """
+    now = now_dt or datetime.now()
+    probe = now.date() if now.hour >= 15 else now.date() - timedelta(days=1)
+    for _ in range(10):
+        if is_trading_day(probe):
+            return probe.strftime("%Y%m%d")
+        probe -= timedelta(days=1)
+    return None
+
 
 def _parse_date(s) -> date | None:
     """解析日期：支持 YYYYMMDD / YYYY-MM-DD；非法返回 None（不抛）。"""
@@ -1529,13 +1645,39 @@ def data_freshness_alert(latest_date, is_trading_day, *,
         target.add("warning", "数据", f"行情数据已滞后 {lag} 天（最新 {latest_date}）")
 
 
+def evening_stale_alert(now_dt: datetime | None = None, *, alerts=None) -> bool:
+    """晚间兜底告警（0.10.13）：交易日 21:00 后数据仍未到「应至交易日」→ warning。
+
+    与 data_freshness_alert（阈值 2 天）互补：镜像晚发布当天只滞后 1 天，
+    旧阈值不报；此告警把「当天没到位」在当晚推给人（滞后重试同窗兜底，
+    滞后重试全失败/未启用时这里是最后防线）。消息含最新日期，追平前
+    每轮评估都是同一条消息 → 告警中心当日去重，不刷屏。
+    返回是否投递（测试用）。
+    """
+    now = now_dt or datetime.now()
+    if now.strftime("%H:%M") < EVENING_STALE_ALERT_AFTER:
+        return False
+    if not is_trading_day():
+        return False
+    expected = _expected_latest_date(now)
+    latest = data_latest_date()
+    if expected and latest and str(latest).replace("-", "") < expected:
+        target = alerts if alerts is not None else _get_alerts()
+        target.add("warning", "数据",
+                   f"晚间兜底：{expected} 数据截至 {EVENING_STALE_ALERT_AFTER} 仍未到位（最新 {latest}）")
+        return True
+    return False
+
+
 def ops_watchdog_loop(interval: float = 60.0) -> None:
     """运营支撑看门狗线程：周期投递生产告警（告警中心的生产接线点）。
 
     每 interval 秒评估一次（启动后预热 30s，等待首次数据探针/日历就绪，避免
     进程启动瞬间误报）：
       数据新鲜度：data_latest_date() 探针失败，或今日（交易日）滞后 > 阈值
-      → data_freshness_alert 投递 warning（当日去重，不会刷屏）。
+      → data_freshness_alert 投递 warning（当日去重，不会刷屏）；
+      晚间兜底（0.10.13）：交易日 21:00 后数据仍未到应至交易日 →
+      evening_stale_alert 投递 warning。
     看门狗自身异常绝不退出线程（stderr 提示后继续，与调度线程同级容错）。
     """
     time.sleep(30)  # 预热：等待首次数据探针/日历就绪，避免进程启动瞬间误报
@@ -1544,6 +1686,10 @@ def ops_watchdog_loop(interval: float = 60.0) -> None:
             data_freshness_alert(data_latest_date(), is_trading_day())
         except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
             _warn("数据新鲜度看门狗评估异常（已忽略）")
+        try:
+            evening_stale_alert()
+        except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
+            _warn("晚间兜底告警评估异常（已忽略）")
         time.sleep(interval)
 
 

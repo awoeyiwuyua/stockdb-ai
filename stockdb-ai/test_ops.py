@@ -1371,6 +1371,223 @@ class _AuctionBackfillTests(_OpsTestCase):
         self.assertIn("running", payload["backfill"])
 
 
+class StaleSelfHealTest(_OpsTestCase):
+    """0.10.13 数据晚到自愈三件套（0.10.6 试运行 08-28 实证：镜像晚于 15:50 发布，
+    定时同步 exit 0 但数据未前进，挂到次日）：
+      - _expected_latest_date：收盘后应至当日；盘前应至前一交易日；跳过周末/节假日。
+      - _arm_stale_retry：登记 stale_retry_pending；当日上限/截止时刻收口；
+        收口时清空 pending；日记录持久化。
+      - evening_stale_alert：21:00 前不告警；21:00 后滞后告警；追平不告警；
+        非交易日不告警；当日去重。
+    全部离线：时间注入（now_dt）、交易日/探针 patch、告警注入隔离实例。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.alerts = app.Alerts.init(os.path.join(self.tmp, "stale.json"))
+        # SCHEDULE_FILE 是 import 期从真实 DATA_DIR 求值的常量，DATA_DIR patch 盖不住
+        # 它——滞后重试状态（stale_retried/stale_retry_pending）必须落到临时目录，
+        # 否则测试会读写真实状态文件（污染现场 + 用例间串扰）。
+        self._sched_patch = mock.patch.object(
+            app, "SCHEDULE_FILE", Path(self.tmp) / "sync_schedule.json")
+        self._sched_patch.start()
+        self.addCleanup(self._sched_patch.stop)
+
+    # ---- _expected_latest_date ----
+
+    def test_expected_latest_after_close_is_today(self):
+        """工作日 15:00 后 → 应至今天（用真实今天反推：若今天是交易日则=今天）。"""
+        now = datetime.datetime.now()
+        exp = app._expected_latest_date(now)
+        if app.is_trading_day(now.date()):  # 测试环境无关化：今天非交易日则断言回退
+            self.assertEqual(exp, now.strftime("%Y%m%d"))
+
+    def test_expected_latest_before_close_is_prev_trading_day(self):
+        """盘前（15:00 前）→ 应至前一交易日（回退最多 10 天内必有）。"""
+        probe = datetime.datetime.now().replace(hour=9, minute=0)
+        exp = app._expected_latest_date(probe)
+        self.assertIsNotNone(exp)
+        # 前一交易日必然 <= 今天-1
+        self.assertLess(exp, probe.strftime("%Y%m%d"))
+
+    def test_expected_latest_skips_weekend(self):
+        """周六 20:00 → 应至周五（2026-08-01 周六 → 07-31 周五，休市表覆盖 2026）。"""
+        exp = app._expected_latest_date(datetime.datetime(2026, 8, 1, 20, 0))
+        self.assertEqual(exp, "20260731")
+
+    # ---- _arm_stale_retry ----
+
+    def test_arm_stale_retry_registers_pending(self):
+        """exit 0 但数据滞后 → 登记 pending（30 分钟后），当日计数 1。"""
+        ok = app._arm_stale_retry("20260827", "20260828")
+        self.assertTrue(ok)
+        cfg = app.load_schedule()
+        self.assertIsNotNone(cfg["stale_retry_pending"])
+        self.assertEqual((cfg["stale_retried"] or {}).get(app._today_key()), 1)
+
+    def test_arm_stale_retry_cap_reached_closes(self):
+        """当日登记达上限 → 返回 False、清空 pending、不再新增计数。"""
+        app._schedule_lock.acquire()
+        try:  # 预置当日已登记 STALE_RETRY_MAX 次
+            cfg_path = app.SCHEDULE_FILE
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            if cfg_path.exists():
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+            else:
+                cfg = app._default_schedule()
+            cfg["stale_retried"] = {app._today_key(): app.STALE_RETRY_MAX}
+            cfg["stale_retry_pending"] = "2026-01-01 00:00:00"
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        finally:
+            app._schedule_lock.release()
+        ok = app._arm_stale_retry("20260827", "20260828")
+        self.assertFalse(ok)
+        cfg = app.load_schedule()
+        self.assertIsNone(cfg["stale_retry_pending"])  # 收口：pending 清空
+        self.assertEqual((cfg["stale_retried"] or {}).get(app._today_key()),
+                         app.STALE_RETRY_MAX)  # 计数不再增长
+
+    def test_arm_stale_retry_persists(self):
+        """登记落盘（重启不丢）：重新 load 仍见 pending。"""
+        app._arm_stale_retry("20260827", "20260828")
+        cfg = app.load_schedule()  # 全新读取（非内存态）
+        self.assertIsNotNone(cfg["stale_retry_pending"])
+
+    # ---- evening_stale_alert ----
+
+    def test_evening_alert_silent_before_window(self):
+        """21:00 前不告警（即使数据滞后）。"""
+        now = datetime.datetime(2026, 8, 28, 16, 0)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            fired = app.evening_stale_alert(now, alerts=self.alerts)
+        self.assertFalse(fired)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_evening_alert_fires_when_stale(self):
+        """21:00 后交易日 + 数据滞后 → 告警（warning/数据，含最新日期）。"""
+        now = datetime.datetime(2026, 8, 28, 21, 5)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            fired = app.evening_stale_alert(now, alerts=self.alerts)
+        self.assertTrue(fired)
+        self.assertEqual(self.alerts.count(), 1)
+        top = self.alerts.list()[0]
+        self.assertEqual((top["level"], top["source"]), ("warning", "数据"))
+        self.assertIn("20260827", top["message"])
+
+    def test_evening_alert_silent_when_caught_up(self):
+        """21:00 后数据已追平 → 不告警。"""
+        now = datetime.datetime(2026, 8, 28, 21, 5)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260828"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            fired = app.evening_stale_alert(now, alerts=self.alerts)
+        self.assertFalse(fired)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_evening_alert_silent_non_trading_day(self):
+        """非交易日不告警（周末/节假日数据不更新属正常）。"""
+        now = datetime.datetime(2026, 8, 29, 21, 5)  # 周六
+        with mock.patch.object(app, "is_trading_day", return_value=False), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            fired = app.evening_stale_alert(now, alerts=self.alerts)
+        self.assertFalse(fired)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_evening_alert_same_day_dedup(self):
+        """同日晚重复评估（滞后未追平）→ 命中值恒 True，但消息相同当日去重不刷屏。"""
+        now = datetime.datetime(2026, 8, 28, 21, 5)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
+            self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
+        self.assertEqual(self.alerts.count(), 1)  # 去重：仍只有一条
+
+
+class CatchupSedimentTest(unittest.TestCase):
+    """0.10.13 maybe_catchup_sediment：水印缺口判定 + 单飞/时间/交易日守卫。
+
+    直接打 services.warehouse_tasks 注入点（与 test_warehouse W4 同模式），
+    不经 app（run_sync 全链路过重），全部离线。
+    """
+
+    def setUp(self):
+        import services.warehouse_tasks as wt
+        self.wt = wt
+        self._saved = {k: getattr(wt, k) for k in
+                       ("availability", "is_trading_day", "data_latest",
+                        "warehouse_root", "sink", "warehouse_run_async")}
+        self.warehouse_run_async = mock.MagicMock(return_value={"ok": True, "async": True})
+        self.warehouse_run_async.return_value = {"ok": True, "async": True}
+        wt.warehouse_run_async = self.warehouse_run_async
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(self.wt, k, v)
+        self.wt._wh_run_state.update(running=False, started=None,
+                                     finished=None, result=None)
+
+    def _wire(self, *, available=True, trading=True, now_hm="16:50",
+              latest="20260828", watermark="20260827", running=False):
+        self.wt.availability = lambda: (available, "ok")
+        self.wt.is_trading_day = lambda d=None: trading
+        self.wt.data_latest = lambda force=False: latest
+        self.wt.warehouse_root = lambda: "root"
+        self.wt.sink = mock.MagicMock()
+        self.wt.sink.catalog.get_watermark.return_value = watermark
+        self.wt._wh_run_state["running"] = running
+        return mock.patch(f"{self.wt.__name__}.datetime",
+                          **{"now.return_value.strftime.side_effect":
+                             lambda f: now_hm if f == "%H:%M"
+                             else latest[:4] + "-" + latest[4:6] + "-" + latest[6:]})
+
+    def test_triggers_when_watermark_lags(self):
+        """已过沉淀时间 + 交易日 + watermark < data_latest → 触发补沉淀。"""
+        with self._wire():
+            self.assertTrue(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_called_once_with(days=1)
+
+    def test_silent_when_watermark_caught_up(self):
+        """水印已追平 → 不触发。"""
+        with self._wire(watermark="20260828"):
+            self.assertFalse(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_not_called()
+
+    def test_silent_before_sediment_time(self):
+        """未到沉淀时间（16:40 前）→ 不触发（正常调度未开始，无补可言）。"""
+        with self._wire(now_hm="15:30"):
+            self.assertFalse(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_not_called()
+
+    def test_silent_non_trading_day(self):
+        """非交易日不触发。"""
+        with self._wire(trading=False):
+            self.assertFalse(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_not_called()
+
+    def test_silent_when_running(self):
+        """沉淀正在运行（单飞）→ 不触发。"""
+        with self._wire(running=True):
+            self.assertFalse(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_not_called()
+
+    def test_silent_when_unavailable(self):
+        """仓库不可用 → 静默 False（自愈钩子绝不外抛）。"""
+        with self._wire(available=False):
+            self.assertFalse(self.wt.maybe_catchup_sediment())
+        self.warehouse_run_async.assert_not_called()
+
+    def test_never_raises(self):
+        """注入点为 None（未装配）等异常路径 → 静默 False。"""
+        self.wt.availability = None
+        self.assertFalse(self.wt.maybe_catchup_sediment())
+
+
 class MainStartupSmokeTest(unittest.TestCase):
     """main() 名字解析冒烟（0.10.2）：合并曾引入 config 未导入/Handler 早引用两处
     启动期 NameError/UnboundLocalError——单测不执行 main() 拦不住，此测静态兜底：

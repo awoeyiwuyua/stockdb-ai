@@ -4,6 +4,30 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.13] — 2026-08-28（数据晚到自愈：滞后重试 + 补沉淀 + 晚间兜底告警）
+
+> 0.10.6 试运行 08-28 实证的可靠性缺口：镜像源晚于 15:50 发布当日日K，定时同步
+> exit 0 但数据未前进——旧重试只认 exit!=0，数据挂到次日；16:40 沉淀就绪门超时
+> 告警收口后无人补沉淀（水印滞后一日）。三钩子闭环（用户拍板"数据自动更新逻辑
+> 需进一步迭代"）：
+
+- **滞后自检重试（app.py）**：定时同步 exit 0 收尾时自检——交易日、收盘后、
+  `data_latest` < 应至交易日（`_expected_latest_date`：15:00 前看前一交易日，
+  之后看当天，跳过休市日）→ 复用调度线程到点执行机制，30 分钟后重试
+  （trigger=scheduled-stale-retry）；当日上限 6 次、截止 23:00 双保险；到点先
+  验证仍滞后（追平即取消），与失败重试（retry_pending）状态相互独立
+- **补沉淀跟随（services/warehouse_tasks.maybe_catchup_sediment）**：同步成功
+  推进数据后，若 watermark < data_latest 且已过沉淀时间 → warehouse_run_async
+  补沉淀（幂等 + 单飞 + 全守卫静默）；就绪门超时收口后的晚到数据自动回补，
+  run_sql 跨周期查询不再少一天
+- **晚间兜底告警（app.evening_stale_alert）**：交易日 21:00 后数据仍未到应至
+  交易日 → warning（当日去重）；滞后重试全失败时的最后防线，替代旧阈值
+  （滞后>2 天）对"当天晚到"场景的盲区
+- **dev.sh/README 补充局域网直连示例**（Tailscale 100.66.1.1 实测不可达时
+  `STOCKDB_HOST=192.168.31.240`，PR #118）
+- 381 测试全绿（新增 StaleSelfHealTest 10 项 + CatchupSedimentTest 7 项 + 1 项
+  调整；附 SCHEDULE_FILE 常量不受 DATA_DIR patch 覆盖的测试隔离经验）
+
 ## [0.10.12] — 2026-08-23（month 聚合落地 + 当前周期派生视图 + 完整性校验修复）
 
 - **月K聚合物化（sink.aggregate_monthly）**：与周K同口径（公共 `_kline_aggregate_sql`

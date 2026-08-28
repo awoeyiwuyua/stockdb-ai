@@ -323,6 +323,43 @@ def _adjust_rows(latest: str) -> list[dict]:
     return adjust_provider() or []
 
 
+def maybe_catchup_sediment() -> bool:
+    """数据晚到自愈钩子（0.10.13）：同步推进数据后，若水印仍落后 → 补沉淀。
+
+    场景（0.10.6 试运行 08-28 实证）：镜像晚发布 → 16:40 沉淀就绪门未过 →
+    20:00 超时告警收口、守卫置位；数据 21:55 才到位后无人补沉淀，水印滞后一日
+    （run_sql 跨周期查询少一天）。此钩子由 run_sync 成功收尾时调用：
+    交易日、已过沉淀时间、数据已越过水印 → warehouse_run_async 补沉淀
+    （不带就绪门——data_latest 即已同步的最新日；幂等 + 单飞，正在跑则跳过）。
+    返回是否触发了补沉淀（测试用）；未装配/仓库不可用/无缺口一律静默 False。
+    """
+    try:
+        if availability is None or not availability()[0]:
+            return False
+        if is_trading_day is not None and not is_trading_day(datetime.now().date()):
+            return False
+        if datetime.now().strftime("%H:%M") < config.WAREHOUSE_SEDIMENT_TIME:
+            return False
+        if _wh_run_state["running"]:
+            return False
+        latest = str(data_latest(force=True) or "").replace("-", "") if data_latest else ""
+        if not latest:
+            return False
+        root = warehouse_root()
+        watermark = (sink.catalog.get_watermark(root, "daily")
+                     if sink is not None and hasattr(sink, "catalog") else None)
+        if not watermark or watermark >= latest:
+            return False
+        res = warehouse_run_async(days=1)
+        if res.get("ok"):
+            log(f"📊 数据晚到补沉淀已触发（watermark {watermark} < data_latest {latest}）")
+            return True
+        return False
+    except Exception as exc:  # noqa: BLE001 - 自愈钩子绝不外抛（同步收尾调用）
+        log(f"⚠️ 补沉淀钩子异常（已忽略）: {exc}")
+        return False
+
+
 def warehouse_run_async(days: int = 1, reconcile_sample: int = 10,
                         backfill: bool = False) -> dict:
     """异步触发沉淀（HTTP 运维口用；单飞防重，状态进 _wh_run_state）。"""
