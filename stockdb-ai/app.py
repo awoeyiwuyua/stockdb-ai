@@ -1752,13 +1752,15 @@ def _version_tuple(s) -> tuple | None:
 
 # ==================== HTTP 服务 ====================
 # ==================== 前端静态服务（Phase 5 M0：SPA 外壳 + /legacy 逃生通道） ====================
-# 前端已重构为 Vue SPA（stockdb-ai/spa/，构建产物在镜像内 /opt/webui/static/）。
-# 旧面板（原 PAGE 字符串）完整保留在 static/legacy/index.html，路由 /legacy 原样渲染，
+# 前端已重构为 Vue SPA（仓库根 webui/spa/，构建产物在镜像内 /opt/webui/static/）。
+# 旧面板（原 PAGE 字符串）完整保留在 webui/static/legacy/index.html，路由 /legacy 原样渲染，
 # 作为逃生通道；WEBUI_UI=legacy 时根路径改用旧面板（默认 spa；SPA 未构建时自动兜底旧面板）。
 # 安全：静态文件定位一律 realpath 校验必须落在 STATIC_DIR 内，防路径穿越。
+# 默认路径按仓库布局解析（<repo>/webui/static）；镜像内由 Dockerfile 显式设
+# WEBUI_STATIC_DIR=/opt/webui/static 锁定，不依赖此默认值的相对推导。
 STATIC_DIR = Path(os.environ.get(
     "WEBUI_STATIC_DIR",
-    str(Path(__file__).resolve().parent / "static"),
+    str(Path(__file__).resolve().parent.parent / "webui" / "static"),
 ))
 WEBUI_UI = os.environ.get("WEBUI_UI", "spa").strip().lower()  # spa | legacy
 
