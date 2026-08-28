@@ -8,6 +8,7 @@
 #
 # 用法：
 #   ./dev.sh                      # 默认连 100.66.1.1:7899，端口 8080
+#   STOCKDB_HOST=192.168.31.240 ./dev.sh  # 局域网直连极空间（Tailscale 不通时的补充通道）
 #   STOCKDB_HOST=192.168.1.5 ./dev.sh   # 连其他实例
 #   WEBUI_PORT=18080 ./dev.sh           # 换本地端口
 set -eu

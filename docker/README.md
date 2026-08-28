@@ -95,6 +95,7 @@ docker build -t ghcr.io/awoeyiwuyua/stockdb-ai:0.3.1 .
 
 ```bash
 stockdb-ai/dev.sh            # 默认直连 Tailscale 上极空间的 100.66.1.1:7899
+STOCKDB_HOST=192.168.31.240 ./stockdb-ai/dev.sh  # 局域网直连（Tailscale 不通时的补充通道）
 STOCKDB_HOST=192.168.1.5 ./stockdb-ai/dev.sh   # 指定其他 stockdb 实例
 WEBUI_PORT=18080 ./stockdb-ai/dev.sh           # 换本地端口
 # 浏览器打开 http://127.0.0.1:8080
