@@ -40,7 +40,8 @@ def _read_partition_rows(root: Path, date: str, market: str) -> dict[str, dict]:
         return {}
     con = duckdb.connect()
     try:
-        cols = ", ".join(("code",) + _FIELDS)
+        # 0.10.7：分区列为引擎原生 pre_close，对账域（快照语义）以 prev_close 暴露
+        cols = "code, open, high, low, close, pre_close AS prev_close, volume, amount"
         rows = con.execute(
             f"SELECT {cols} FROM read_parquet('{path.as_posix()}')"
         ).fetchall()

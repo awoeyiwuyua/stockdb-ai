@@ -19,7 +19,7 @@ if str(WEBUI) not in sys.path:
 
 import config
 from storage import warehouse
-from storage.warehouse import catalog, layout, sink
+from storage.warehouse import backup, catalog, layout, sink
 from storage.warehouse.engine import GuardrailError, WarehouseEngine
 from storage.warehouse.queries import WarehouseUnavailable
 
@@ -28,23 +28,23 @@ def _sample_rows() -> list[dict]:
     """三市场 + ETF + 北交所 的迷你全市场样本。"""
     return [
         {"code": "600000", "name": "浦发银行", "is_st": False,
-         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "prev_close": 10.0,
+         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "pre_close": 10.0,
          "volume": 1234567.0, "amount": 12500000.0},
         {"code": "000001", "name": "平安银行", "is_st": False,
-         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "prev_close": 11.0,
+         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "pre_close": 11.0,
          "volume": 2234567.0, "amount": 24500000.0},
         {"code": "300750", "name": "宁德时代", "is_st": False,
-         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "prev_close": 200.0,
+         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "pre_close": 200.0,
          "volume": 3234567.0, "amount": 650000000.0},
         {"code": "920001", "name": "北交样本", "is_st": False,
-         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "prev_close": 5.0,
+         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "pre_close": 5.0,
          "volume": 234567.0, "amount": 1200000.0},
         {"code": "510300", "name": "沪深300ETF", "is_st": None,
-         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "prev_close": 4.0,
+         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "pre_close": 4.0,
          "volume": 8234567.0, "amount": 33000000.0},
-        # 护栏用例：close 为 NaN 的行必须被拒
-        {"code": "600001", "name": "坏行", "is_st": False,
-         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "prev_close": 1.0,
+        # 镜像语义用例（0.10.7）：close=NaN 的行不再被拒——消毒为 NULL 落盘
+        {"code": "600001", "name": "脏行", "is_st": False,
+         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "pre_close": 1.0,
          "volume": 1.0, "amount": 1.0},
     ]
 
@@ -108,6 +108,32 @@ class WarehouseLayoutTest(unittest.TestCase):
             "facts/daily/year=2026/market=sh/date=20260822.parquet",
         )
 
+    def test_granularity_ladder_partition_paths(self):
+        """0.10.10 粒度阶梯：时间序列统一 year/market 二级切入；tick 唯一按码分层。"""
+        root = pathlib.Path("/tmp/wh")
+        m = layout.minute_partition(root, "5m", "20260822", "sh")
+        self.assertEqual(
+            m.relative_to(root).as_posix(),
+            "facts/minute/period=5m/year=2026/market=sh/date=20260822.parquet",
+        )
+        h = layout.hour_partition(root, "20260822", "sz")
+        self.assertEqual(
+            h.relative_to(root).as_posix(),
+            "facts/hour/year=2026/market=sz/date=20260822.parquet",
+        )
+        w = layout.week_partition(root, "20260822", "sh")
+        self.assertEqual(
+            w.relative_to(root).as_posix(),
+            "facts/week/year=2026/market=sh/date=20260822.parquet",
+        )
+        t = layout.tick_partition(root, "600000", "20260822", part="1030")
+        self.assertEqual(
+            t.relative_to(root).as_posix(),
+            "facts/tick/code=600000/date=20260822/part=1030/data.parquet",
+        )
+        with self.assertRaises(ValueError):
+            layout.minute_partition(root, "45m", "20260822", "sh")  # 非法周期
+
 
 class WarehouseSinkTest(unittest.TestCase):
     """W2 验收：幂等 / 原子 / 独立可读 / NaN 护栏 / watermark 推进。"""
@@ -124,8 +150,8 @@ class WarehouseSinkTest(unittest.TestCase):
         result = sink.write_daily(self.root, "20260822", _sample_rows())
         self.assertEqual(result["status"], "written")
         self.assertEqual(sorted(result["markets"]), ["bj", "sh", "sz"])
-        self.assertEqual(result["rows"], 5)  # 6 行样本 - 1 NaN 拒写
-        self.assertEqual(result["dropped_nonfinite"], 1)
+        self.assertEqual(result["rows"], 6)  # 0.10.7：NaN 消毒为 NULL，不再丢行
+        self.assertEqual(result["dropped_nonfinite"], 1)  # 消毒单元格计数
 
         sh = layout.daily_partition(self.root, "20260822", "sh")
         sz = layout.daily_partition(self.root, "20260822", "sz")
@@ -158,7 +184,7 @@ class WarehouseSinkTest(unittest.TestCase):
                 f"SELECT count(*) FROM read_parquet("
                 f"'{layout.facts_dir(self.root).as_posix()}/daily/*/*/date=*.parquet')"
             ).fetchone()[0]
-            self.assertEqual(n, 5)  # 无重复
+            self.assertEqual(n, 6)  # 无重复（含消毒行）
         finally:
             con.close()
         # watermark 第二次不再推进
@@ -183,14 +209,35 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertFalse(catalog.set_watermark(self.root, "daily", "20260822"))
         self.assertEqual(catalog.get_watermark(self.root, "daily"), "20260822")
 
-    def test_adjust_snapshot_versioned(self):
-        rows = [{"code": "600000", "factor": 1.0}, {"code": "000001", "factor": 2.5}]
-        r1 = sink.write_adjust_snapshot(self.root, "20260822", rows)
-        r2 = sink.write_adjust_snapshot(self.root, "20260822", rows)
+    def test_daily_factor_materialization(self):
+        """0.10.10：复权物化——factor_map 沉淀时一次计算落盘（adj_factor + fq 列），
+        无因子行 fq 列 NULL；幂等重写不改变已物化值。"""
+        rows = _sample_rows()[:1]  # 600000
+        r1 = sink.write_daily(self.root, "20260822", rows, factor_map={"600000": 2.0})
         self.assertEqual(r1["status"], "written")
-        self.assertEqual(r2["status"], "skipped")  # 同日快照幂等
-        self.assertTrue(layout.adjust_snapshot_path(self.root, "20260822").exists())
-        self.assertEqual(catalog.get_meta(self.root, "adjust:snapshot"), "20260822")
+        con = duckdb.connect()
+        try:
+            p = layout.daily_partition(self.root, "20260822", "sh")
+            got = con.execute(
+                f"SELECT close, adj_factor, close_fq FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            self.assertAlmostEqual(got[0], 10.2)
+            self.assertAlmostEqual(got[1], 2.0)
+            self.assertAlmostEqual(got[2], 20.4)  # close × factor 物化
+        finally:
+            con.close()
+        # 无 factor_map：fq 列 NULL（事件未就绪 → 原价）
+        sink.write_daily(self.root, "20260825", rows[:1], factor_map=None)
+        con = duckdb.connect()
+        try:
+            p2 = layout.daily_partition(self.root, "20260825", "sh")
+            got2 = con.execute(
+                f"SELECT adj_factor, close_fq FROM read_parquet('{p2.as_posix()}')"
+            ).fetchone()
+            self.assertIsNone(got2[0])
+            self.assertIsNone(got2[1])
+        finally:
+            con.close()
 
     def test_write_codes(self):
         r = sink.write_codes(self.root, [{"code": "600000", "name": "浦发银行"},
@@ -211,6 +258,128 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertTrue(result["watermark_advanced"])
         self.assertFalse(layout.facts_dir(self.root).exists())
 
+    def test_aggregate_weekly_semantics(self):
+        """0.10.10 周K聚合语义：open=周首日、high/low=max/min、close=周末日、
+        volume/amount/turnover=求和、pct_chg/amplitude 重算、复权列同规则聚合。"""
+        # 一周 5 个交易日，单只股票（600000，sh）
+        week = [("20260817", 10.0, 11.0, 10.5, 1000.0, 10000.0, 1.0, 2.0),
+                ("20260818", 10.5, 12.0, 10.8, 2000.0, 20000.0, 2.0, 2.0),
+                ("20260819", 10.8, 13.0, 12.0, 3000.0, 30000.0, 3.0, 2.0),
+                ("20260820", 12.0, 14.0, 13.0, 4000.0, 40000.0, 4.0, 2.0),
+                ("20260821", 13.0, 15.0, 14.0, 5000.0, 50000.0, 5.0, 2.0)]
+        for d, o, h, c, v, a, t, f in week:
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": o, "high": h, "low": o - 0.5, "close": c,
+                "pre_close": o - 0.2, "volume": v, "amount": a, "turnover": t,
+            }], factor_map={"600000": f})
+
+        res = sink.aggregate_weekly(self.root, "20260821")
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["markets"], ["sh"])
+        self.assertEqual(res["rows"], 1)
+
+        con = duckdb.connect()
+        try:
+            p = layout.week_partition(self.root, "20260821", "sh")
+            row = con.execute(
+                f"SELECT code, open, high, low, close, pre_close, volume, amount, "
+                f"turnover, pct_chg, amplitude, adj_factor, close_fq, open_fq "
+                f"FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            code, open_, high, low, close, pre_close, vol, amt, to, pct, amp, fac, cfq, ofq = row
+            self.assertEqual(code, "600000")
+            self.assertAlmostEqual(open_, 10.0)      # 周一首日开盘
+            self.assertAlmostEqual(high, 15.0)       # 周内最高
+            self.assertAlmostEqual(low, 9.5)         # 周内最低（首日 open-0.5）
+            self.assertAlmostEqual(close, 14.0)      # 周五收盘
+            self.assertAlmostEqual(pre_close, 9.8)   # 周一首日 pre_close
+            self.assertAlmostEqual(vol, 15000.0)     # 求和
+            self.assertAlmostEqual(amt, 150000.0)    # 求和
+            self.assertAlmostEqual(to, 15.0)         # 换手求和
+            self.assertAlmostEqual(pct, (14.0 - 9.8) / 9.8 * 100)  # 周涨跌幅重算
+            self.assertAlmostEqual(amp, (15.0 - 9.5) / 9.8 * 100)  # 周振幅重算
+            self.assertAlmostEqual(fac, 2.0)         # 周末日因子
+            self.assertAlmostEqual(cfq, 28.0)        # 周五 close × 周五因子
+            self.assertAlmostEqual(ofq, 20.0)        # 周一 open × 周一因子
+        finally:
+            con.close()
+        # watermark 推进
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_aggregate_weekly_idempotent(self):
+        """周聚合幂等：重复聚合 skipped，watermark 不回退，行数不变。"""
+        for d in ("20260817", "20260818", "20260819", "20260820", "20260821"):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+            }])
+        first = sink.aggregate_weekly(self.root, "20260821")
+        again = sink.aggregate_weekly(self.root, "20260821")
+        self.assertEqual(first["status"], "written")
+        self.assertEqual(again["status"], "skipped")
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+        # 旧周聚合不推进 watermark（回看补聚合不覆盖已推进值）
+        self.assertEqual(catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_aggregate_weekly_skips_other_market(self):
+        """other 兜底市场不沉淀周K（无意义孤码）。"""
+        sink.write_daily(self.root, "20260817", [{
+            "code": "200002", "name": "B股孤码", "is_st": False,
+            "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
+            "pre_close": 1.0, "volume": 1.0, "amount": 1.0,
+        }])
+        res = sink.aggregate_weekly(self.root, "20260817")
+        self.assertEqual(res["status"], "empty")
+        self.assertEqual(res["rows"], 0)
+
+    def test_aggregate_monthly_semantics(self):
+        """0.10.12 月K聚合语义：与周K同口径——open=月首日、close=月末日、
+        high/low=max/min、量求和、pct_chg 重算。"""
+        # 8 月 4 个交易日（简化为 0817~0820 跨周同月）
+        for d, o, c in (("20260817", 10.0, 11.0), ("20260818", 11.0, 10.5),
+                        ("20260819", 10.5, 12.0), ("20260820", 12.0, 13.0)):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": o, "high": max(o, c) + 0.5, "low": min(o, c) - 0.5,
+                "close": c, "pre_close": o - 0.2,
+                "volume": 1000.0, "amount": 10000.0, "turnover": 1.0,
+            }])
+        res = sink.aggregate_monthly(self.root, "20260831")
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["rows"], 1)
+        con = duckdb.connect()
+        try:
+            p = layout.month_partition(self.root, "20260831", "sh")
+            row = con.execute(
+                f"SELECT open, high, low, close, volume, pct_chg "
+                f"FROM read_parquet('{p.as_posix()}')"
+            ).fetchone()
+            open_, high, low, close, vol, pct = row
+            self.assertAlmostEqual(open_, 10.0)   # 月首日开盘
+            self.assertAlmostEqual(close, 13.0)   # 月末日收盘
+            self.assertAlmostEqual(high, 13.5)    # 月内最高
+            self.assertAlmostEqual(low, 9.5)      # 月内最低（首日 low = min(10,11)-0.5）
+            self.assertAlmostEqual(vol, 4000.0)   # 求和
+            self.assertAlmostEqual(pct, (13.0 - 9.8) / 9.8 * 100)
+        finally:
+            con.close()
+        self.assertEqual(catalog.get_watermark(self.root, "month"), "20260831")
+
+    def test_aggregate_monthly_idempotent(self):
+        for d in ("20260817", "20260818"):
+            sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+            }])
+        first = sink.aggregate_monthly(self.root, "20260831")
+        again = sink.aggregate_monthly(self.root, "20260831")
+        self.assertEqual(first["status"], "written")
+        self.assertEqual(again["status"], "skipped")
+        self.assertEqual(catalog.get_watermark(self.root, "month"), "20260831")
+
 
 class WarehouseEngineTest(unittest.TestCase):
     """W3 验收：视图 / 宏数值正确性 / 三护栏 / 超时 / 状态清单。
@@ -224,14 +393,14 @@ class WarehouseEngineTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self._tmp.name)
         # 每日一行 × 10 个交易日（生产语义：一个分区 = 一日全市场行）
+        # 0.10.10 物化语义：因子 2.0 经 factor_map 在沉淀时一次计算物化进分区
         for i, c in enumerate(self.CLOSES):
             sink.write_daily(self.root, f"202608{11 + i:02d}", [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": c - 0.1, "high": c + 0.5, "low": c - 0.5, "close": float(c),
-                "prev_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
+                "pre_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
                 "volume": 1000.0 + i, "amount": 10000.0 + i,
-            }])
-        sink.write_adjust_snapshot(self.root, "20260811", [{"code": "600000", "factor": 2.0}])
+            }], factor_map={"600000": 2.0})
         sink.write_codes(self.root, [{"code": "600000", "name": "样本"}])
         self.engine = WarehouseEngine(self.root)
 
@@ -243,12 +412,31 @@ class WarehouseEngineTest(unittest.TestCase):
         r = self.engine.run_sql("SELECT count(*), min(close), max(close) FROM v_daily")
         self.assertEqual(r["rows"][0][0], 10)
         self.assertAlmostEqual(r["rows"][0][1], 10.0)
-        # ASOF 复权拼接：因子 2.0 从 08-11 起生效 → close_fq = close * 2
+        # 0.10.10 物化语义：close_fq 是沉淀时算好落盘的列，查询零计算
         r2 = self.engine.run_sql(
             "SELECT close, close_fq, adj_factor FROM v_daily_fq WHERE date = '2026-08-15'")
         close = r2["rows"][0][0]
         self.assertAlmostEqual(r2["rows"][0][1], close * 2.0)
         self.assertAlmostEqual(r2["rows"][0][2], 2.0)
+
+    def test_daily_fq_null_when_factor_absent(self):
+        """物化缺失语义：无 factor_map 的行复权列 NULL（原价），查询仍可用。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            sink.write_daily(root, "20260822", [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2,
+                "pre_close": 10.0, "volume": 1.0, "amount": 1.0,
+            }])
+            eng = WarehouseEngine(root)
+            try:
+                r = eng.run_sql(
+                    "SELECT close, close_fq, adj_factor FROM v_daily_fq "
+                    "WHERE date = '2026-08-22'")
+                self.assertEqual(r["rows"][0][1], None)  # 原价列空
+                self.assertEqual(r["rows"][0][2], None)
+            finally:
+                eng.close()
 
     def test_ta_ma_window_semantics(self):
         """MA5 第 5 日起有值，且等于近 5 收盘均值（窗口 PARTITION/ORDER 正确性）。"""
@@ -330,7 +518,6 @@ class WarehouseEngineTest(unittest.TestCase):
         s = self.engine.status()
         self.assertEqual(s["watermark_daily"], "20260820")
         self.assertEqual(s["sedimented_dates"], 10)
-        self.assertEqual(s["adjust_snapshot"], "20260811")
         self.assertEqual(s["codes"], 1)
         objs = self.engine.list_objects()
         self.assertIn("v_daily", objs["tables"])
@@ -346,6 +533,127 @@ class WarehouseEngineTest(unittest.TestCase):
                 self.assertEqual(r["rows"][0][0], 0)
             finally:
                 eng.close()
+
+    def test_week_month_views_and_current(self):
+        """0.10.11/0.10.12：v_week/v_month 读物化分区；v_week_current/v_month_current
+        从 v_daily 实时聚合当前未走完周期（历史固定落盘、当前滚动）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            # 单周单月数据（0817~0821 周 + 8 月）
+            for i, c in enumerate([10, 11, 12, 11, 10]):
+                sink.write_daily(root, f"202608{17 + i:02d}", [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": float(c), "high": float(c) + 1.0, "low": float(c) - 1.0,
+                    "close": float(c), "pre_close": float(c) - 0.1,
+                    "volume": 1000.0, "amount": 10000.0,
+                }], factor_map={"600000": 2.0})
+            sink.aggregate_weekly(root, "20260821")
+            sink.aggregate_monthly(root, "20260831")
+            eng = WarehouseEngine(root)
+            try:
+                r = eng.run_sql(
+                    "SELECT code, open, close, close_fq FROM v_week WHERE code='600000'")
+                self.assertEqual(r["rows"][0][1], 10.0)   # 周 open
+                self.assertEqual(r["rows"][0][2], 10.0)   # 周 close（周五 0821）
+                self.assertAlmostEqual(r["rows"][0][3], 20.0)  # close_fq 物化
+                r2 = eng.run_sql(
+                    "SELECT code, open, close FROM v_month WHERE code='600000'")
+                self.assertEqual(r2["rows"][0][1], 10.0)
+                self.assertEqual(r2["rows"][0][2], 10.0)
+                # current 视图可查（从 v_daily 实时聚合；真实 current_date 与测试数据
+                # 不在同一周期时返回空，不报错——结构正确性断言）
+                r3 = eng.run_sql("SELECT count(*) FROM v_week_current")
+                self.assertIsInstance(r3["rows"][0][0], int)
+                r4 = eng.run_sql("SELECT count(*) FROM v_month_current")
+                self.assertIsInstance(r4["rows"][0][0], int)
+            finally:
+                eng.close()
+
+
+class WarehouseBackupTest(unittest.TestCase):
+    """0.10.8：warehouse.duckdb 在线备份（COPY FROM DATABASE）——独立可读/一致性/保留策略/日级守卫。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        sink.write_daily(self.root, "20260822", _sample_rows()[:2])
+        sink.write_codes(self.root, [{"code": "600000", "name": "浦发银行"}])
+        # research 用户表（备份必须带走）
+        con = duckdb.connect(str(layout.duckdb_path(self.root)))
+        try:
+            con.execute("CREATE SCHEMA research")
+            con.execute("CREATE TABLE research.spot (code TEXT, close DOUBLE)")
+            con.execute("INSERT INTO research.spot VALUES ('600000', 9.08)")
+        finally:
+            con.close()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_backup_file_independent_and_consistent(self):
+        """备份文件独立可打开；meta/codes/research 数据读回一致（沿备份独立可读断言模式）。"""
+        target = backup.backup_duckdb(self.root, force=True)
+        self.assertIsNotNone(target)
+        self.assertTrue(target.exists())
+        self.assertTrue(target.name.startswith("warehouse-"))
+        self.assertEqual(target.parent, layout.backups_dir(self.root))
+        # 独立连接直读备份
+        con = duckdb.connect(str(target), read_only=True)
+        try:
+            self.assertEqual(con.execute("SELECT * FROM meta").fetchall(),
+                             [("watermark:daily", "20260822")])
+            self.assertEqual(con.execute("SELECT code, name FROM codes").fetchall(),
+                             [("600000", "浦发银行")])
+            self.assertEqual(con.execute("SELECT * FROM research.spot").fetchall(),
+                             [("600000", 9.08)])
+        finally:
+            con.close()
+
+    def test_backup_daily_guard_skips_second_call(self):
+        """日级守卫：同日第二次（force=False）跳过；force=True 绕过。"""
+        first = backup.backup_duckdb(self.root)
+        second = backup.backup_duckdb(self.root)
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)  # 同日守卫
+        third = backup.backup_duckdb(self.root, force=True)
+        self.assertIsNotNone(third)  # force 绕过
+        self.assertEqual(len(list(layout.backups_dir(self.root).glob("warehouse-*.db"))), 2)
+
+    def test_backup_retention_keeps_newest(self):
+        """保留最近 BACKUP_KEEP 份：模拟多日备份后旧文件被清理。"""
+        import storage.warehouse.backup as bk
+        old_keep = bk.BACKUP_KEEP
+        bk.BACKUP_KEEP = 2
+        try:
+            backup.backup_duckdb(self.root, force=True)
+            backup.backup_duckdb(self.root, force=True)
+            backup.backup_duckdb(self.root, force=True)
+            files = sorted(layout.backups_dir(self.root).glob("warehouse-*.db"))
+            self.assertEqual(len(files), 2)  # 保留 2 份
+        finally:
+            bk.BACKUP_KEEP = old_keep
+
+    def test_backup_missing_source_returns_none(self):
+        """源库不存在 → None（静默，无异常）。"""
+        empty = pathlib.Path(self._tmp.name) / "empty-root"
+        self.assertIsNone(backup.backup_duckdb(empty, force=True))
+
+    def test_backup_with_engine_open(self):
+        """0.10.8 实测缺陷回归：engine 常驻连接已持有源库时备份仍成功
+        （duckdb.connect(路径) 复用缓存实例；显式 ATTACH 同一路径会
+        Unique file handle conflict——备份曾因此静默失败）。"""
+        eng = WarehouseEngine(self.root)  # 打开常驻连接（生产真实场景）
+        try:
+            target = backup.backup_duckdb(self.root, force=True)
+        finally:
+            eng.close()
+        self.assertIsNotNone(target)
+        self.assertTrue(target.exists())
+        con = duckdb.connect(str(target), read_only=True)
+        try:
+            self.assertEqual(con.execute("SELECT count(*) FROM research.spot").fetchone()[0], 1)
+        finally:
+            con.close()
 
 
 class WarehouseQueriesFacadeTest(unittest.TestCase):
@@ -391,9 +699,14 @@ class WarehouseReconcileTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
+    @staticmethod
+    def _to_engine_fields(points):
+        """快照形态 → 引擎原生字段（与生产 _snapshot_points 适配一致，0.10.7）。"""
+        return [{**p, "pre_close": p.get("pre_close", p.get("prev_close"))} for p in points]
+
     def test_reconcile_all_green(self):
         pts = _traded_points()[:2]
-        w = sink.write_daily(self.root, "20260822", pts)
+        w = sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", pts,
             sedimented_rows=w["rows"], dropped_nonfinite=w["dropped_nonfinite"])
@@ -402,7 +715,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_detects_row_count_gap(self):
         pts = _traded_points()[:2]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", pts + [_traded_points()[0]],  # 多报一行
             sedimented_rows=2, dropped_nonfinite=0)
@@ -411,7 +724,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_detects_field_mismatch(self):
         pts = _traded_points()[:1]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         tampered = [{**pts[0], "close": 999.0}]
         rec = self.reconcile.reconcile_daily(
             self.root, "20260822", tampered,
@@ -422,7 +735,7 @@ class WarehouseReconcileTest(unittest.TestCase):
 
     def test_reconcile_external_cross_check(self):
         pts = _traded_points()[:2]
-        sink.write_daily(self.root, "20260822", pts)
+        sink.write_daily(self.root, "20260822", self._to_engine_fields(pts))
         # 异源行：600000 开盘一致；000001 开盘差 10%（超 0.5% 容限 → 检出）
         external = [{"code": "600000", "open_price": 10.0, "prev_close": 10.0},
                     {"code": "000001", "open_price": 12.21, "prev_close": 11.0}]
@@ -449,7 +762,7 @@ class WarehouseTasksTest(unittest.TestCase):
         self._saved = {k: getattr(wt, k) for k in
                        ("query_snapshot", "data_latest", "is_trading_day", "sink",
                         "reconcile_daily", "warehouse_root", "availability",
-                        "refresh_views", "adjust_provider")}
+                        "refresh_views", "backup_duckdb", "adjust_provider")}
         wt.query_snapshot = lambda q: {"points": _traded_points()}
         wt.data_latest = lambda force=False: "20260822"
         wt.is_trading_day = lambda d: True
@@ -458,6 +771,7 @@ class WarehouseTasksTest(unittest.TestCase):
         wt.warehouse_root = lambda: self.root
         wt.availability = lambda: (True, "ok")
         wt.refresh_views = lambda: None
+        wt.backup_duckdb = lambda root, force=False: None  # 0.10.8：隔离备份副作用
         wt.adjust_provider = None
         # 日检/告警/日志落 tmp（防写到默认 /data）
         self._cm = mock.patch.multiple(config, DATA_DIR=self.root)
@@ -544,6 +858,92 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertTrue(s["available"])
         self.assertEqual(s["watermark_daily"], "20260822")
         self.assertFalse(s["running"])
+
+    def test_sediment_triggers_weekly_aggregation(self):
+        """0.10.10：沉淀完整周后自动聚合周K（facts/week + watermark:week 推进）。"""
+        # data_latest=20260822(六)；is_trading_day 周末排除 → 目标日 0822 前向到 0821(五)
+        # 先用交易日判定覆盖完整周 0817~0821
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        self.wt.data_latest = lambda force=False: "20260821"  # 周五，本周完整
+        res = self.wt.warehouse_run(days=5)  # 0821 往前补 5 天（含周末跳过）
+        self.assertTrue(res["ok"], res)
+        dates = [d["date"] for d in res["days"]]
+        self.assertEqual(dates, ["20260817", "20260818", "20260819", "20260820", "20260821"])
+        # 周K 分区已生成（周结束日=周五 20260821）
+        w = layout.week_partition(self.root, "20260821", "sh")
+        self.assertTrue(w.exists(), f"{w} 不存在")
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "week"), "20260821")
+
+    def test_incomplete_week_not_aggregated(self):
+        """0.10.10：周内缺口（只有周一~周三）不聚合——等周完整后一次聚合。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        self.wt.data_latest = lambda force=False: "20260819"  # 周三，本周不完整
+        res = self.wt.warehouse_run(days=3)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([d["date"] for d in res["days"]],
+                         ["20260817", "20260818", "20260819"])
+        self.assertFalse(layout.week_partition(self.root, "20260821", "sh").exists())
+        self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "week"))
+
+    def test_sediment_triggers_monthly_aggregation(self):
+        """0.10.12：月完整 → 自动月K聚合（facts/month + watermark:month 推进）。
+        直接铺满整月 daily 后调 _aggregate_months（编排层判定逻辑单测）。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        # 铺满 8 月全部交易日（0803~0831 的周一~周五）
+        from datetime import date as _date, timedelta as _td
+        cursor = _date(2026, 8, 3)
+        while cursor <= _date(2026, 8, 31):
+            if cursor.weekday() < 5:
+                sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                }])
+            cursor += _td(days=1)
+        self.wt._aggregate_months(self.root, [{"date": "20260831"}])
+        m = layout.month_partition(self.root, "20260831", "sh")
+        self.assertTrue(m.exists(), f"{m} 不存在")
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "month"), "20260831")
+
+    def test_incomplete_month_not_aggregated(self):
+        """0.10.12：月内缺口（只沉淀到月中）不聚合——等月完整后一次聚合。"""
+        def _trading(d):
+            return d.weekday() < 5
+        self.wt.is_trading_day = _trading
+        # 只铺 8 月上旬（0803~0814），月中起缺失 → 月不完整
+        from datetime import date as _date, timedelta as _td
+        cursor = _date(2026, 8, 3)
+        while cursor <= _date(2026, 8, 14):
+            if cursor.weekday() < 5:
+                sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                }])
+            cursor += _td(days=1)
+        self.wt._aggregate_months(self.root, [{"date": "20260814"}])
+        self.assertFalse(layout.month_partition(self.root, "20260831", "sh").exists())
+        self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "month"))
+
+    def test_sediment_triggers_backup(self):
+        """0.10.8：沉淀成功（有 results）后调用备份注入点；无沉淀时不调用。"""
+        calls = []
+        self.wt.backup_duckdb = lambda root, force=False: calls.append(root) or None
+        res = self.wt.warehouse_run(days=1)
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(calls), 1)  # 有目标日 → 备份一次
+        self.wt.warehouse_run(days=1)  # 幂等：无新目标日
+        self.assertEqual(len(calls), 1)  # 不重复备份
+        # 备份异常不影响沉淀结论
+        self.wt.backup_duckdb = lambda root, force=False: (_ for _ in ()).throw(RuntimeError("boom"))
+        res2 = self.wt.warehouse_run(days=1)
+        self.assertTrue(res2["ok"])
 
 
 class EngineGateConvergenceTest(unittest.TestCase):

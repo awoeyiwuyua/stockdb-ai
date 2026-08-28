@@ -4,6 +4,86 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.12] — 2026-08-23（month 聚合落地 + 当前周期派生视图 + 完整性校验修复）
+
+- **月K聚合物化（sink.aggregate_monthly）**：与周K同口径（公共 `_kline_aggregate_sql`
+  骨架），facts/month/year=YYYY/market=xx/date=YYYYMMDD（月末）；自动触发：沉淀后
+  对覆盖到的自然月聚合，**月完整才聚合**
+- **完整性校验修复**：旧 `_week_complete` 只比较 watermark ≥ 周期最后交易日——数据
+  缺口时 watermark 仍推进会误判完整，残缺周期被聚合后幂等无法重写；现改为逐交易日
+  校验 daily 分区文件/empty 标记存在，缺任何一天 → 不完整 → 等补齐后下次聚合
+- **当前未走完周期 = 派生视图**（股票软件"进行中的周/月K"语义）：`v_week_current` /
+  `v_month_current` 查询时从 v_daily 实时聚合（周期边界 = 本周一/本月1日 →
+  current_date）；历史周期固定落盘、当前周期滚动可见
+- **真实链路验证**：8 月仅 W34 五天 → 月K 正确跳过（watermark:month=None 无残缺月）；
+  v_week 5182 行 + v_week_current 同周重合（历史/当前语义正确）
+- 227 测试全绿（新增月聚合语义/幂等/完整月触发/月内缺口跳过/current 视图）
+
+## [0.10.11] — 2026-08-23（粒度阶梯第一级：week 聚合物化落地）
+
+- **周K聚合物化（sink.aggregate_weekly）**：沉淀任务完成后自动触发——对每个覆盖到的
+  自然周，**周完整才聚合**（daily watermark 覆盖周内全部交易日；周内缺口/周五未到
+  跳过，避免"先聚合后补全"时周分区已存在无法重写）；节假日周以实际最后交易日判定
+- **聚合语义（周K 口径）**：open/close=首末日（arg_min/arg_max by date）、
+  high/low=max/min、volume/amount/turnover=求和、pct_chg/amplitude 重算（周口径）、
+  vol_ratio=NULL、时点类=周末日、复权物化列同规则聚合（open_fq=首日/close_fq=末日）
+- **周分区与 daily 同构 26 列**（facts/week/year=YYYY/market=xx/date=YYYYMMDD），
+  幂等（已存在跳过）+ watermark:week 只前进；other 孤码不沉淀
+- **真实链路验证**：W34（0817~0821）5 日 → 周K 5182 行，600000 逐字段手工核对
+  （open=9.09/high=9.15/low=8.96/close=9.05/volume=3.12 亿求和）全一致
+- 222 测试全绿（新增聚合语义/幂等/完整周触发/不完整周跳过/other 跳过）
+
+## [0.10.10] — 2026-08-23（粒度阶梯定稿 + 复权沉淀时物化，取代 0.10.9 矩阵）
+
+- **七级粒度阶梯（用户拍板，取代 0.10.9 矩阵）**：tick→minute→hour→daily→week→
+  month→year，每级独立 dataset + watermark。**只有 tick 按 code 分层**（流式写入），
+  其余全部时间分层，二级目录统一 `year=YYYY/market=xx` 切入（与 daily 同构）；
+  minute 家族（1m/5m/15m/30m）以 period 目录段区分，hour=60m；hk 并入 daily 的
+  market=hk 分区。lhb/fundamental 等事件/快照类暂不占位。
+- **复权重构（用户拍板：聚合层面一次计算、多次复用）**：废弃独立 adjust dataset 与
+  查询时 ASOF JOIN——沉淀任务经 adjust_provider 注入因子事件 → factor_map 缓存 →
+  sink 物化 adj_factor+open_fq/high_fq/low_fq/close_fq 进 daily 分区；v_daily_fq =
+  v_daily 直读物化列（零 JOIN 零计算）。事件源是内存输入不占 facts；week/month/year
+  聚合物化时同带复权列。
+- **真实链路验证**：引擎快照 5179 行沉淀 + 真实因子物化（600000 cum=13.35 →
+  close_fq=120.82）对账全绿；旧 schema 分区（0.10.9 无物化列）已删除重沉淀。
+- 217 测试全绿（新增物化列落盘/NULL 语义/粒度阶梯路径断言）。
+
+## [0.10.9] — 2026-08-23（facts/<dataset> 分区策略矩阵定稿）
+
+- **分区策略矩阵（docs/design/warehouse.md §2.2）**：分区维度由**访问形态**决定——
+  横截面优先按日（daily/lhb），单码时序优先按码（minute/tick），全量快照版本化
+  （adjust）。7 个 dataset 全量登记：daily（现役）/adjust（现役）/minute/lhb/
+  hk_daily/fundamental/tick（延后，各自 watermark 键与写入通道）。
+- 分钟K 粒度归一：5m/15m/30m/60m 共享 minute dataset（period 列区分，引擎原生
+  8 列），不拆多 dataset；tick 是唯一允许日内多文件（part=HHMM 窗口）的 dataset。
+- layout.py 新增 minute_partition / lhb_partition（统一路径入口，sink/查询共用）；
+  布局测试补 dataset 矩阵路径断言。
+
+## [0.10.8] — 2026-08-23（root 锁定 + warehouse.duckdb 日级备份 + 回填脚本修复）
+
+- **root 锁定（用户 2026-08-23 拍板）**：所有数据存放于 `<repo>/data`，仓库根 =
+  `<repo>/data/warehouse`。config 启动校验：Windows 上 DATA_DIR 未显式设置（默认 /data
+  解析为 C:\data——本机漂移事故源头）即 stderr 警告；WAREHOUSE_DIR 显式但偏离锁定布局
+  也警告。dev.sh 固化 `WAREHOUSE_DIR=$DATA_DIR/warehouse` 并 mkdir + 打印。
+- **warehouse.duckdb 每日备份（C5 落地）**：沉淀任务成功且有目标日后一次，
+  `COPY FROM DATABASE` 独立连接在线快照（含 meta/codes/research 表/视图宏），
+  保留最近 14 份，失败静默不阻塞沉淀；facts/ 可从引擎重拉不纳入备份。
+- **回填脚本修复**：`backfill_daily_direct.py` 双 `def main()` 事故（旧 staging 版覆盖
+  纯内存版且引用未 import 的 shutil）——删除旧版，恢复 0.10.7 纯内存转置通道。
+- 51 个 warehouse 测试全绿（新增备份 5 测试 + 备份触发链路测试）。
+
+## [0.10.7] — 2026-08-23（日K 原样镜像 21 列 + 全量回填重启）
+
+- **镜像语义定稿（用户原则：读到什么写什么）**：日K 列改为引擎原生 21 字段
+  原样镜像（此前 11 列且 pre_close 被改名 prev_close——直连通道全量被护栏误拒
+  的根因）；缺字段=NULL、NaN/Inf 消毒为 NULL（不再拒行）；改名/裁剪归通道适配
+  （快照通道 prev_close→pre_close 适配在服务层）
+- **全量回填通道决策**：引擎原生无「某日全市场」接口（实测中间通配 0 根）；
+  全量回填走快照通道（按日逻辑，与调度同构，~6300 日约一夜）；扩展 10 列
+  （turnover/pb/pe_ttm/市值等）该通道不可见暂为 NULL；scripts/backfill_daily_direct.py
+  保留为按码全字段快速重灌工具（纯内存转置，15 分钟级）
+- 329 测试全绿（镜像语义/字段适配/消毒断言更新）
 ## [0.10.6] — 2026-08-23（缺口感知回填：修复中断续跑漏洞 + 空交易日标记）
 
 - **全量回填实测发现**：旧 backfill 语义只从「最早已沉淀日」向下挖——进程中断后
