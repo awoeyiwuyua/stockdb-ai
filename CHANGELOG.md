@@ -4,6 +4,19 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.17] — 2026-08-29（backfill 语义修正：anchor 当天纳入回看——迁移空洞自愈）
+
+> NAS 迁移实证的边缘缺口：删 0828 分区文件后跑 backfill，目标集"从 anchor
+> 前一天起扫"永远不含 anchor 当天 → 0828 成永久空洞，0.10.12 完整月校验因
+> 缺文件拒绝聚合 → 月K 永久卡死。修后 anchor（watermark 当天）纳入目标集，
+> 文件在时 skip-existing 幂等跳过、缺失时补写。
+
+- services/warehouse_tasks.py：backfill cursor 起点 anchor（含），一行语义修正
+- 测试：新增 test_backfill_rewrites_missing_anchor_partition（删 anchor 分区 →
+  backfill 补写、watermark 不回退）；原 fills_history 断言更新（388 全绿）
+- 附 0.10.16 部署实机验证：降级守护生效（schema 落后告警自动投递、current
+  视图空占位可查不炸）；CI 容器冒烟 job 上线（PR #126/#127）
+
 ## [0.10.16] — 2026-08-29（hotfix：旧分区 schema 落后降级守护——0.10.7 扩列迁移缺口）
 
 > 0.10.15 部署后实机验证发现：NAS 的 daily 分区是 0.10.6 时代的 **11 列**

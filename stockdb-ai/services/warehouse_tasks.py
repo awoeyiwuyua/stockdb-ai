@@ -122,7 +122,11 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
         if backfill:
             sedimented = sink.layout.list_daily_dates(root) if hasattr(sink, "layout") else []
             anchor = watermark or (sedimented[-1] if sedimented else latest)
-            cursor = _prev_date(anchor)
+            # 0.10.17：anchor 当天纳入回看——正常时它有分区（循环内 skip-existing）；
+            # 分区文件缺失（迁移删文件/磁盘事故）时这正是要补的洞。此前从 anchor
+            # 前一天起扫，NAS 08-29 迁移实证：删 0828 分区后该日成永久空洞且
+            # 完整月校验拒绝聚合（月卡死）。
+            cursor = anchor
             while len(targets) < days and cursor >= _BACKFILL_FLOOR:
                 if is_trading_day is None or is_trading_day(
                         datetime.strptime(cursor, "%Y%m%d").date()):
