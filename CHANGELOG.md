@@ -4,6 +4,22 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.16] — 2026-08-29（hotfix：旧分区 schema 落后降级守护——0.10.7 扩列迁移缺口）
+
+> 0.10.15 部署后实机验证发现：NAS 的 daily 分区是 0.10.6 时代的 **11 列**
+> （0.10.7 扩 26 列新增的 turnover/pb/pe_ttm/物化复权列等在旧分区不存在），
+> v_week_current/v_month_current 聚合引用新列 → Binder Error **炸掉整个
+> refresh_views**——v_daily 明明可查却全仓库工具不可用。本地测试绿是因测试库
+> 从零建全 26 列（schema 演进 vs 存量数据的迁移缺口，0.10.14 只核对了列名
+> 漏了列数）。NAS 迁移 = 删 4 个旧分区文件（2 日 × sh/sz）+ backfill 重写。
+
+- **engine.refresh_views schema 检测**：v_daily 实际列 ⊅ 26 列名集校验，
+  缺列时 log + 告警（error/warehouse，附迁移指令），v_daily/宏照常注册可用
+- **current 派生视图优雅降级**：schema 落后时注册 26 列空视图占位（可查不炸），
+  迁移重写后下次 refresh_views 自动恢复真实聚合
+- 测试：旧 11 列分区手工构造 → refresh_views 不炸 + current 空占位可查
+  （387 全绿）
+
 ## [0.10.15] — 2026-08-29（MCP 新增 warehouse_run：AI 一句话触发沉淀/回填）
 
 - **warehouse_run 工具（仓库组第 4 工具，56→57）**：days（常规 1~5）、backfill=true

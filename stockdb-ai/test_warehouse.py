@@ -436,6 +436,45 @@ class WarehouseEngineTest(unittest.TestCase):
         self.assertAlmostEqual(r2["rows"][0][1], close * 2.0)
         self.assertAlmostEqual(r2["rows"][0][2], 2.0)
 
+    def test_legacy_11col_partition_degrades_not_crashes(self):
+        """0.10.16 schema 落后守护：旧 11 列分区（0.10.6 时代）不炸 refresh_views。
+
+        NAS 08-29 实证：v_daily 有 11 列即可查，但 v_week_current/v_month_current
+        聚合引用 turnover 等 0.10.7 新增列 → Binder Error 炸掉整个视图注册，
+        warehouse 全工具不可用。降级语义：v_daily/宏正常，current 视图空占位，
+        告警指路迁移（删旧分区 + backfill 重写）。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            # 手工写一个 11 列旧分区（绕过 sink 的 26 列 schema，模拟 0.10.6 遗留）
+            part = layout.daily_partition(root, "20260822", "sh")
+            part.parent.mkdir(parents=True, exist_ok=True)
+            con = duckdb.connect()
+            try:
+                con.execute("""
+                    COPY (SELECT * FROM (VALUES
+                        ('600000', DATE '2026-08-22', '样本', FALSE,
+                         10.0, 10.5, 9.9, 10.2, 10.0, 1000.0, 10000.0)
+                    ) t(code, date, name, is_st, open, high, low, close,
+                        prev_close, volume, amount))
+                    TO '{}' (FORMAT PARQUET)
+                """.format(part.as_posix()))
+            finally:
+                con.close()
+            eng = WarehouseEngine(root)  # 构造即 refresh_views——不许炸
+            try:
+                # v_daily 本身可查（11 列）
+                r = eng.run_sql("SELECT count(*), code FROM v_daily GROUP BY code")
+                self.assertEqual(r["rows"][0][0], 1)
+                # current 派生视图 = 空占位（26 列、0 行），可查不炸
+                r2 = eng.run_sql("SELECT count(*) FROM v_week_current")
+                self.assertEqual(r2["rows"][0][0], 0)
+                r3 = eng.run_sql("SELECT count(*) FROM v_month_current")
+                self.assertEqual(r3["rows"][0][0], 0)
+            finally:
+                eng.close()
+            self.assertTrue(part.exists())
+
     def test_daily_fq_null_when_factor_absent(self):
         """物化缺失语义：无 factor_map 的行复权列 NULL（原价），查询仍可用。"""
         with tempfile.TemporaryDirectory() as tmp:
