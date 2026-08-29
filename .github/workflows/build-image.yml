@@ -88,6 +88,71 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  smoke-container:
+    name: Container smoke (amd64: boot + webui + diag)
+    needs: build-stockdb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout（读 config.py 校验镜像内版本一致性）
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_PAT }}
+
+      # 0.10.17：部署前容器级验证——历史上"构建成功≠能跑"（webui 拆分改 COPY 路径、
+      # entrypoint/静态资源等问题构建期不暴露）。起 amd64 容器（arm64 由 verify-pybao
+      # 覆盖导入层），断言 webui 启动、版本与 config.py 一致、diag 全绿。
+      # 引擎 7899 空库探活做非阻断展示（空数据卷下行为不作为门禁）。
+      - name: Boot container
+        run: |
+          docker run -d --name smoke -p 18080:8080 \
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/version >/dev/null 2>&1; then
+              echo "webui ready after ~$((i*3))s"; break
+            fi
+            sleep 3
+          done
+
+      - name: Assert webui version matches config.py
+        run: |
+          EXPECTED="$(grep -oP 'WEBUI_VERSION: str = "\K[^"]+' stockdb-ai/config.py | head -1)"
+          ACTUAL="$(curl -fsS http://127.0.0.1:18080/api/version | python3 -c 'import json,sys; print(json.load(sys.stdin)["webui"]["version"])')"
+          echo "expected=$EXPECTED actual=$ACTUAL"
+          [ "$EXPECTED" = "$ACTUAL" ] || { echo "::error::镜像内 webui 版本($ACTUAL)与 config.py($EXPECTED)不一致"; exit 1; }
+
+      - name: Assert diag all green
+        run: |
+          curl -fsS http://127.0.0.1:18080/api/diag | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          for c in d["checks"]:
+              print(("  ok " if c["ok"] else "  FAIL "), c["name"], "-", c["note"][:60])
+          assert d["all_ok"], "diag 存在失败项"
+          print("diag all_ok =", d["all_ok"])'
+
+      - name: Engine probe (non-blocking)
+        run: |
+          echo "--- 7899 代码表探针（空库展示，不作门禁）:"
+          docker exec smoke curl -sS -m 5 \
+            "http://127.0.0.1:7899/?cmd=get&t=%E8%82%A1%E7%A5%A8%E4%BB%A3%E7%A0%81" | head -c 120 || \
+            echo "::warning::引擎 7899 空库探针未返回（不阻断）"
+
+      - name: Container logs
+        if: always()
+        run: docker logs smoke --tail 50 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f smoke || true
+
   verify-pybao:
     name: Verify pybao import (amd64+arm64)
     needs: build-stockdb
