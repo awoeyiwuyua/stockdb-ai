@@ -1061,9 +1061,9 @@ class McpWarehouseToolsTest(unittest.TestCase):
     def test_warehouse_group_registration(self):
         names = {t["name"] for t in self.srv.TOOLS if t.get("group") == "warehouse"}
         self.assertEqual(names, {"warehouse_run_sql", "warehouse_list_tables",
-                                 "warehouse_status"})
+                                 "warehouse_status", "warehouse_run"})
         self.assertIn("warehouse", self.srv.TOOL_GROUPS)
-        # 分组过滤：group=warehouse 只见 3 工具
+        # 分组过滤：group=warehouse 只见 4 工具（0.10.15 增 warehouse_run 触发口）
         listed = self.srv._tools_for_group("warehouse")
         self.assertEqual({t["name"] for t in listed}, names)
 

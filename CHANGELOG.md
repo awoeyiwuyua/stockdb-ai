@@ -4,6 +4,17 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.15] — 2026-08-29（MCP 新增 warehouse_run：AI 一句话触发沉淀/回填）
+
+- **warehouse_run 工具（仓库组第 4 工具，56→57）**：days（常规 1~5）、backfill=true
+  历史回填模式（上限 9999）；转发 services 层 warehouse_run_async（单飞/守卫/幂等
+  全在服务层），异步触发、进度经 warehouse_status 查询；未装配 → DEPENDENCY_UNAVAILABLE；
+  参数校验提前报错（days 显式 0/负数/超上限拒绝，不用 or 短路吞掉）
+- **使用建议写进工具描述**：先 warehouse_status 看 watermark 差距，回填分批
+  （60~250 天/次）跑完再放量——全市场快照逐日构建，历史回填是长任务
+- 测试：MCP 125 + 全量 386 绿（warehouse_run 注册/转发/校验/降级四分支 +
+  分组注册断言更新 + 工具计数 15→16 原生）
+
 ## [0.10.14] — 2026-08-29（hotfix：仓库 daily 列名 prev_close 对齐——0.10.7 扩列笔误）
 
 > 0.10.13 部署后实机探测发现（NAS warehouse_list_tables Binder Error）：
