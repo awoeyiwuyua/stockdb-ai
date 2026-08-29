@@ -20,11 +20,13 @@ from . import catalog, layout
 # 0.10.10：末尾追加物化复权伴随列（adj_factor + 4 fq 价格）——沉淀时一次计算、
 # 查询零计算（取代查询时 ASOF JOIN）；事件未就绪时 5 列为 NULL（原价）
 _DAILY_COLUMNS = (
-    # 引擎日K原生字段（21 列，0.10.7 起原样镜像：不改名/不裁剪——此前 11 列且
-    # pre_close 被改名 prev_close，直连通道全量被护栏误拒的根因）
+    # 引擎日K原生字段（21 列，0.10.7 起原样镜像：不改名/不裁剪）。
+    # ⚠️ 列名以引擎快照键为准（prev_close，0.10.6 写入即此名）；0.10.7 扩 26 列时
+    # 此行曾误写 pre_close——快照键 prev_close 取不到值 → 该列全 NULL，且聚合 SQL
+    # 同步引用旧名致 Binder Error（0.10.14 纠正；fixture 守护断言防再脱节）。
     ("code", "TEXT"), ("date", "DATE"), ("name", "TEXT"), ("is_st", "BOOLEAN"),
     ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"), ("close", "DOUBLE"),
-    ("pre_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+    ("prev_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
     ("turnover", "DOUBLE"), ("pct_chg", "DOUBLE"), ("amplitude", "DOUBLE"),
     ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
     ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
@@ -181,8 +183,8 @@ def _kline_aggregate_sql(period_start, period_end, glob: str) -> str:
       open/close      = 周期内首/末日开盘/收盘（first/last by date）
       high/low        = 周期内最高/最低（max/min）
       volume/amount/turnover = 周期内求和
-      pct_chg         = (末 close - 首日 pre_close) / 首日 pre_close（周期涨跌幅，重算）
-      amplitude       = (high - low) / 首日 pre_close（周期振幅，重算）
+      pct_chg         = (末 close - 首日 prev_close) / 首日 prev_close（周期涨跌幅，重算）
+      amplitude       = (high - low) / 首日 prev_close（周期振幅，重算）
       vol_ratio       = NULL（周期级无定义）
       is_st/name/pb/pe_ttm/市值类 = 周期末日（last by date）
       adj_factor      = 周期末日因子；open_fq/high_fq/low_fq/close_fq = 物化列同规则
@@ -210,15 +212,15 @@ def _kline_aggregate_sql(period_start, period_end, glob: str) -> str:
             max(high) AS high,
             min(low) AS low,
             arg_max(close, date) AS close,
-            arg_min(pre_close, date) AS pre_close,
+            arg_min(prev_close, date) AS prev_close,
             sum(volume) AS volume,
             sum(amount) AS amount,
             sum(turnover) AS turnover,
-            CASE WHEN arg_min(pre_close, date) > 0
-                 THEN (arg_max(close, date) - arg_min(pre_close, date))
-                      / arg_min(pre_close, date) * 100 END AS pct_chg,
-            CASE WHEN arg_min(pre_close, date) > 0
-                 THEN (max(high) - min(low)) / arg_min(pre_close, date) * 100 END AS amplitude,
+            CASE WHEN arg_min(prev_close, date) > 0
+                 THEN (arg_max(close, date) - arg_min(prev_close, date))
+                      / arg_min(prev_close, date) * 100 END AS pct_chg,
+            CASE WHEN arg_min(prev_close, date) > 0
+                 THEN (max(high) - min(low)) / arg_min(prev_close, date) * 100 END AS amplitude,
             NULL AS vol_ratio,
             arg_max(pb, date) AS pb,
             arg_max(pe_ttm, date) AS pe_ttm,

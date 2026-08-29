@@ -4,6 +4,21 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.14] — 2026-08-29（hotfix：仓库 daily 列名 prev_close 对齐——0.10.7 扩列笔误）
+
+> 0.10.13 部署后实机探测发现（NAS warehouse_list_tables Binder Error）：
+> 0.10.7「原样镜像」扩 26 列时 `_DAILY_COLUMNS` 把引擎原生列名 **prev_close**
+> 误写为 **pre_close**（注释语义亦写反）；引擎快照键是 prev_close → 取不到值，
+> 一旦周一沉淀将写出 pre_close 全 NULL 分区 + 聚合 SQL Binder Error 事故。
+> 0.10.6 写入即用 prev_close，NAS 现有分区无恙——事故在周一前被拦下。
+
+- **sink._DAILY_COLUMNS / 聚合 SQL / engine v_daily schema / reconcile 分区读取**
+  四处统一为引擎原生 `prev_close`（对账域与快照同名，去反向映射）
+- **fixture 守护断言**（test_warehouse._guard_fixture_keys）：fixture 键 ⊆
+  _DAILY_COLUMNS 名集，模块加载即校验——schema 演进（改名/删列）时先炸测试
+  而非实盘聚合（本次 fixture 与 schema 同错致 381 测试全绿仍漏检的根因）
+- 部署 0.10.13 → 0.10.14 无数据迁移（旧分区列名本就正确）；381 测试全绿
+
 ## [0.10.13] — 2026-08-28（数据晚到自愈：滞后重试 + 补沉淀 + 晚间兜底告警）
 
 > 0.10.6 试运行 08-28 实证的可靠性缺口：镜像源晚于 15:50 发布当日日K，定时同步

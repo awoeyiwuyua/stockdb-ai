@@ -28,25 +28,42 @@ def _sample_rows() -> list[dict]:
     """三市场 + ETF + 北交所 的迷你全市场样本。"""
     return [
         {"code": "600000", "name": "浦发银行", "is_st": False,
-         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "pre_close": 10.0,
+         "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2, "prev_close": 10.0,
          "volume": 1234567.0, "amount": 12500000.0},
         {"code": "000001", "name": "平安银行", "is_st": False,
-         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "pre_close": 11.0,
+         "open": 11.0, "high": 11.2, "low": 10.8, "close": 11.1, "prev_close": 11.0,
          "volume": 2234567.0, "amount": 24500000.0},
         {"code": "300750", "name": "宁德时代", "is_st": False,
-         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "pre_close": 200.0,
+         "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0, "prev_close": 200.0,
          "volume": 3234567.0, "amount": 650000000.0},
         {"code": "920001", "name": "北交样本", "is_st": False,
-         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "pre_close": 5.0,
+         "open": 5.0, "high": 5.2, "low": 4.9, "close": 5.1, "prev_close": 5.0,
          "volume": 234567.0, "amount": 1200000.0},
         {"code": "510300", "name": "沪深300ETF", "is_st": None,
-         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "pre_close": 4.0,
+         "open": 4.0, "high": 4.02, "low": 3.98, "close": 4.01, "prev_close": 4.0,
          "volume": 8234567.0, "amount": 33000000.0},
         # 镜像语义用例（0.10.7）：close=NaN 的行不再被拒——消毒为 NULL 落盘
         {"code": "600001", "name": "脏行", "is_st": False,
-         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "pre_close": 1.0,
+         "open": 1.0, "high": 1.0, "low": 1.0, "close": float("nan"), "prev_close": 1.0,
          "volume": 1.0, "amount": 1.0},
     ]
+
+
+def _guard_fixture_keys():
+    """守护断言（0.10.14）：fixture 键名必须全部落在 _DAILY_COLUMNS 名集内。
+
+    0.10.7 扩列时 _DAILY_COLUMNS 误写 pre_close 而引擎快照键是 prev_close——
+    fixture 跟着用旧名，写入侧该列全 NULL、聚合 SQL Binder Error，测试因
+    fixture/schema 同错而双双失真。此守护强制 fixture 与生产 schema 对齐：
+    schema 演进（改名/删列）时先炸这里，而非周一实盘聚合。
+    """
+    known = {name for name, _ in sink._DAILY_COLUMNS}
+    for row in _sample_rows():
+        unknown = set(row) - known
+        assert not unknown, f"fixture 键 {unknown} 不在 _DAILY_COLUMNS（schema 脱节）"
+
+
+_guard_fixture_keys()
 
 
 class WarehouseAvailabilityTest(unittest.TestCase):
@@ -271,7 +288,7 @@ class WarehouseSinkTest(unittest.TestCase):
             sink.write_daily(self.root, d, [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": o, "high": h, "low": o - 0.5, "close": c,
-                "pre_close": o - 0.2, "volume": v, "amount": a, "turnover": t,
+                "prev_close": o - 0.2, "volume": v, "amount": a, "turnover": t,
             }], factor_map={"600000": f})
 
         res = sink.aggregate_weekly(self.root, "20260821")
@@ -283,17 +300,17 @@ class WarehouseSinkTest(unittest.TestCase):
         try:
             p = layout.week_partition(self.root, "20260821", "sh")
             row = con.execute(
-                f"SELECT code, open, high, low, close, pre_close, volume, amount, "
+                f"SELECT code, open, high, low, close, prev_close, volume, amount, "
                 f"turnover, pct_chg, amplitude, adj_factor, close_fq, open_fq "
                 f"FROM read_parquet('{p.as_posix()}')"
             ).fetchone()
-            code, open_, high, low, close, pre_close, vol, amt, to, pct, amp, fac, cfq, ofq = row
+            code, open_, high, low, close, prev_close, vol, amt, to, pct, amp, fac, cfq, ofq = row
             self.assertEqual(code, "600000")
             self.assertAlmostEqual(open_, 10.0)      # 周一首日开盘
             self.assertAlmostEqual(high, 15.0)       # 周内最高
             self.assertAlmostEqual(low, 9.5)         # 周内最低（首日 open-0.5）
             self.assertAlmostEqual(close, 14.0)      # 周五收盘
-            self.assertAlmostEqual(pre_close, 9.8)   # 周一首日 pre_close
+            self.assertAlmostEqual(prev_close, 9.8)   # 周一首日 prev_close
             self.assertAlmostEqual(vol, 15000.0)     # 求和
             self.assertAlmostEqual(amt, 150000.0)    # 求和
             self.assertAlmostEqual(to, 15.0)         # 换手求和
@@ -313,7 +330,7 @@ class WarehouseSinkTest(unittest.TestCase):
             sink.write_daily(self.root, d, [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
-                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                "prev_close": 9.8, "volume": 1000.0, "amount": 10000.0,
             }])
         first = sink.aggregate_weekly(self.root, "20260821")
         again = sink.aggregate_weekly(self.root, "20260821")
@@ -328,7 +345,7 @@ class WarehouseSinkTest(unittest.TestCase):
         sink.write_daily(self.root, "20260817", [{
             "code": "200002", "name": "B股孤码", "is_st": False,
             "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0,
-            "pre_close": 1.0, "volume": 1.0, "amount": 1.0,
+            "prev_close": 1.0, "volume": 1.0, "amount": 1.0,
         }])
         res = sink.aggregate_weekly(self.root, "20260817")
         self.assertEqual(res["status"], "empty")
@@ -343,7 +360,7 @@ class WarehouseSinkTest(unittest.TestCase):
             sink.write_daily(self.root, d, [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": o, "high": max(o, c) + 0.5, "low": min(o, c) - 0.5,
-                "close": c, "pre_close": o - 0.2,
+                "close": c, "prev_close": o - 0.2,
                 "volume": 1000.0, "amount": 10000.0, "turnover": 1.0,
             }])
         res = sink.aggregate_monthly(self.root, "20260831")
@@ -372,7 +389,7 @@ class WarehouseSinkTest(unittest.TestCase):
             sink.write_daily(self.root, d, [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
-                "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                "prev_close": 9.8, "volume": 1000.0, "amount": 10000.0,
             }])
         first = sink.aggregate_monthly(self.root, "20260831")
         again = sink.aggregate_monthly(self.root, "20260831")
@@ -398,7 +415,7 @@ class WarehouseEngineTest(unittest.TestCase):
             sink.write_daily(self.root, f"202608{11 + i:02d}", [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": c - 0.1, "high": c + 0.5, "low": c - 0.5, "close": float(c),
-                "pre_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
+                "prev_close": float(self.CLOSES[i - 1]) if i else c - 0.2,
                 "volume": 1000.0 + i, "amount": 10000.0 + i,
             }], factor_map={"600000": 2.0})
         sink.write_codes(self.root, [{"code": "600000", "name": "样本"}])
@@ -426,7 +443,7 @@ class WarehouseEngineTest(unittest.TestCase):
             sink.write_daily(root, "20260822", [{
                 "code": "600000", "name": "样本", "is_st": False,
                 "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.2,
-                "pre_close": 10.0, "volume": 1.0, "amount": 1.0,
+                "prev_close": 10.0, "volume": 1.0, "amount": 1.0,
             }])
             eng = WarehouseEngine(root)
             try:
@@ -544,7 +561,7 @@ class WarehouseEngineTest(unittest.TestCase):
                 sink.write_daily(root, f"202608{17 + i:02d}", [{
                     "code": "600000", "name": "样本", "is_st": False,
                     "open": float(c), "high": float(c) + 1.0, "low": float(c) - 1.0,
-                    "close": float(c), "pre_close": float(c) - 0.1,
+                    "close": float(c), "prev_close": float(c) - 0.1,
                     "volume": 1000.0, "amount": 10000.0,
                 }], factor_map={"600000": 2.0})
             sink.aggregate_weekly(root, "20260821")
@@ -702,7 +719,7 @@ class WarehouseReconcileTest(unittest.TestCase):
     @staticmethod
     def _to_engine_fields(points):
         """快照形态 → 引擎原生字段（与生产 _snapshot_points 适配一致，0.10.7）。"""
-        return [{**p, "pre_close": p.get("pre_close", p.get("prev_close"))} for p in points]
+        return [{**p, "prev_close": p.get("prev_close", p.get("prev_close"))} for p in points]
 
     def test_reconcile_all_green(self):
         pts = _traded_points()[:2]
@@ -903,7 +920,7 @@ class WarehouseTasksTest(unittest.TestCase):
                 sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
                     "code": "600000", "name": "样本", "is_st": False,
                     "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
-                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                    "prev_close": 9.8, "volume": 1000.0, "amount": 10000.0,
                 }])
             cursor += _td(days=1)
         self.wt._aggregate_months(self.root, [{"date": "20260831"}])
@@ -924,7 +941,7 @@ class WarehouseTasksTest(unittest.TestCase):
                 sink.write_daily(self.root, cursor.strftime("%Y%m%d"), [{
                     "code": "600000", "name": "样本", "is_st": False,
                     "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
-                    "pre_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+                    "prev_close": 9.8, "volume": 1000.0, "amount": 10000.0,
                 }])
             cursor += _td(days=1)
         self.wt._aggregate_months(self.root, [{"date": "20260814"}])
