@@ -37,7 +37,7 @@ _DAILY_GLOB = "daily/*/*/date=*.parquet"
 _DAILY_EMPTY_COLUMNS = [
     ("code", "TEXT"), ("date", "DATE"), ("name", "TEXT"), ("is_st", "BOOLEAN"),
     ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"), ("close", "DOUBLE"),
-    ("pre_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+    ("prev_close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
     ("turnover", "DOUBLE"), ("pct_chg", "DOUBLE"), ("amplitude", "DOUBLE"),
     ("vol_ratio", "DOUBLE"), ("pb", "DOUBLE"), ("pe_ttm", "DOUBLE"),
     ("total_share", "DOUBLE"), ("float_share", "DOUBLE"),
