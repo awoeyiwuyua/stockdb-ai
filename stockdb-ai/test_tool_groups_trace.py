@@ -84,13 +84,22 @@ class TraceIdTest(unittest.TestCase):
         self.assertEqual(len(res["result"]["trace_id"]), 12)
 
     def test_tool_call_log_has_trace_id(self):
-        """_log_tool_call 日志行携带 trace_id。"""
+        """_log_tool_call 日志行携带 trace_id。
+
+        断言不假设「write 最后一次调用 = 完整 JSON 行」：mock 生效窗口内
+        warnings/GC 等噪声可能分片写 stderr（CI Python 3.14 实证致 json.loads
+        收到空串），故聚合全部 write 输出后按行提取 JSON 事件行。
+        """
+        import warnings as _warnings
         trace_id = "abc123def456"
-        with mock.patch("sys.stderr") as stderr:
+        with mock.patch("sys.stderr") as stderr, _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
             server._log_tool_call("get_stock_list", {"ok": True}, 5, trace_id=trace_id)
-        written = stderr.write.call_args[0][0]
-        line = json.loads(written)
-        self.assertEqual(line["trace_id"], trace_id)
+        blob = "".join(c.args[0] for c in stderr.write.call_args_list
+                       if c.args and isinstance(c.args[0], str))
+        lines = [json.loads(ln) for ln in blob.splitlines() if ln.strip().startswith("{")]
+        self.assertTrue(lines, "stderr 输出中未找到 JSON 事件行")
+        self.assertEqual(lines[-1]["trace_id"], trace_id)
 
     def test_records_append_auto_trace_id(self):
         """日检记录自动附加 trace_id。"""
