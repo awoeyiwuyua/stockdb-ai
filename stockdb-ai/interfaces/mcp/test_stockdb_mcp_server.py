@@ -354,7 +354,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self.assertEqual(response["jsonrpc"], "2.0")
         self.assertEqual(response["id"], 1)
         tool_names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(tool_names), 15)  # 0.10.0：12 原生 + 3 warehouse（D12）
+        self.assertEqual(len(tool_names), 16)  # 0.10.15：12 原生 + 4 warehouse（D12 + run）
         self.assertIn("get_stock_list", tool_names)
         self.assertIn("warehouse_run_sql", tool_names)
         self.assertIn("get_board_open_effect_history", tool_names)
@@ -1412,7 +1412,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         payload = json.loads(response["result"]["content"][0]["text"])
         self.assertEqual(payload["latest_trade_date"], "20260813")
         self.assertFalse(payload["pybao_available"])
-        self.assertEqual(payload["tool_count"], 15)  # 0.10.0：12 原生 + 3 warehouse
+        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
 
     def test_get_data_status_ttl_dedup_single_http_round(self):
         with mock.patch.object(server, "_TTL", server._TTLCache()):
@@ -1895,7 +1895,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self._assert_envelope(
             payload, source="http", contract="status-v1", known_at="20260813",
         )
-        self.assertEqual(payload["tool_count"], 15)  # 0.10.0：12 原生 + 3 warehouse
+        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
         self.assertFalse(payload["pybao_available"])
 
     @mock.patch.object(server, "_latest_trade_date")
@@ -2550,3 +2550,54 @@ if __name__ == "__main__":
     unittest.main()
 
 # === 0.8.x 连接卫生回归（全市场快照节流：每请求 sleep + limit=0 全量） ===
+
+
+# === 0.10.15 warehouse_run：仓库沉淀/回填触发工具（动作类，单飞在 services 层） ===
+class WarehouseRunToolTests(unittest.TestCase):
+    """warehouse_run 注册/参数校验/转发/降级四分支（mock services 层，全离线）。"""
+
+    def _dispatch_call(self, args):
+        return server.dispatch({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "warehouse_run", "arguments": args},
+        })
+
+    def test_registered_in_warehouse_group(self):
+        names = {t["name"] for t in server.TOOLS}
+        self.assertIn("warehouse_run", names)
+        spec = next(t for t in server.TOOLS if t["name"] == "warehouse_run")
+        self.assertEqual(spec["group"], "warehouse")
+        self.assertEqual(server._CONTRACT_BY_TOOL["warehouse_run"],
+                         ("warehouse", "warehouse-run-v1"))
+
+    def test_call_forwards_days_and_backfill(self):
+        with mock.patch.object(server, "_wh_run_async",
+                               return_value={"ok": True, "async": True}) as run:
+            res = self._dispatch_call({"days": 3, "backfill": True})
+        run.assert_called_once_with(days=3, backfill=True)
+        payload = json.loads(res["result"]["content"][0]["text"])
+        self.assertEqual(payload["source"], "warehouse")
+        self.assertEqual(payload["source_contract_version"], "warehouse-run-v1")
+        self.assertTrue(payload["ok"])  # dict result 平铺进 envelope 顶层
+
+    def test_call_defaults_days_1(self):
+        with mock.patch.object(server, "_wh_run_async",
+                               return_value={"ok": True, "async": True}) as run:
+            self._dispatch_call({})
+        run.assert_called_once_with(days=1, backfill=False)
+
+    def test_days_out_of_range_rejected(self):
+        for args, why in (({"days": 6}, "常规上限 5"),
+                          ({"days": 0}, "下限 1"),
+                          ({"days": 10000, "backfill": True}, "backfill 上限 9999"),
+                          ({"days": "abc"}, "非整数")):
+            with self.subTest(why=why):
+                res = self._dispatch_call(args)
+                self.assertTrue(res["result"]["isError"], why)
+
+    def test_dependency_unavailable_when_not_wired(self):
+        with mock.patch.object(server, "_wh_run_async", None):
+            res = self._dispatch_call({"days": 1})
+        self.assertTrue(res["result"]["isError"])
+        payload = json.loads(res["result"]["content"][0]["text"])
+        self.assertEqual(payload["code"], "DEPENDENCY_UNAVAILABLE")

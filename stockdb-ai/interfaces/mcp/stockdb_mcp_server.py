@@ -116,6 +116,13 @@ except Exception:  # noqa: BLE001 - 裁剪部署无 storage 包时优雅降级
     _warehouse_guardrail_error = None  # type: ignore[assignment]
     _warehouse_unavailable = None  # type: ignore[assignment]
 
+# 0.10.15：仓库运维动作工具（沉淀/回填触发）——编排在 services 层（单飞/守卫/幂等
+# 全在 warehouse_tasks），MCP 只是触发口；未装配（无 services 包）→ DEPENDENCY_UNAVAILABLE
+try:  # noqa: E402
+    from services.warehouse_tasks import warehouse_run_async as _wh_run_async
+except Exception:  # noqa: BLE001 - 同上
+    _wh_run_async = None  # type: ignore[assignment]
+
 _WAREHOUSE_HINT = (
     "仓库层（DuckDB+Parquet）不可用：本机需 uv sync 安装 duckdb；"
     "arm64 alpine 镜像无 musllinux wheel 属预期（降级路径）"
@@ -2503,6 +2510,36 @@ TOOLS: list[dict] = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "warehouse_run",
+        "description": (
+            "触发仓库沉淀/历史回填（异步，单飞防重；幂等——已有分区自动跳过）。"
+            "常规模式 days=1~5：沉淀 watermark 之后的前向缺口；backfill=true 历史回填"
+            "模式（days 上限 9999）：向 watermark 之前回看 days 个交易日补历史 daily "
+            "分区（跳过非交易日），完成后周K/月K聚合自动级联（周/月完整才聚合）。"
+            "AI 使用建议：先 warehouse_status 看 watermark 与目标差多少天，回填分批"
+            "（一次 60~250 天）跑完再放量；全市场快照逐日构建，历史回填是长任务。"
+            "返回 {ok, async, reason/started}——进度用 warehouse_status 或面板查询。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9999,
+                    "description": "沉淀/回看的交易日天数（默认 1；常规上限 5，backfill 放开）",
+                    "default": 1,
+                },
+                "backfill": {
+                    "type": "boolean",
+                    "description": "true=历史回填模式（向 watermark 之前回看）；false=常规前向沉淀",
+                    "default": False,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -2579,7 +2616,7 @@ BASE_TOOL_GROUPS: dict[str, str] = {
     "screen_stocks": "factor_analysis", "get_data_status": "system_health",
     # 0.10.0（D12）：仓库组——C2 收敛（仅 3 工具，指标一律 SQL 宏）
     "warehouse_run_sql": "warehouse", "warehouse_list_tables": "warehouse",
-    "warehouse_status": "warehouse",
+    "warehouse_status": "warehouse", "warehouse_run": "warehouse",
 }
 
 TOOL_GROUPS: dict[str, str] = {
@@ -2679,6 +2716,7 @@ _CONTRACT_BY_TOOL: dict[str, tuple[str | None, str]] = {
     "warehouse_run_sql": ("warehouse", "warehouse-sql-v1"),
     "warehouse_list_tables": ("warehouse", "warehouse-meta-v1"),
     "warehouse_status": ("warehouse", "warehouse-status-v1"),
+    "warehouse_run": ("warehouse", "warehouse-run-v1"),
 }
 
 # 0.9.0 M4：SDK 41 工具族统一契约（source="sdk"，上游通道）
@@ -2916,6 +2954,29 @@ def _call_tool(name: str, args: dict) -> dict:
             return _value_error_result(exc)
         except RuntimeError as exc:
             return _error_result(str(exc), ERROR_INTERNAL_ERROR)
+    elif name == "warehouse_run":
+        # 0.10.15：仓库沉淀/回填触发（动作类工具）——单飞/守卫/幂等在 services 层，
+        # 这里只做参数校验与转发；未装配 → DEPENDENCY_UNAVAILABLE
+        if _wh_run_async is None:
+            return _error_result("warehouse_run: warehouse_tasks 未装配",
+                                 ERROR_DEPENDENCY_UNAVAILABLE,
+                                 hint="服务层 warehouse_tasks 缺失（裁剪部署？）")
+        try:
+            days = int(args.get("days", 1))
+        except (TypeError, ValueError):
+            return _error_result("warehouse_run: days 必须是整数",
+                                 ERROR_INVALID_ARGUMENT)
+        backfill = bool(args.get("backfill"))
+        cap = 9999 if backfill else 5  # 与 warehouse_run 内部 cap 一致，提前报错更友好
+        if not 1 <= days <= cap:
+            return _error_result(
+                f"warehouse_run: days 须在 1~{cap}"
+                + ("（backfill 模式）" if backfill else "（常规模式；backfill=true 可到 9999）"),
+                ERROR_INVALID_ARGUMENT)
+        try:
+            result = _wh_run_async(days=days, backfill=backfill)
+        except Exception as exc:  # noqa: BLE001 - 统一映射为契约错误码
+            return _error_result(f"warehouse_run: {exc}", ERROR_INTERNAL_ERROR)
     elif name in ("warehouse_run_sql", "warehouse_list_tables", "warehouse_status"):
         # 0.10.0（D12）：仓库组 3 工具——门面经 storage.warehouse.queries，
         # 错误映射见 _warehouse_error_code；不可用 → DEPENDENCY_UNAVAILABLE（带 hint）
