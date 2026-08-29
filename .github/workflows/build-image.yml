@@ -89,7 +89,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   smoke-container:
-    name: Container smoke (amd64: boot + webui + diag)
+    name: "Container smoke (amd64 boot + webui + diag)"
     needs: build-stockdb
     runs-on: ubuntu-latest
     permissions:
