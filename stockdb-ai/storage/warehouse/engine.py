@@ -70,11 +70,29 @@ class WarehouseEngine:
         has_daily = bool(list((facts / "daily").rglob("date=*.parquet"))) if (facts / "daily").is_dir() else False
 
         # 空仓期给类型正确的空视图（沉淀后 refresh 换成 parquet 视图）
+        daily_missing: set[str] = set()
         if has_daily:
             con.execute(
                 f"CREATE OR REPLACE VIEW v_daily AS "
                 f"SELECT * FROM read_parquet('{daily_glob}', hive_partitioning=true)"
             )
+            # 0.10.16 schema 落后检测：0.10.7 扩 15 列（含物化复权列），存量旧分区
+            # （0.10.6 时代 11 列）缺列 → v_week_current/v_month_current 聚合
+            # Binder Error 炸掉整个 refresh_views（NAS 08-29 实证）。检测后降级：
+            # v_daily/宏照常可用，current 派生视图用空视图占位 + 告警指路迁移。
+            actual = {d[0] for d in
+                      con.execute("SELECT * FROM v_daily LIMIT 0").description}
+            daily_missing = ({n for n, _ in _DAILY_EMPTY_COLUMNS}
+                             - actual - {"year", "market"})
+            if daily_missing:
+                from ops.alerts import notify_alert
+                from ops.logging import log as _log
+                msg = (f"仓库 daily 分区 schema 落后：缺 {sorted(daily_missing)}——"
+                       f"旧分区（0.10.6 时代 11 列）与 26 列 schema 混存不可查询。"
+                       f"迁移：删除 facts/daily 下旧分区文件后 "
+                       f"POST /api/warehouse/run {{\"backfill\":true,\"days\":5}} 重写")
+                _log(f"⚠️ {msg}")
+                notify_alert("error", "warehouse", msg)
         else:
             # 空仓期给类型正确的空视图（列名加引号：name/is_st 等易撞关键字）
             cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _DAILY_EMPTY_COLUMNS)
@@ -110,11 +128,18 @@ class WarehouseEngine:
 
         # 0.10.12：当前未走完周期派生视图——从 v_daily 实时聚合（股票软件"进行中的
         # 周/月K"语义：历史周期固定落盘，当前周期滚动可见）。聚合口径与 sink 一致。
+        # 0.10.16：daily 分区 schema 落后（daily_missing 非空）时聚合必炸——
+        # 注册空视图占位（迁移重写后下次 refresh_views 自动恢复真实聚合）。
         from storage.warehouse import sink as _wh_sink
-        self._register_period_current(con, "week", _wh_sink._kline_aggregate_sql,
-                                      f"v_daily")
-        self._register_period_current(con, "month", _wh_sink._kline_aggregate_sql,
-                                      f"v_daily")
+        if daily_missing:
+            cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _DAILY_EMPTY_COLUMNS)
+            con.execute(f"CREATE OR REPLACE VIEW v_week_current AS SELECT {cols} WHERE FALSE")
+            con.execute(f"CREATE OR REPLACE VIEW v_month_current AS SELECT {cols} WHERE FALSE")
+        else:
+            self._register_period_current(con, "week", _wh_sink._kline_aggregate_sql,
+                                          f"v_daily")
+            self._register_period_current(con, "month", _wh_sink._kline_aggregate_sql,
+                                          f"v_daily")
 
         con.execute("CREATE TABLE IF NOT EXISTS codes (code TEXT PRIMARY KEY, name TEXT)")
         con.execute("CREATE OR REPLACE VIEW v_codes AS SELECT * FROM codes")
