@@ -21,7 +21,7 @@
 | `runtime-model.md` | 后端并发治理：熔断/信号量/单飞 + 新功能运行时影响检查清单 |
 | `data-source.md` | 上游数据源与镜像同步协议（manifest/SHA256） |
 | `deployments.md` | NAS docker 部署台账（每次部署后更新） |
-| `design/` | 领域设计：application-layer（四层，已实施存档）、auction-collector（打板口径）、research-store（0.9.5）、sdk-mcp-bridge（0.9.0）、warehouse（0.10.0 列式仓库） |
+| `design/` | 领域设计：application-layer（四层，已实施存档）、auction-collector（打板口径）、research-store（0.9.5）、sdk-mcp-bridge（0.9.0）、warehouse（0.10.0 列式仓库）、webui（0.10.18 运维台定义与信息架构判据） |
 | `acceptance/` | 验收记录（异源签字/实测证据，如 warehouse-live-20260822） |
 | `history/` | **归档不再维护**：0.6~0.8 时代过程文档（SPA 重构计划/导读笔记/回归清单/涨停口径 CSV 证据） |
 

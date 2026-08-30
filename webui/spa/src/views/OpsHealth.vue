@@ -51,16 +51,16 @@
             label="数据最新"
             :value="health ? fmtYMD(health.latest) : '—'"
             :tone="healthTone"
-            sub="latest（000001 日K 最大日期）"
+            sub="沪市日 K 最新交易日期"
           />
           <StatCard
             label="滞后天数"
             :value="health?.lag_days != null ? `${health.lag_days} 天` : '—'"
             :tone="healthTone"
-            sub="lag_days（工作日口径）"
+            sub="按工作日口径计算"
           />
-          <StatCard label="镜像日期" :value="health?.mirror || '—'" sub="mirror（镜像源标注）" />
-          <StatCard label="健康状态" :value="statusLabel" :tone="statusTone" sub="status（ok/stale/unknown）" />
+          <StatCard label="镜像日期" :value="health?.mirror || '—'" sub="镜像源标注的当日日期" />
+          <StatCard label="健康状态" :value="statusLabel" :tone="statusTone" sub="正常 / 滞后 / 未知 三态" />
         </StatGrid>
         <!-- note：后端给出的一句话判断（如"可同步" / "镜像尚未发布"），放卡片底部 -->
         <div v-if="health?.note" class="note-line">{{ health.note }}</div>
