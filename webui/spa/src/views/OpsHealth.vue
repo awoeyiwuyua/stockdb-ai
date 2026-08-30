@@ -45,8 +45,8 @@
       <!-- ================= 1. 健康卡：getHealth() ================= -->
       <section class="card">
         <h3 class="card-title">数据健康</h3>
-        <!-- StatCard 组合：latest / lag_days / mirror / status，滞后着色 -->
-        <div class="stat-grid">
+        <!-- StatCard 组合：latest / lag_days / mirror / status，滞后着色（栅格公共件 StatGrid） -->
+        <StatGrid>
           <StatCard
             label="数据最新"
             :value="health ? fmtYMD(health.latest) : '—'"
@@ -61,7 +61,7 @@
           />
           <StatCard label="镜像日期" :value="health?.mirror || '—'" sub="mirror（镜像源标注）" />
           <StatCard label="健康状态" :value="statusLabel" :tone="statusTone" sub="status（ok/stale/unknown）" />
-        </div>
+        </StatGrid>
         <!-- note：后端给出的一句话判断（如"可同步" / "镜像尚未发布"），放卡片底部 -->
         <div v-if="health?.note" class="note-line">{{ health.note }}</div>
       </section>
@@ -150,6 +150,7 @@
 // 编排壳：图标 + StatCard/EmptyState + health/ 域组件 + use-health 状态机 + 统一轮询
 import { Refresh } from '@element-plus/icons-vue'
 import StatCard from '../components/StatCard.vue'
+import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import HealthContainerCard from '../components/health/HealthContainerCard.vue'
 import { useHealth, CAP_LABELS, fmtUptimeSec } from '../composables/use-health.js'
@@ -168,12 +169,7 @@ usePolling(() => loadAll(), { immediate: true })
 </script>
 
 <style scoped>
-/* 指标卡栅格：auto-fit + minmax(200px,1fr)（全站统一口径） */
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-}
+/* 指标卡栅格骨架在公共件 components/common/StatGrid.vue，本页无局部差异 */
 .note-line {
   margin-top: 8px;
   font-size: 12px;

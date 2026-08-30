@@ -46,14 +46,14 @@
       <!-- 统计总览：total / ok_rate / avg_ms / p95_ms（/api/mcp/stats） -->
       <section class="panel">
         <h3 class="panel-title">统计总览</h3>
-        <div class="stat-grid">
+        <StatGrid>
           <StatCard label="总调用" :value="stats?.total ?? 0" tone="brand" sub="窗口内累计次数" />
           <!-- 成功率着色：≥90% 绿 / ≥70% 黄 / 更低红，与旧面板同口径 -->
           <StatCard label="成功率" :value="fmtRate(stats?.ok_rate)" :tone="rateTone(stats?.ok_rate)"
             sub="最近 500 条窗口" />
           <StatCard label="平均耗时" :value="fmtElapsed(stats?.avg_ms)" sub="单次调用耗时" />
           <StatCard label="P95 耗时" :value="fmtElapsed(stats?.p95_ms)" sub="95% 调用低于该值" />
-        </div>
+        </StatGrid>
       </section>
 
       <!-- 按工具分布：柱状图 + 表格（by_tool） -->
@@ -136,6 +136,7 @@ import { ref, computed } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getMcpStats, getMcpCalls } from '../api/ops.js'
 import StatCard from '../components/StatCard.vue'
+import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EChart from '../components/EChart.vue'
 import { fmtElapsed } from '../utils/format.js'
@@ -278,11 +279,7 @@ usePolling(() => load(), { immediate: true })
   align-items: center;
   justify-content: space-between;
 }
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
-}
+/* 指标卡栅格骨架在公共件 components/common/StatGrid.vue，本页无局部差异 */
 .tool-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;

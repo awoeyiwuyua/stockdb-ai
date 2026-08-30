@@ -32,11 +32,11 @@
 
     <!-- ── 加载态：首次数据还没回来（overview 为 null 且无报错）→ 骨架屏 ── -->
     <template v-if="store.overview === null && !store.error">
-      <div class="stat-grid">
+      <StatGrid dense>
         <div v-for="i in 4" :key="i" class="sk-card">
           <el-skeleton animated :rows="2" />
         </div>
-      </div>
+      </StatGrid>
       <div class="cards-grid">
         <div v-for="i in 2" :key="'c' + i" class="sk-card">
           <el-skeleton animated :rows="5" />
@@ -56,13 +56,13 @@
 
     <!-- ── 正常内容（数据到位后渲染） ── -->
     <template v-else>
-      <!-- ① 第一行：4 张指标卡（值行更紧凑，样式用 :deep 压缩 StatCard） -->
-      <div class="stat-grid">
+      <!-- ① 第一行：4 张指标卡（dense 变体：值行更紧凑，压缩规则在 StatGrid 内部） -->
+      <StatGrid dense>
         <StatCard label="数据最新" :value="dataLatestValue" :sub="dataLatestSub" :tone="dataLatestTone" />
         <StatCard label="告警" :value="alertCountValue" :sub="alertCountSub" :tone="alertCountTone" />
         <StatCard label="MCP 成功率" :value="mcpRateValue" :sub="mcpRateSub" tone="ok" />
         <StatCard label="面板版本" :value="versionValue" :sub="versionSub" :tone="versionTone" />
-      </div>
+      </StatGrid>
 
       <!-- ② 区块卡：2 张紧凑卡（告警 / 版本） -->
       <div class="cards-grid">
@@ -158,11 +158,11 @@
 
 <script setup>
 // ============================================================
-// Overview.vue — 总览驾驶舱（Phase 5.1 瘦身版 → 0.8.0 收敛版）。
+// Overview.vue — 总览驾驶舱（Phase 5.1 瘦身版 → 0.8.0 收敛版 → 0.10.18 编排化）。
 // 学习点：
 // 1) 页面的"总览数据"全部读全局 store（App 层已做 30s 轮询），页面自身不为它重复轮询；
-//    只有"版本"是独立数据源（/api/version），由本页用一个 30s 定时器轮询，
-//    onUnmounted 必须清理（0.8.0 已移除模拟盘/情绪投递两个数据源）。
+//    只有"版本"是独立数据源（/api/version）：状态机在 composables/use-overview.js，
+//    轮询节拍由 usePolling 驱动（0.10.18 自管定时器已归零）。
 // 2) 所有展示字段都做防御（?. 与 || 兜底），后端某块降级为 null 时页面不崩、显示 '—'。
 // ============================================================
 import { ref, computed } from 'vue'
@@ -170,11 +170,12 @@ import { ElMessage } from 'element-plus'
 // 图标显式 import（el-button :icon 需要组件对象；模板里 <el-icon> 才走全局注册）
 import { Refresh } from '@element-plus/icons-vue'
 import StatCard from '../components/StatCard.vue'
+import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { fmtYMD } from '../utils/format.js'
-import { getVersion } from '../api/ops.js'
 import { useGlobalStore } from '../stores/global.js'
 import { usePolling } from '../composables/use-polling.js'
+import { useOverview } from '../composables/use-overview.js'
 
 const store = useGlobalStore()
 
@@ -248,22 +249,8 @@ const alertColor = (level) => {
 // ts 是 ISO 本地时间（如 2026-08-15T09:30:00），截取 HH:MM，完整值放 title 悬浮
 const fmtHm = (ts) => String(ts || '').slice(11, 16) || '--:--'
 
-/* ═══════════════ ③ 版本卡（并入原 OpsVersion 页，独立 getVersion() 30s 轮询） ═══════════════ */
-const ver = ref(null)
-const verLoading = ref(false)
-const verError = ref('')
-
-const loadVersion = async () => {
-  verLoading.value = true
-  try {
-    ver.value = await getVersion()
-    verError.value = ''
-  } catch (e) {
-    verError.value = e?.message || '版本接口不可用'
-  } finally {
-    verLoading.value = false
-  }
-}
+/* ═══════════════ ③ 版本卡（并入原 OpsVersion 页）：状态机在 use-overview.js ═══════════════ */
+const { ver, verLoading, verError, loadVersion } = useOverview()
 
 /* ═══════════════ 轮询：usePolling 统一节拍（可见 30s / 后台降频，0.10.18 收编）═══════════════ */
 usePolling(() => loadVersion(), { immediate: true })
@@ -336,23 +323,7 @@ usePolling(() => loadVersion(), { immediate: true })
   color: var(--muted);
 }
 
-/* —— 指标卡 / 骨架卡栅格：minmax(180px,1fr) 自适应换行（密度约定） —— */
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 10px;
-}
-/* 压缩 StatCard：值行更紧凑（:deep 穿透进子组件作用域改内部样式） */
-.stat-grid :deep(.stat-card) {
-  padding: 12px;
-  gap: 3px;
-}
-.stat-grid :deep(.stat-value) {
-  font-size: 22px; /* 旧版 28px → 22px，驾驶舱更紧凑 */
-}
-.stat-grid :deep(.stat-sub) {
-  font-size: 11px;
-}
+/* —— 骨架卡（栅格与 StatCard 压缩规则在 components/common/StatGrid.vue） —— */
 .sk-card {
   background: var(--panel);
   border: 1px solid var(--line);
