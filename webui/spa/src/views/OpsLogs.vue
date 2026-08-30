@@ -98,9 +98,10 @@
 <script setup>
 // 日志中心（0.8.0 起两源：同步日志 + 容器日志；模拟盘事件源已随模拟盘移除）
 // 只有展示/过滤，没有任何写操作；前端关键字过滤，不请求后端。
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { getLog, getContainerLogs } from '../api/status.js'
+import { usePolling } from '../composables/use-polling.js'
 
 const POLL_MS = 15_000  // 日志讲究新鲜，15s 一刷
 
@@ -174,14 +175,8 @@ async function refreshAll() {
   }
 }
 
-let timer = null
-onMounted(() => {
-  refreshAll()
-  timer = setInterval(refreshAll, POLL_MS) // 后台静默轮询
-})
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
+// 轮询：usePolling 统一节拍（日志讲究新鲜，15s 一拍；后台降频，0.10.18 收编）
+usePolling(refreshAll, { immediate: true, fast: POLL_MS })
 </script>
 
 <style scoped>

@@ -92,12 +92,13 @@
 //    清空成功后手动调 store.refresh() 把红点立刻归零，不用等下一轮 30s；
 // 2) 清空是危险操作：ElMessageBox.confirm 二次确认，用户取消则直接 return；
 // 3) 轮询失败但手里有旧数据 → 顶部弱提示 + 表格照常展示（降级不崩）。
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Delete } from '@element-plus/icons-vue'
 import { getAlerts, clearAlerts } from '../api/ops.js'
 import { useGlobalStore } from '../stores/global.js'
 import EmptyState from '../components/EmptyState.vue'
+import { usePolling } from '../composables/use-polling.js'
 
 const store = useGlobalStore() // 只读顶栏红点计数，清空后主动 refresh() 同步
 
@@ -107,7 +108,6 @@ const alerts = ref([])    // 告警数组 [{ts, level, source, message}, ...]，
 
 // 互斥：上一轮还没回来就跳过本轮，避免轮询请求堆积
 let busy = false
-let timer = null
 
 async function load() {
   if (busy) return
@@ -171,14 +171,8 @@ function levelLabel(level) {
 }
 
 // —— 生命周期：挂载拉一次 + 30s 轮询；卸载清理定时器 ——
-onMounted(() => {
-  load()
-  timer = setInterval(() => load(), 30000)
-})
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  timer = null
-})
+// 轮询：usePolling 统一节拍（可见 30s / 后台 5min / 回前台补拉，0.10.18 收编）
+usePolling(() => load(), { immediate: true })
 </script>
 
 <style scoped>
