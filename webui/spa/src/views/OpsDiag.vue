@@ -111,12 +111,13 @@
 // 2) 汇总徽标直接从后端 all_ok 派生：全绿 → 绿 tag「全部通过」，否则红 tag「N 项异常」；
 //    失败卡片用 :class 条件拼 card-fail 类 → 红边框（var(--err)），一眼定位问题项；
 // 3) uptime_seconds 单位是「秒」，而 utils/format.js 的 fmtElapsed 期望「毫秒」→ ×1000 再格式化。
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { getDiag } from '../api/diag.js'
 import EmptyState from '../components/EmptyState.vue'
 import { fmtYMD, fmtElapsed } from '../utils/format.js'
+import { usePolling } from '../composables/use-polling.js'
 
 const loading = ref(true)  // 首次加载中
 const checking = ref(false) // 「立即体检」按钮 loading（只随手动动作出现）
@@ -124,7 +125,6 @@ const error = ref('')       // 最近一次失败文案
 const data = ref(null)      // /api/diag 全量载荷 {generated_at, env, checks, all_ok}
 
 let busy = false // 互斥：上一轮请求未回就跳过本轮（轮询 + 手动共用一把锁）
-let timer = null
 
 const checks = computed(() => data.value?.checks || [])
 const env = computed(() => data.value?.env || null)
@@ -172,14 +172,8 @@ function uptimeText() {
 }
 
 // —— 生命周期：挂载拉一次 + 60s 静默轮询；卸载清理定时器 ——
-onMounted(() => {
-  load()
-  timer = setInterval(() => load(), 60000)
-})
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  timer = null
-})
+// 轮询：usePolling 统一节拍（诊断 60s 一拍，后台降频，0.10.18 收编）
+usePolling(() => load(), { immediate: true, fast: 60_000 })
 </script>
 
 <style scoped>

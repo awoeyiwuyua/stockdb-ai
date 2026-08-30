@@ -132,13 +132,14 @@
 // 1) getMcpStats 与 getMcpCalls 无依赖，Promise.all 并行拉，两个都拿到才渲染；
 // 2) ECharts option 用 computed 派生：数据一变自动重绘（EChart 组件 watch option）；
 // 3) Canvas 画不了 CSS 变量：图表颜色要在 JS 里读 getComputedStyle 拿当前主题色。
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getMcpStats, getMcpCalls } from '../api/ops.js'
 import StatCard from '../components/StatCard.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EChart from '../components/EChart.vue'
 import { fmtElapsed } from '../utils/format.js'
+import { usePolling } from '../composables/use-polling.js'
 
 const loading = ref(true)
 const error = ref('')
@@ -146,7 +147,6 @@ const stats = ref(null) // {total, ok_rate, avg_ms, p95_ms, by_tool:[{tool,n,ok,
 const calls = ref([])   // [{ts, tool, ok, is_error, elapsed_ms, bytes}]
 
 let busy = false
-let timer = null
 
 // 有数据 = 统计块有内容（total>0）或明细有行；空态判定用
 const hasData = computed(() => (stats.value?.total ?? 0) > 0 || calls.value.length > 0)
@@ -234,14 +234,8 @@ const chartOption = computed(() => {
 })
 
 // —— 生命周期：挂载拉一次 + 30s 轮询；卸载清理 ——
-onMounted(() => {
-  load()
-  timer = setInterval(() => load(), 30000)
-})
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-  timer = null
-})
+// 轮询：usePolling 统一节拍（可见 30s / 后台降频，0.10.18 收编）
+usePolling(() => load(), { immediate: true })
 </script>
 
 <style scoped>

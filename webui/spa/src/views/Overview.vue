@@ -165,7 +165,7 @@
 //    onUnmounted 必须清理（0.8.0 已移除模拟盘/情绪投递两个数据源）。
 // 2) 所有展示字段都做防御（?. 与 || 兜底），后端某块降级为 null 时页面不崩、显示 '—'。
 // ============================================================
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 // 图标显式 import（el-button :icon 需要组件对象；模板里 <el-icon> 才走全局注册）
 import { Refresh } from '@element-plus/icons-vue'
@@ -174,6 +174,7 @@ import EmptyState from '../components/EmptyState.vue'
 import { fmtYMD } from '../utils/format.js'
 import { getVersion } from '../api/ops.js'
 import { useGlobalStore } from '../stores/global.js'
+import { usePolling } from '../composables/use-polling.js'
 
 const store = useGlobalStore()
 
@@ -264,18 +265,8 @@ const loadVersion = async () => {
   }
 }
 
-/* ═══════════════ 轮询：版本数据用 30s 定时器 ═══════════════ */
-let timer = null
-onMounted(() => {
-  loadVersion() // 进页面先拉一次
-  timer = setInterval(() => {
-    loadVersion()
-  }, 30_000) // 之后每 30s 刷新一次
-})
-onUnmounted(() => {
-  if (timer) clearInterval(timer) // 离开页面清定时器，防泄漏
-  timer = null
-})
+/* ═══════════════ 轮询：usePolling 统一节拍（可见 30s / 后台降频，0.10.18 收编）═══════════════ */
+usePolling(() => loadVersion(), { immediate: true })
 </script>
 
 <style scoped>
