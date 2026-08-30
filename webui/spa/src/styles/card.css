@@ -1,0 +1,58 @@
+/* card.css — 卡片/页面骨架通用样式（0.10.18 自 OpsSync.vue scoped 提取为全局）。
+   提取依据：.card/.card-title/.card-hint/.hint/.actions 在 sync/ 各组件与多个
+   视图中真实重复（重复驱动提取）。其它视图 scoped 内的同名规则带 [data-v]
+   属性选择器优先级更高，不受影响；未定义处由这里兜底。 */
+
+/* 页面容器：纵向排列各卡片，卡片之间 16px 间距 */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.page-title {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text);
+}
+.page-alert {
+  margin-bottom: 0;
+}
+
+/* 通用卡片样式：与全局主题变量联动（--panel/--line） */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px; /* LuCI 密度：卡片内边距收紧到 12-14px */
+}
+.card-title {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.card-hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 操作行 / 描述块 / 提示文字 */
+.actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.desc {
+  margin-bottom: 4px;
+}
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+}

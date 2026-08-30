@@ -36,3 +36,30 @@ export function fmtElapsed(ms) {
   if (n < 60000) return `${(n / 1000).toFixed(2)}s`
   return `${(n / 60000).toFixed(1)}min`
 }
+
+// ---------- 0.10.18 自 OpsSync.vue 迁入（跨视图复用候选） ----------
+
+// '2026-02-14 08:30:15' → '02-14 08:30'（x 轴紧凑标签：月-日 时:分，信息密度优先）
+export function fmtTsShort(ts) {
+  return ts ? String(ts).slice(5, 16) : ''
+}
+
+// epoch 秒 → 'x 天 x 小时 x 分钟'（进程启动时长）
+export function fmtUptime(started) {
+  if (!started) return '—'
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - started))
+  const d = Math.floor(sec / 86400)
+  const h = Math.floor((sec % 86400) / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  return (d ? `${d} 天 ` : '') + (h ? `${h} 小时 ` : '') + `${m} 分钟`
+}
+
+// 读主题 CSS 变量（ECharts canvas 无法直接用 var()，需解析成具体颜色以跟随深/浅主题）
+// 有 DOM 访问，注意：仅浏览器环境可用（happy-dom 下 getComputedStyle 存在）
+export function cssVar(name, fallback) {
+  try {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+  } catch {
+    return fallback
+  }
+}
