@@ -68,7 +68,8 @@ A 问答/研究 70% · B 倒逼式最小基建 20% · C 维护 10%。
       仓库日备份落盘；周五复盘签字
 - [x] C5：warehouse.duckdb 纳入每日备份（0.10.8 落地：COPY FROM DATABASE 在线快照 + 保留 14 份）
 - [x] 0.10.7 分支（feat/verbatim-mirror-backfill）评审合并（2026-08-28 已并入 main，0.10.7~0.10.12 storage 收口）
-- [ ] 上游依赖治理 SOP 固化进 docs/release-policy.md（换域/换资产 = 半小时流程）
+- [x] 上游依赖治理 SOP 固化进 docs/release-policy.md（2026-08-29 §6：三雷表 +
+      换域/换资产半小时流程 + 部署后实机复验清单；CI 容器冒烟 job 同日上线）
 
 **主线二 · AI 迭代体验（可迭代）**
 - [x] 问答台 + 复现协议成文（本文件 §3 + question-pool.md + TEMPLATE.md）

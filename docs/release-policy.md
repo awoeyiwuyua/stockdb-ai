@@ -52,3 +52,42 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 
 - 面板级（首选）：compose 环境变量 `WEBUI_UI=legacy` → 旧面板，零停机
 - 镜像级：compose 改回上一个已知良好的镜像 digest/tag
+
+## 6. 上游依赖治理 SOP（08-27 三雷实证固化，2026-08-29）
+
+> 戒律前提（ROADMAP §4）：**不主动追上游新版本**——构建坏了才修；**修复必 pin
+> SHA256**。上游是 free-stockdb（hello245m/free-stockdb），其 release 与镜像源
+> 均会静默变更，本章是把"再遇到 = 半小时修复流程"制度化。
+
+### 6.1 已知雷区（08-27 实证 + 后续补充）
+
+| 雷 | 症状 | 首修 |
+|---|---|---|
+| workflow YAML 解析失败 | push 触发全 0s 失败 / dispatch 422 | 0.8.x（shell 引号内嵌真实换行）；0.10.17 再犯（job name 裸冒号）→ **改 workflow 必跑 pyyaml 严格解析** |
+| release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"） |
+| 二进制打包丢可执行位 | sha256 OK 但 stockdb/数据更新 呈 -rw-rw-rw-，启动失败 | 0.3.2（tar 解包后补 chmod +x + test -x 断言） |
+| 同步域名静默更换 | 镜像 302 → 新域，旧 sync_url 失效 | ah.123128.xyz → workbuddy.link（**不写适配层**，只改 /data/sync_url.txt 配置） |
+| 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） |
+
+### 6.2 换域/换资产半小时流程
+
+1. 确认上游 release 资产清单与 digest（浏览器看 release 页 assets）；
+2. 改 `docker/Dockerfile`：`ARG VERSION` / `GH_TAG_ENCODED`（URL 编码 tag）/
+   双平台 `SHA256`（与上游 assets digest 核对一致）；
+3. 本机实测：下载包 `shasum -a 256` 吻合 + 解包看 `stockdb/` 内部布局未变；
+4. CI 构建（build-image.yml 手动触发）——**五 job 全绿为准**（0.10.17 起含
+   容器冒烟：起镜像断言 webui 就绪/版本一致/diag 全绿）；
+5. NAS `docker compose pull && up -d`，按 6.3 复验清单过一遍；
+6. 部署台账 + CHANGELOG 记录。
+
+### 6.3 部署后实机复验清单（每次镜像部署必做）
+
+> 0.10.14~0.10.16 教训：本地 388 测试全绿 ≠ 实机无恙（fixture/schema 同错、
+> 存量数据 schema 落后都绕过测试）。部署后 5 分钟走完：
+
+1. `/api/version` → 版本号与 config.py 一致；
+2. `/api/diag` → 五项全绿；
+3. `/api/warehouse/status` → watermark / last_result 正常；
+4. MCP `warehouse_list_tables` + `run_sql` 任查一条 v_daily → 视图注册健康
+   （schema/存量数据问题最先在这里炸）；
+5. `/api/alerts` 当日新增 → 部署触发的降级告警会在这里出现。
