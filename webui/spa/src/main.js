@@ -9,6 +9,7 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue' // 全量图标�
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css' // Element Plus 深色变量（配合 html.dark）
 import './styles/base.css'
+import './styles/card.css' // 卡片/页面骨架通用样式（0.10.18 提取，sync/ 组件与视图共用）
 import App from './App.vue'
 import router from './router'
 
