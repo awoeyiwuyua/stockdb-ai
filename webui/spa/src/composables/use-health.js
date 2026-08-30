@@ -1,18 +1,14 @@
-// use-health.js — 系统健康页状态机（0.10.18 自 views/OpsHealth.vue 迁入）。
+// use-health.js — 系统健康页状态机（0.10.18 自 views/OpsHealth.vue 迁入；
+// 第五批按归属表收敛为双源：diag 环境源随环境卡移除，其唯一的家在诊断中心）。
 //
-// 三源状态（health/status/diag）并行拉取、各自降级；busy 互斥防轮询请求堆积；
+// 双源状态（health/status）并行拉取、各自降级；busy 互斥防轮询请求堆积；
 // 容器日志懒加载（展开才拉）；重启为危险操作二次确认。无 DOM。
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getHealth, getStatus, getContainerLogs, restartContainer } from '../api/status.js'
-import { getDiag } from '../api/diag.js' // 诊断聚合（env 环境信息用）
 
-// sync_cap.checks 的键名 → 中文（供能力检查列表展示；SyncOverview 有同款
-// 拷贝——两页卡片样式不同暂不强行合并，口径变化时对照修改）
-export const CAP_LABELS = { updater: '更新程序', source: '数据源', writable: '数据卷', retry_pending: '待重试' }
-
-// 秒数 → 'X天X时X分'（环境信息 uptime_seconds 直接用；不足 1 小时只显示分钟）
-export function fmtUptimeSec(sec) {
+// 秒数 → 'X天X时X分'（容器卡运行时长用；不足 1 小时只显示分钟）
+function fmtUptimeSec(sec) {
   if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
   const s = Math.floor(sec)
   const d = Math.floor(s / 86400)
@@ -23,8 +19,7 @@ export function fmtUptimeSec(sec) {
 
 export function useHealth() {
   const health = ref(null)          // /api/health：数据健康卡
-  const status = ref(null)          // /api/status：容器/磁盘/同步能力（取用其中子块）
-  const diag = ref(null)            // /api/diag：env 环境信息
+  const status = ref(null)          // /api/status：容器/磁盘（取用其中子块）
   const containerLog = ref('')      // /api/container/logs 容器日志文本
   const containerLogOpen = ref(false) // 容器日志展开开关（懒加载）
   const loading = ref(true)         // 首拉/手动刷新中（骨架屏依据）
@@ -35,7 +30,7 @@ export function useHealth() {
   let busy = false
 
   // 是否已有任何数据：决定骨架屏 / 错误空态 / 正常态的分支走向
-  const hasData = computed(() => health.value != null || status.value != null || diag.value != null)
+  const hasData = computed(() => health.value != null || status.value != null)
   // 容器子块（status.container），取不到给 null，模板里 ?. 兜底
   const container = computed(() => status.value?.container ?? null)
 
@@ -75,8 +70,7 @@ export function useHealth() {
     return `已用 ${d.used_gb ?? '?'} GB / 共 ${d.total_gb} GB · 可用 ${d.free_gb ?? '?'} GB`
   })
 
-  // 三个接口并行拉取、各自降级：单块失败只记 error，不影响其它卡片。
-  // getDiag 双通道：优先 api/diag.js（环境信息专用），失败回落 api/status.js 的同名封装。
+  // 两个接口并行拉取、各自降级：单块失败只记 error，不影响其它卡片。
   async function loadHealth() {
     try {
       const data = await getHealth()
@@ -97,16 +91,6 @@ export function useHealth() {
       return false
     }
   }
-  async function loadDiag() {
-    try {
-      const data = await getDiag()
-      if (data) diag.value = data
-      return true
-    } catch (e) {
-      error.value = e?.message || '诊断接口不可用'
-      return false
-    }
-  }
 
   // 整页刷新入口：manual=true 时按钮转圈（首拉/手动）；轮询静默
   async function loadAll(manual = false) {
@@ -114,8 +98,8 @@ export function useHealth() {
     busy = true
     if (manual) loading.value = true
     try {
-      const results = await Promise.all([loadHealth(), loadStatus(), loadDiag()])
-      // 三块全部成功才清错误文案（有旧数据时页面继续展示，只留顶部弱提示）
+      const results = await Promise.all([loadHealth(), loadStatus()])
+      // 两块全部成功才清错误文案（有旧数据时页面继续展示，只留顶部弱提示）
       if (results.every(Boolean)) error.value = ''
     } finally {
       loading.value = false
@@ -161,23 +145,16 @@ export function useHealth() {
     }
   }
 
-  // epoch 秒（进程启动时间）→ 'X天X时X分'
+  // epoch 秒（进程启动时间）→ 'X天X时X分'（容器卡用）
   function fmtUptime(started) {
     if (!started) return '—'
     return fmtUptimeSec(Date.now() / 1000 - started)
   }
 
-  // 同步能力小圆点颜色：ok===false → 红；warn → 黄；其余 → 绿
-  function dotColor(check) {
-    if (check.ok === false) return 'var(--err)'
-    if (check.warn) return 'var(--warn)'
-    return 'var(--ok)'
-  }
-
   return {
-    health, status, diag, containerLog, containerLogOpen, loading, error, restarting,
+    health, status, containerLog, containerLogOpen, loading, error, restarting,
     hasData, container, healthTone, statusLabel, statusTone,
     diskPct, diskColor, diskText,
-    loadAll, toggleContainerLog, doRestart, fmtUptime, dotColor,
+    loadAll, toggleContainerLog, doRestart, fmtUptime,
   }
 }
