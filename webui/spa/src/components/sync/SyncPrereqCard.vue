@@ -44,7 +44,8 @@ const props = defineProps({
 
 const openNames = ref([])
 
-// sync_cap.checks{updater,source,writable,retry_pending} → 三态检查项
+// sync_cap.checks{updater,source,writable,retry_pending} → 三态检查项。
+// 磁盘详情的家在系统健康页（webui.md §5 归属表），"数据卷"只就地带一句用量。
 const items = computed(() => {
   const s = props.status
   if (!s) return []
@@ -57,6 +58,11 @@ const items = computed(() => {
       detail: c.detail || '—',
     }
   }
+  const d = s.disk
+  const diskNote = d && d.total_gb
+    ? `已用 ${Math.round((d.used_gb / d.total_gb) * 100)}%（${d.used_gb} / ${d.total_gb} GB）`
+    : ''
+  const writable = cap.writable || {}
   return [
     {
       name: 'stockdb 进程',
@@ -71,7 +77,11 @@ const items = computed(() => {
     },
     capItem('更新程序', 'updater'),
     capItem('数据源', 'source'),
-    capItem('数据卷', 'writable'),
+    {
+      name: '数据卷',
+      level: writable.ok === false ? 'err' : writable.warn ? 'warn' : 'ok',
+      detail: [writable.detail || '—', diskNote].filter(Boolean).join(' · '),
+    },
     capItem('待重试任务', 'retry_pending'),
   ]
 })

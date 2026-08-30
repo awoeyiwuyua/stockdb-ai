@@ -1,19 +1,19 @@
 // use-sync.js — 数据同步页业务状态机（0.10.18 自 views/OpsSync.vue 迁入）。
 //
-// 承接（哲学 #2 复杂度定向转移）：4 个数据源（status/history/syncLog + 触发动作）
-// 的状态与全部取数/操作逻辑，无 DOM（日志滚动锁在 SyncLogCard 组件内）。
+// 承接（哲学 #2 复杂度定向转移）：2 个数据源（status/history）+ 触发动作的
+// 状态与全部取数/操作逻辑，无 DOM。同步日志已按第五批归属表移出本域
+// （唯一的家 = 日志中心，getLog 消费方在 views/OpsLogs.vue）。
 // 取数走 api/status.js 封装（依赖方向：composable → api，渲染层不碰 fetch）。
 //
 // 轮询不在这里注册——由编排壳 usePolling 统一调度（可见性节拍在 use-polling）。
 import { ref, computed } from 'vue'
 // ElMessage / ElMessageBox 是"命令式"弹窗，不走模板组件，必须显式 import
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStatus, getHistory, getLog, runSync } from '../api/status.js'
+import { getStatus, getHistory, runSync } from '../api/status.js'
 
 export function useSync() {
   const status = ref(null)      // /api/status 全量载荷（含 container/sync/disk/calendar...）
   const history = ref([])       // /api/history 同步历史（后端按时间正序追加，末尾最新）
-  const syncLog = ref('')       // /api/log 同步日志尾部
   const loading = ref(false)    // 首拉/手动刷新中
   const error = ref(null)       // 最近一次失败文案（页面顶部 alert，不打断使用）
   const syncBusy = ref(false)   // 同步请求进行中（按钮 loading）
@@ -41,21 +41,11 @@ export function useSync() {
     }
   }
 
-  // 拉 /api/log?n=80：同步日志尾部
-  async function loadSyncLog() {
-    try {
-      const data = await getLog(80)
-      syncLog.value = data?.log ?? '（暂无同步日志）'
-    } catch (e) {
-      error.value = e?.message || '同步日志接口不可用'
-    }
-  }
-
   // 整页刷新入口：manual=true 时显示 loading（按钮转圈），轮询静默
   async function loadAll(manual = false) {
     if (manual) loading.value = true
     try {
-      await Promise.all([loadStatus(), loadHistory(), loadSyncLog()])
+      await Promise.all([loadStatus(), loadHistory()])
     } finally {
       loading.value = false
     }
@@ -84,8 +74,8 @@ export function useSync() {
         ElMessage.warning(msg) // 被定时任务占用：只提示，不做多余动作（与旧页一致）
       } else {
         ElMessage.success(msg)
-        // 刚启动：立刻补拉一次状态 + 日志，不用等 30s 轮询
-        await Promise.all([loadStatus(), loadSyncLog()])
+        // 刚启动：立刻补拉一次状态 + 历史（运行中的记录即刻可见），不用等 30s 轮询
+        await Promise.all([loadStatus(), loadHistory()])
       }
     } catch (e) {
       ElMessage.error(e?.message || '启动同步失败')
@@ -100,8 +90,8 @@ export function useSync() {
   const lastExitOk = computed(() => lastExitCode.value === 0)
 
   return {
-    status, history, syncLog, loading, error, syncBusy,
-    loadStatus, loadHistory, loadSyncLog, loadAll, doSync,
+    status, history, loading, error, syncBusy,
+    loadStatus, loadHistory, loadAll, doSync,
     lastSync, lastExitCode, lastExitOk,
   }
 }

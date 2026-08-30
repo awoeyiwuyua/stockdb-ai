@@ -34,8 +34,10 @@
     </EmptyState>
 
     <!-- ③ 正常态：数据齐了，按 docs/design/webui.md §2.2 顺序逐块渲染：
-         状态(灯+操作同位) → 前提检查(全绿收起) → 数据资产 → 磁盘 → 定时 →
-         历史 → 日志 → 趋势(折叠钻取) → 港股面板 -->
+         状态(灯+操作同位) → 前提检查(全绿收起) → 数据资产 → 定时 →
+         历史 → 趋势(折叠钻取) → 港股。
+         第五批归属表：磁盘归系统健康页（前提检查"数据卷"项带用量）、
+         同步日志归日志中心，本页不再重复渲染。 -->
     <template v-else>
 
       <SyncStatusCard :status="status" :sync-busy="syncBusy" @sync="doSync" />
@@ -43,8 +45,6 @@
       <SyncPrereqCard :status="status" />
 
       <SyncAssetsCard :status="status" />
-
-      <SyncDiskCard :status="status" />
 
       <SyncScheduleForm
         v-model:enabled="schEnabled"
@@ -60,8 +60,6 @@
 
       <SyncHistoryTable :history="history" />
 
-      <SyncLogCard :log="syncLog" />
-
       <SyncTrendChart :history="history" />
 
       <SyncHkPanel />
@@ -73,26 +71,25 @@
 <script setup>
 // 编排壳：图标（:icon 需要真实组件对象）+ 空态组件 + sync/ 域组件 + composables。
 // 注意：getContainerLogs / restartContainer 已随容器区块迁往 /ops/health；
-// 同步操作按钮已并入 SyncStatusCard（判据 2 状态与操作同位）。
+// 同步操作按钮已并入 SyncStatusCard（判据 2 状态与操作同位）；
+// 同步日志/磁盘已按归属表移出本页（第五批）。
 import { Refresh } from '@element-plus/icons-vue'
 import EmptyState from '../components/EmptyState.vue'
 import SyncStatusCard from '../components/sync/SyncStatusCard.vue'
 import SyncPrereqCard from '../components/sync/SyncPrereqCard.vue'
 import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
-import SyncDiskCard from '../components/sync/SyncDiskCard.vue'
 import SyncScheduleForm from '../components/sync/SyncScheduleForm.vue'
 import SyncHistoryTable from '../components/sync/SyncHistoryTable.vue'
-import SyncLogCard from '../components/sync/SyncLogCard.vue'
 import SyncTrendChart from '../components/sync/SyncTrendChart.vue'
 import SyncHkPanel from '../components/sync/SyncHkPanel.vue'
 import { useSync } from '../composables/use-sync.js'
 import { useSchedule } from '../composables/use-schedule.js'
 import { usePolling } from '../composables/use-polling.js'
 
-// —— 同步域状态机（status/history/syncLog + doSync）——
+// —— 同步域状态机（status/history + doSync）——
 const {
-  status, history, syncLog, loading, error, syncBusy,
-  loadStatus, loadHistory, loadSyncLog, loadAll, doSync,
+  status, history, loading, error, syncBusy,
+  loadStatus, loadHistory, loadAll, doSync,
 } = useSync()
 
 // —— 定时计划域状态机（表单 + 防吞草稿）；失败文案汇入同一 error ——
@@ -109,7 +106,6 @@ usePolling(() => {
   loadStatus()
   loadHistory()
   loadSchedule()
-  loadSyncLog()
 })
 
 // 首次进入拉全量（loadAll 不含 schedule——属 schedule 域，单独补一次）
