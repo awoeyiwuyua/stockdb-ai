@@ -46,8 +46,8 @@
       </el-descriptions-item>
     </el-descriptions>
 
-    <!-- 指标卡栅格：StatCard 组件统一样式，tone 按语义着色 -->
-    <div class="stat-grid">
+    <!-- 指标卡栅格：StatCard 组件统一样式，tone 按语义着色（栅格公共件 StatGrid） -->
+    <StatGrid>
       <!-- 数据新鲜度：滞后天数从全局 store 读（health.lag_days，App 已 30s 轮询 /api/overview，
            本页不必重复请求；≤1 正常 / 2 警告 / >2 错误） -->
       <StatCard
@@ -82,7 +82,7 @@
         :tone="status?.trading_today ? 'ok' : 'warn'"
         sub="trading_today（定时按此跳过休市）"
       />
-    </div>
+    </StatGrid>
 
     <!-- 磁盘用量：el-progress 容量条，>80% 变红提醒扩容 -->
     <div class="disk-block">
@@ -124,6 +124,7 @@
 <script setup>
 import { computed } from 'vue'
 import StatCard from '../StatCard.vue'
+import StatGrid from '../common/StatGrid.vue'
 import { fmtYMD, fmtUptime } from '../../utils/format.js'
 import { useGlobalStore } from '../../stores/global.js'
 
@@ -207,11 +208,8 @@ const diskText = computed(() => {
   gap: 12px;
 }
 
-/* 指标卡栅格：auto-fit + minmax(200px,1fr) 自动换行，宽屏一排 4 张（全站统一口径） */
+/* 栅格骨架在公共件 StatGrid.vue；这里只留本卡局部差异：与上方描述块/下方磁盘条隔开 */
 .stat-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 12px;
   margin: 12px 0;
 }
 

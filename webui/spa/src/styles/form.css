@@ -1,0 +1,14 @@
+/* form.css — 表单/操作行通用样式（0.10.18 第三批自 mydb 三面板 scoped 提取为全局）。
+   提取依据：.form-row 在 MydbReadPanel/MydbWritePanel/MydbQueryConsole 三处逐字
+   重复（重复驱动提取，真实重复 ≥3 才收，sub-title 等仅 2 处的仍留在 scoped）。
+   各组件 scoped 内的同名规则带 [data-v] 属性选择器优先级更高，不受影响；
+   未定义处由这里兜底。 */
+
+/* 表单操作行：一行内控件横排，窄屏自动换行 */
+.form-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}

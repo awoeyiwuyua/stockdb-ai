@@ -73,13 +73,7 @@ const emit = defineEmits(['write'])
 </script>
 
 <style scoped>
-.form-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
-}
+/* .form-row 已收全局 styles/form.css（三面板逐字重复，0.10.18 第三批提取） */
 .label {
   width: 56px;
   font-size: 13px;
