@@ -33,41 +33,18 @@
       <el-button type="primary" :icon="Refresh" @click="loadAll(true)">重试</el-button>
     </EmptyState>
 
-    <!-- ③ 正常态：数据齐了，逐块渲染 -->
+    <!-- ③ 正常态：数据齐了，按 docs/design/webui.md §2.2 顺序逐块渲染：
+         状态(灯+操作同位) → 前提检查(全绿收起) → 数据资产 → 磁盘 → 定时 →
+         历史 → 日志 → 趋势(折叠钻取) → 港股面板 -->
     <template v-else>
 
-      <SyncTrendChart :history="history" />
+      <SyncStatusCard :status="status" :sync-busy="syncBusy" @sync="doSync" />
 
-      <SyncOverview :status="status" />
+      <SyncPrereqCard :status="status" />
 
-      <!-- ================= 操作区 ================= -->
-      <section class="card">
-        <h3 class="card-title">同步操作</h3>
-        <p class="card-hint">
-          热更新：stockdb 保持运行、增量同步 + 自动 reload，零中断（推荐）；停服严格模式：按官方要求先停服务再同步，故障兜底用。
-        </p>
-        <div class="actions">
-          <el-button
-            type="primary"
-            :icon="VideoPlay"
-            :loading="syncBusy"
-            :disabled="!!status?.sync_running"
-            @click="doSync(true)"
-          >
-            立即热更新
-          </el-button>
-          <el-button
-            type="warning"
-            :icon="SwitchButton"
-            :loading="syncBusy"
-            :disabled="!!status?.sync_running"
-            @click="doSync(false)"
-          >
-            停服严格同步
-          </el-button>
-          <span v-if="status?.sync_running" class="hint">同步进行中，按钮已禁用（后端锁保证串行）</span>
-        </div>
-      </section>
+      <SyncAssetsCard :status="status" />
+
+      <SyncDiskCard :status="status" />
 
       <SyncScheduleForm
         v-model:enabled="schEnabled"
@@ -85,6 +62,8 @@
 
       <SyncLogCard :log="syncLog" />
 
+      <SyncTrendChart :history="history" />
+
       <SyncHkPanel />
 
     </template>
@@ -93,14 +72,18 @@
 
 <script setup>
 // 编排壳：图标（:icon 需要真实组件对象）+ 空态组件 + sync/ 域组件 + composables。
-// 注意：getContainerLogs / restartContainer 已随容器区块迁往 /ops/health。
-import { Refresh, VideoPlay, SwitchButton } from '@element-plus/icons-vue'
+// 注意：getContainerLogs / restartContainer 已随容器区块迁往 /ops/health；
+// 同步操作按钮已并入 SyncStatusCard（判据 2 状态与操作同位）。
+import { Refresh } from '@element-plus/icons-vue'
 import EmptyState from '../components/EmptyState.vue'
-import SyncTrendChart from '../components/sync/SyncTrendChart.vue'
-import SyncOverview from '../components/sync/SyncOverview.vue'
+import SyncStatusCard from '../components/sync/SyncStatusCard.vue'
+import SyncPrereqCard from '../components/sync/SyncPrereqCard.vue'
+import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
+import SyncDiskCard from '../components/sync/SyncDiskCard.vue'
 import SyncScheduleForm from '../components/sync/SyncScheduleForm.vue'
 import SyncHistoryTable from '../components/sync/SyncHistoryTable.vue'
 import SyncLogCard from '../components/sync/SyncLogCard.vue'
+import SyncTrendChart from '../components/sync/SyncTrendChart.vue'
 import SyncHkPanel from '../components/sync/SyncHkPanel.vue'
 import { useSync } from '../composables/use-sync.js'
 import { useSchedule } from '../composables/use-schedule.js'

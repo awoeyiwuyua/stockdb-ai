@@ -1,27 +1,34 @@
 <template>
-  <!-- 同步耗时趋势卡（0.10.18 自 views/OpsSync.vue 拆出）。
+  <!-- 同步耗时趋势卡（0.10.18 自 views/OpsSync.vue 拆出；第四批按 docs/design/webui.md
+       判据 5 改为默认折叠的钻取项：图表是排查工具，不占运维页首屏）。
        直接复用 /api/history 的同一份数组做图，不额外请求接口：
        x = 每次同步的 ts（时间），左轴 = 耗时 duration_sec（秒），右轴 = 下载文件数 downloads。
        折线断点 = 那次同步没有数值（如 exit_code=null 的"运行中"记录，字段缺失）。
        三态齐备：有图 / 无任何历史（EmptyState）/ 有历史但无数值（EmptyState）。 -->
   <section class="card">
-    <h3 class="card-title">同步耗时趋势</h3>
-    <p class="card-hint">
-      最近 {{ history.length }} 次同步的耗时与下载量；断点表示该次同步未产生数值（运行中或异常中断）。
-    </p>
-    <EChart v-if="history.length && chartHasData" :option="chartOption" height="280px" />
-    <EmptyState
-      v-else-if="!history.length"
-      icon="TrendCharts"
-      title="暂无同步历史"
-      description="启动一次同步后，这里会展示每次任务的耗时与下载量趋势。"
-    />
-    <EmptyState
-      v-else
-      icon="DataLine"
-      title="暂无趋势数据"
-      description="历史记录暂缺耗时/下载数字段，等待一次完整同步后自动展示。"
-    />
+    <el-collapse class="trend-collapse">
+      <el-collapse-item name="trend">
+        <template #title>
+          <span class="trend-title">同步耗时趋势（点击展开）</span>
+        </template>
+        <p class="card-hint">
+          最近 {{ history.length }} 次同步的耗时与下载量；断点表示该次同步未产生数值（运行中或异常中断）。
+        </p>
+        <EChart v-if="history.length && chartHasData" :option="chartOption" height="280px" />
+        <EmptyState
+          v-else-if="!history.length"
+          icon="TrendCharts"
+          title="暂无同步历史"
+          description="启动一次同步后，这里会展示每次任务的耗时与下载量趋势。"
+        />
+        <EmptyState
+          v-else
+          icon="DataLine"
+          title="暂无趋势数据"
+          description="历史记录暂缺耗时/下载数字段，等待一次完整同步后自动展示。"
+        />
+      </el-collapse-item>
+    </el-collapse>
   </section>
 </template>
 
@@ -136,3 +143,12 @@ const chartOption = computed(() => {
   }
 })
 </script>
+
+<style scoped>
+/* 折叠标题（判据 5：图表默认收起，点开才画） */
+.trend-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+</style>

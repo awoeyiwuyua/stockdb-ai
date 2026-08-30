@@ -56,3 +56,32 @@
   font-size: 12px;
   color: var(--muted);
 }
+
+/* 状态灯点（0.10.18 第四批，docs/design/webui.md 判据 1）：健康灯 → 分区 → 异常指引。
+   总览灯行 / 同步状态卡 / 前提检查三处共用（≥3 收全局）；tone 同名类与 StatCard 一致 */
+.light-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.light-dot.ok {
+  background: var(--ok);
+}
+.light-dot.warn {
+  background: var(--warn);
+}
+.light-dot.err {
+  background: var(--err);
+}
+.light-dot.brand {
+  background: var(--brand);
+}
+.light-dot.muted {
+  background: var(--muted);
+}
+.light-dot.lg {
+  width: 14px;
+  height: 14px;
+}

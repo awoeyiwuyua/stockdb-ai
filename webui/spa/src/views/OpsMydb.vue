@@ -42,7 +42,7 @@
     <template v-else>
       <!-- 顶部指标：自定义表数量（getTables() 已过滤上游保留表） -->
       <StatGrid>
-        <StatCard label="自定义表" :value="db.tables.length" tone="brand" sub="getTables() 实时清单" />
+        <StatCard label="自定义表" :value="db.tables.length" tone="brand" sub="已过滤上游保留表" />
       </StatGrid>
 
       <div class="two-col">

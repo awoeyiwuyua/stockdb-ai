@@ -1,12 +1,10 @@
 <template>
-  <!-- ═══════════════ 总览页（Phase 5.1 LuCI 驾驶舱版 → 0.8.0 收敛版）：4 指标卡 + 2 紧凑区块卡 ═══════════════
-       学习点：
-       1) 全局数据（健康/告警/MCP/版本）全部读 Pinia store —— App 层已做 30s 轮询，
-          本页只为一个独立数据源自管轮询：版本 getVersion()（0.8.0 已移除模拟盘/情绪投递）。
-       2) 三态齐备：总览 null 未出错 → 骨架屏；出错 → ElAlert + 错误空态；有数据 → 正常渲染。
-       3) 密度哲学：StatCard 网格 minmax(180px,1fr)、卡片内边距 12-14px、标题行紧凑。 -->
+  <!-- ═══════════════ 总览页（0.10.18 第四批按 docs/design/webui.md 重排）═══════════════
+       范式：NAS 信息中心——聚合健康灯 + 域灯行（可点击跳转）+ 四张分区卡。
+       数据来源：health/alerts/mcp/version 读全局 store（App 层 30s 轮询）；
+       域灯与资产/同步卡补充读 /api/status（composables/use-overview.js 静默拉取）。 -->
   <div class="overview-page">
-    <!-- ── 页头：标题 + 最近刷新时间 + 手动刷新按钮（.page-head 紧凑风格） ── -->
+    <!-- ── 页头：标题 + 最近刷新时间 + 手动刷新按钮 ── -->
     <header class="page-head">
       <div class="head-left">
         <h2 class="page-title">总览</h2>
@@ -14,7 +12,7 @@
           最近刷新 {{ store.lastRefresh ? hhmmss(store.lastRefresh) : '等待首次刷新' }}
         </span>
       </div>
-      <!-- 手动刷新：总览 store + 版本，两个数据源一起刷 -->
+      <!-- 手动刷新：总览 store + 版本 + status，一起刷 -->
       <el-button type="primary" :icon="Refresh" :loading="refreshing" size="small" @click="onRefresh">
         刷新
       </el-button>
@@ -32,14 +30,14 @@
 
     <!-- ── 加载态：首次数据还没回来（overview 为 null 且无报错）→ 骨架屏 ── -->
     <template v-if="store.overview === null && !store.error">
-      <StatGrid dense>
-        <div v-for="i in 4" :key="i" class="sk-card">
-          <el-skeleton animated :rows="2" />
+      <div class="light-strip">
+        <div v-for="i in 5" :key="i" class="sk-card sk-chip">
+          <el-skeleton animated :rows="1" />
         </div>
-      </StatGrid>
+      </div>
       <div class="cards-grid">
-        <div v-for="i in 2" :key="'c' + i" class="sk-card">
-          <el-skeleton animated :rows="5" />
+        <div v-for="i in 4" :key="'c' + i" class="sk-card">
+          <el-skeleton animated :rows="4" />
         </div>
       </div>
     </template>
@@ -56,16 +54,64 @@
 
     <!-- ── 正常内容（数据到位后渲染） ── -->
     <template v-else>
-      <!-- ① 第一行：4 张指标卡（dense 变体：值行更紧凑，压缩规则在 StatGrid 内部） -->
-      <StatGrid dense>
-        <StatCard label="数据最新" :value="dataLatestValue" :sub="dataLatestSub" :tone="dataLatestTone" />
-        <StatCard label="告警" :value="alertCountValue" :sub="alertCountSub" :tone="alertCountTone" />
-        <StatCard label="MCP 成功率" :value="mcpRateValue" :sub="mcpRateSub" tone="ok" />
-        <StatCard label="面板版本" :value="versionValue" :sub="versionSub" :tone="versionTone" />
-      </StatGrid>
+      <!-- ① 健康灯行：聚合灯（四域最差色）+ 四个域灯（点击跳对应运维页）。
+           灯色语义见 docs/design/webui.md §3 判据 1：绿正常 / 黄注意 / 红故障 / 灰未知 -->
+      <div class="light-strip">
+        <div class="agg-light">
+          <span class="light-dot" :class="agg.tone" />
+          <span class="agg-word">{{ agg.word }}</span>
+        </div>
+        <span class="strip-divider" />
+        <RouterLink v-for="d in domains" :key="d.key" :to="d.to" class="domain-light">
+          <span class="light-dot" :class="d.tone" />
+          <span class="domain-label">{{ d.label }}</span>
+          <span class="domain-value">{{ d.value }}</span>
+        </RouterLink>
+      </div>
 
-      <!-- ② 区块卡：2 张紧凑卡（告警 / 版本） -->
+      <!-- ② 分区卡 ×4：数据资产 / 同步 | 告警 / 版本 -->
       <div class="cards-grid">
+        <!-- 数据资产：新鲜度 + 覆盖 + 标的规模（status.code_stats，15s 后端缓存兜底） -->
+        <section class="card">
+          <div class="card-head">
+            <h3 class="card-title">数据资产</h3>
+          </div>
+          <div class="kv-row">
+            <span class="kv-label">数据最新</span>
+            <span class="kv-value">{{ dataLatest }}</span>
+            <span v-if="lagText" class="hint">{{ lagText }}</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-label">覆盖范围</span>
+            <span class="kv-value">{{ coverageText }}</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-label">标的数量</span>
+            <span class="kv-value">{{ countsText }}</span>
+          </div>
+          <div class="card-foot">
+            <RouterLink to="/ops/sync" class="foot-link">前往数据同步 →</RouterLink>
+          </div>
+        </section>
+
+        <!-- 同步：上次结果摘要（last_sync / exit_code） -->
+        <section class="card">
+          <div class="card-head">
+            <h3 class="card-title">同步</h3>
+          </div>
+          <div class="kv-row">
+            <span class="kv-label">上次同步</span>
+            <span class="kv-value">{{ lastSyncText }}</span>
+          </div>
+          <div class="kv-row">
+            <span class="kv-label">上次结果</span>
+            <span class="kv-value" :class="{ 'warn-text': lastSyncFailed }">{{ lastSyncResult }}</span>
+          </div>
+          <div class="card-foot">
+            <RouterLink to="/ops/sync" class="foot-link">查看同步详情 →</RouterLink>
+          </div>
+        </section>
+
         <!-- 告警摘要：只保留 count + 最近 3 条极简（完整列表移至 /ops/alerts） -->
         <section class="card">
           <div class="card-head">
@@ -158,19 +204,16 @@
 
 <script setup>
 // ============================================================
-// Overview.vue — 总览驾驶舱（Phase 5.1 瘦身版 → 0.8.0 收敛版 → 0.10.18 编排化）。
-// 学习点：
-// 1) 页面的"总览数据"全部读全局 store（App 层已做 30s 轮询），页面自身不为它重复轮询；
-//    只有"版本"是独立数据源（/api/version）：状态机在 composables/use-overview.js，
-//    轮询节拍由 usePolling 驱动（0.10.18 自管定时器已归零）。
+// Overview.vue — 总览驾驶舱（0.10.18 第四批按 docs/design/webui.md 重排）。
+// 范式：健康灯 → 分区 → 异常指引（DSM 存储管理器式，判据见设计文档 §3）。
+// 1) 页面的 health/alerts/mcp/version 读全局 store（App 层 30s 轮询）；
+//    版本卡与域灯用的 /api/status 由 use-overview 状态机提供，usePolling 驱动。
 // 2) 所有展示字段都做防御（?. 与 || 兜底），后端某块降级为 null 时页面不崩、显示 '—'。
 // ============================================================
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 // 图标显式 import（el-button :icon 需要组件对象；模板里 <el-icon> 才走全局注册）
 import { Refresh } from '@element-plus/icons-vue'
-import StatCard from '../components/StatCard.vue'
-import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { fmtYMD } from '../utils/format.js'
 import { useGlobalStore } from '../stores/global.js'
@@ -178,14 +221,16 @@ import { usePolling } from '../composables/use-polling.js'
 import { useOverview } from '../composables/use-overview.js'
 
 const store = useGlobalStore()
+// status：/api/status 载荷（域灯 + 数据资产卡 + 同步卡用）
+const { ver, verLoading, verError, loadVersion, status, loadStatus } = useOverview()
 
-/* ═══════════════ 手动刷新（总览 + 版本一起刷） ═══════════════ */
+/* ═══════════════ 手动刷新（总览 store + 版本 + status 一起刷） ═══════════════ */
 const refreshing = ref(false)
 const onRefresh = async () => {
   refreshing.value = true
   // store.refresh() 内部已把异常写进 store.error，不会 throw；Promise.allSettled 保证
-  // 版本刷新失败也不影响总览刷新。最后用 ElMessage 给"点按钮没反应"一个明确反馈。
-  await Promise.allSettled([store.refresh(), loadVersion()])
+  // 单个数据源失败不影响其余。最后用 ElMessage 给"点按钮没反应"一个明确反馈。
+  await Promise.allSettled([store.refresh(), loadVersion(), loadStatus()])
   refreshing.value = false
   if (store.error) ElMessage.warning(store.error)
 }
@@ -196,47 +241,100 @@ const hhmmss = (d) => {
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
-/* ═══════════════ ① 第一行 4 张指标卡（数据均来自 store getters） ═══════════════ */
-// 数据最新：值 = 最新数据日期；tone 按滞后天数：≤1 ok / =2 warn / >2 err / 未知默认
-const dataLatestValue = computed(() => (store.health?.latest ? fmtYMD(store.health.latest) : '—'))
-const dataLatestTone = computed(() => {
+/* ═══════════════ ① 健康灯行（判据 1：灯 + 标准状态词） ═══════════════ */
+// —— 数据域：滞后天数 ≤1 ok / 2 warn / >2 err / 未知灰 ——
+const dataTone = computed(() => {
   const lag = store.lagDays
-  if (lag === null) return '' // 未知：不给语义色，保持默认
+  if (lag === null) return 'muted'
   if (lag <= 1) return 'ok'
   if (lag === 2) return 'warn'
   return 'err'
 })
-const dataLatestSub = computed(() => {
+const dataValue = computed(() =>
+  store.health?.latest ? fmtYMD(store.health.latest) : '—')
+
+// —— 同步域：运行中蓝 / 上次成功绿 / 失败红 / 无记录灰 ——
+const syncLight = computed(() => {
+  const s = status.value
+  if (!s) return { tone: 'muted', value: '—' }
+  if (s.sync_running) return { tone: 'brand', value: '同步中' }
+  const code = s.exit_code
+  if (code == null) return { tone: 'muted', value: '空闲·无记录' }
+  return code === 0 ? { tone: 'ok', value: '空闲·成功' } : { tone: 'err', value: '空闲·失败' }
+})
+
+// —— 服务域（MCP 成功率）：≥90% 绿 / ≥70% 黄 / 更低红 / 无数据灰 ——
+const mcpLight = computed(() => {
+  const ok = store.mcp?.ok_rate
+  if (store.mcp?.total === undefined || ok === null || ok === undefined) {
+    return { tone: 'muted', value: '—' }
+  }
+  return {
+    tone: ok >= 0.9 ? 'ok' : ok >= 0.7 ? 'warn' : 'err',
+    value: `${(ok * 100).toFixed(1)}%`,
+  }
+})
+
+// —— 系统域：磁盘 >80% 红 / >60% 黄，容器停止直接红 ——
+const sysLight = computed(() => {
+  const s = status.value
+  if (!s) return { tone: 'muted', value: '—' }
+  const d = s.disk
+  const pct = d && d.total_gb ? Math.round((d.used_gb / d.total_gb) * 100) : null
+  let tone = pct == null ? 'muted' : pct > 80 ? 'err' : pct > 60 ? 'warn' : 'ok'
+  if (s.container && !s.container.ok) tone = 'err'
+  return { tone, value: pct == null ? '—' : `磁盘 ${pct}%` }
+})
+
+const domains = computed(() => [
+  { key: 'data', label: '数据', to: '/ops/health', tone: dataTone.value, value: dataValue.value },
+  { key: 'sync', label: '同步', to: '/ops/sync', ...syncLight.value },
+  { key: 'mcp', label: '服务', to: '/ops/mcp', ...mcpLight.value },
+  { key: 'sys', label: '系统', to: '/ops/health', ...sysLight.value },
+])
+
+// 聚合灯 = 四域最差色（brand"同步中"不是问题，参与聚合时按正常档计）
+const agg = computed(() => {
+  const norm = domains.value.map((d) => (d.tone === 'brand' ? 'ok' : d.tone))
+  const worst = ['err', 'warn', 'ok', 'muted'].find((t) => norm.includes(t)) ?? 'muted'
+  return { tone: worst, word: { err: '有故障', warn: '需要注意', ok: '正常', muted: '状态未知' }[worst] }
+})
+
+/* ═══════════════ ② 数据资产卡（status.code_stats/coverage + store.health） ═══════════════ */
+const dataLatest = computed(() => {
+  const latest = store.health?.latest || status.value?.data_latest
+  return latest ? fmtYMD(latest) : '—'
+})
+const lagText = computed(() => {
   const lag = store.lagDays
-  if (lag === null) return store.health?.status === 'unknown' ? '数据日期未知' : '状态未知'
+  if (lag === null) return ''
   return lag === 0 ? '已是最新' : `滞后 ${lag} 天`
 })
-
-// 告警：数量 >0 用红色强调
-const alertCountValue = computed(() => String(store.alertCount))
-const alertCountTone = computed(() => (store.alertCount > 0 ? 'err' : 'ok'))
-const alertCountSub = computed(() => (store.alertCount > 0 ? '有待处理告警' : '一切正常'))
-
-// MCP 成功率：ok_rate 是 0~1 小数（如 0.9）→ ×100 转百分比；空窗口为 null → '—'
-const mcpRateValue = computed(() => {
-  const ok = store.mcp?.ok_rate
-  if (store.mcp?.total === undefined || ok === null || ok === undefined) return '—'
-  return `${(ok * 100).toFixed(1)}%`
+// coverage{earliest,latest} 是 8 位数字 → 只取年份，如 '1990 ~ 2026'
+const coverageText = computed(() => {
+  const c = status.value?.coverage
+  if (!c || !c.earliest) return '—'
+  return `${String(c.earliest).slice(0, 4)} ~ ${String(c.latest).slice(0, 4)}`
 })
-const mcpRateSub = computed(() =>
-  store.mcp?.total ? `最近 ${store.mcp.total} 次调用` : '暂无调用记录')
-
-// 面板版本：stale（上游有新版本）时警告色
-const versionValue = computed(() => `v${store.version?.webui?.version ?? '—'}`)
-const versionTone = computed(() => (store.version?.stale ? 'warn' : ''))
-const versionSub = computed(() => {
-  const v = store.version
-  if (!v) return '版本信息未知'
-  if (v.stale) return v.upstream?.tag_name ? `上游已有 v${v.upstream.tag_name}` : '检测到新版本'
-  return v.upstream?.tag_name ? '已是最新' : '上游暂不可用'
+const countsText = computed(() => {
+  const cs = status.value?.code_stats
+  if (!cs) return '—'
+  return `股票 ${cs.stock ?? '—'} · ETF ${cs.etf ?? '—'} · 其他 ${cs.other ?? '—'}`
 })
 
-/* ═══════════════ ② 告警摘要（count + 最近 3 条极简） ═══════════════ */
+/* ═══════════════ ③ 同步卡（status.last_sync / exit_code） ═══════════════ */
+const lastSyncText = computed(() => status.value?.last_sync?.ts ?? '尚无记录')
+const lastSyncFailed = computed(() => {
+  const code = status.value?.exit_code
+  return code != null && code !== 0
+})
+const lastSyncResult = computed(() => {
+  const code = status.value?.exit_code
+  if (code == null) return '—'
+  return code === 0 ? '成功' : '失败'
+})
+
+/* ═══════════════ ④ 告警摘要卡（count + 最近 3 条极简） ═══════════════ */
 // 后端告警字段是 {ts, level, source, message}；overview.alerts.recent 最多 8 条，这里只取 3
 const recent3 = computed(() => (store.overview?.alerts?.recent ?? []).slice(0, 3))
 const alertColor = (level) => {
@@ -249,11 +347,11 @@ const alertColor = (level) => {
 // ts 是 ISO 本地时间（如 2026-08-15T09:30:00），截取 HH:MM，完整值放 title 悬浮
 const fmtHm = (ts) => String(ts || '').slice(11, 16) || '--:--'
 
-/* ═══════════════ ③ 版本卡（并入原 OpsVersion 页）：状态机在 use-overview.js ═══════════════ */
-const { ver, verLoading, verError, loadVersion } = useOverview()
-
-/* ═══════════════ 轮询：usePolling 统一节拍（可见 30s / 后台降频，0.10.18 收编）═══════════════ */
-usePolling(() => loadVersion(), { immediate: true })
+/* ═══════════════ 轮询：usePolling 统一节拍（可见 30s / 后台降频）═══════════════ */
+usePolling(() => {
+  loadVersion()
+  loadStatus()
+}, { immediate: true })
 </script>
 
 <style scoped>
@@ -291,6 +389,51 @@ usePolling(() => loadVersion(), { immediate: true })
   width: 100%;
 }
 
+/* —— 健康灯行：聚合灯 + 四域灯（判据 1 状态灯先行；.light-dot 全局样式在 card.css） —— */
+.light-strip {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.agg-light {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.agg-word {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.strip-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--line);
+}
+.domain-light {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+}
+.domain-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.domain-value {
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.domain-light:hover .domain-label {
+  color: var(--brand);
+}
+
 /* —— 通用卡片：var(--panel) 底 + 12px 圆角 + var(--line) 边框；内边距 14px（密度约定 12-14px） —— */
 .card {
   background: var(--panel);
@@ -322,13 +465,15 @@ usePolling(() => loadVersion(), { immediate: true })
 .muted {
   color: var(--muted);
 }
-
-/* —— 骨架卡（栅格与 StatCard 压缩规则在 components/common/StatGrid.vue） —— */
 .sk-card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 14px;
+}
+/* 灯行骨架片：与真实灯等宽占位 */
+.sk-chip {
+  flex: 1;
 }
 .cards-grid {
   display: grid;
@@ -337,7 +482,7 @@ usePolling(() => loadVersion(), { immediate: true })
   align-items: start; /* 卡片高度各自内容自适应，不强制拉伸 */
 }
 
-/* —— 版本卡键值行 —— */
+/* —— 键值行（资产/同步/版本卡共用） —— */
 .kv-row {
   display: flex;
   align-items: center;
