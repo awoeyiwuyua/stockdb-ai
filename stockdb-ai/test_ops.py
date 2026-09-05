@@ -1419,7 +1419,11 @@ class StaleSelfHealTest(_OpsTestCase):
 
     def test_arm_stale_retry_registers_pending(self):
         """exit 0 但数据滞后 → 登记 pending（30 分钟后），当日计数 1。"""
-        ok = app._arm_stale_retry("20260827", "20260828")
+        # 0.10.18：截止时刻守卫读真实挂钟（>= STALE_RETRY_UNTIL 拒登记），
+        # 夜间跑套件必撞 → UNTIL 拉到 23:59 使本用例时间无关（cap 用例走
+        # n>MAX 分支先短路，不受时刻影响，无需注入）
+        with mock.patch.object(app, "STALE_RETRY_UNTIL", "23:59"):
+            ok = app._arm_stale_retry("20260827", "20260828")
         self.assertTrue(ok)
         cfg = app.load_schedule()
         self.assertIsNotNone(cfg["stale_retry_pending"])
@@ -1449,7 +1453,8 @@ class StaleSelfHealTest(_OpsTestCase):
 
     def test_arm_stale_retry_persists(self):
         """登记落盘（重启不丢）：重新 load 仍见 pending。"""
-        app._arm_stale_retry("20260827", "20260828")
+        with mock.patch.object(app, "STALE_RETRY_UNTIL", "23:59"):
+            app._arm_stale_retry("20260827", "20260828")
         cfg = app.load_schedule()  # 全新读取（非内存态）
         self.assertIsNotNone(cfg["stale_retry_pending"])
 
