@@ -89,6 +89,7 @@
           <el-descriptions-item label="已运行">{{ uptimeText() }}</el-descriptions-item>
           <el-descriptions-item label="数据目录">{{ env?.data_dir || '—' }}</el-descriptions-item>
           <el-descriptions-item label="数据最新日">{{ env?.data_latest ? fmtYMD(env.data_latest) : '—' }}</el-descriptions-item>
+          <el-descriptions-item label="行情响应">{{ latencyMs != null ? `${latencyMs} ms` : '—' }}（引擎接口延迟，自数据资产卡迁入）</el-descriptions-item>
         </el-descriptions>
       </section>
 
@@ -115,6 +116,7 @@ import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { getDiag } from '../api/diag.js'
+import { getStatus } from '../api/status.js'
 import EmptyState from '../components/EmptyState.vue'
 import { fmtYMD, fmtElapsed } from '../utils/format.js'
 import { usePolling } from '../composables/use-polling.js'
@@ -123,6 +125,7 @@ const loading = ref(true)  // 首次加载中
 const checking = ref(false) // 「立即体检」按钮 loading（只随手动动作出现）
 const error = ref('')       // 最近一次失败文案
 const data = ref(null)      // /api/diag 全量载荷 {generated_at, env, checks, all_ok}
+const latencyMs = ref(null) // /api/status.code_stats.latency_ms（行情响应，自数据资产卡迁入）
 
 let busy = false // 互斥：上一轮请求未回就跳过本轮（轮询 + 手动共用一把锁）
 
@@ -136,8 +139,9 @@ async function load(manual = false) {
   busy = true
   if (manual) checking.value = true
   try {
-    const r = await getDiag()
+    const [r, st] = await Promise.all([getDiag(), getStatus().catch(() => null)])
     data.value = r || null
+    latencyMs.value = st?.code_stats?.latency_ms ?? null
     error.value = ''
     // 手动体检成功给一句摘要反馈；轮询成功保持静默（页面数据本身就在变）
     if (manual) {
