@@ -4,6 +4,25 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.20] — 2026-09-06（W1 webui 单页驾驶舱重设计落地，docs/design/webui-cockpit-redesign.md）
+
+> 方向 A 用户拍板（2026-09-06）；四批实施（#138/#139/#140 + 本批）。交互模型
+> 从「按后端模块分 8 页」重组为「单页驾驶舱 + 4 抽屉」，零新增功能、零契约变更
+> （唯一后端增量 = 只读聚合端点 /api/timeline，定义书 §4 开口）。
+
+- **批 1**：驾驶舱单页（'/'）+ 四灯状态带（数据/同步/仓库/磁盘，§2.2 口径）+
+  异常区 + 旧路由重定向；/overview、/ops/health、/ops/diag 并入
+- **批 2**：GET /api/timeline?days=7（records/sync_history/backups/alerts 四路
+  逐日聚合，全子块静默降级）+ TimelineCard（逐日事件点、行展开明细）
+- **批 3**：四抽屉迁移——通知中心/日志中心/诊断（体检+MCP 双标签）/数据查询；
+  导航收敛为 驾驶舱+数据同步 两页；灯点击与异常区联动抽屉；旧路径
+  {path,query} 重定向自动展开
+- **批 4**：驾驶舱热更新确认流（水位/最新/上次同步三行确认 → 触发 → 日志尾
+  滚动至「同步结束」自动刷新）；版本号与本文
+- **验证**：Vitest 64 全绿（nav 重写 + Cockpit 空载荷挂载）；后端 TimelineTests
+  2 绿 + 全量单测过；dev 双主题目测（抽屉/重定向/时间线/热更新流）
+- **ROADMAP §2 同步**：webui 行注明 W1 重设计定义书指针（重组展示 ≠ 加功能）
+
 ## [0.10.19] — 2026-09-06（webui 第六批：Element Plus ÷ Apple 皮肤）
 
 - **皮肤批**：skin.css 新增（药丸按钮/雾面表头/圆角弹层/浅底噪点清零，
