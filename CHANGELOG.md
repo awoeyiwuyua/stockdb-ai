@@ -4,6 +4,20 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.24] — 2026-09-06（修复：webui 双实例——调度器存活/同步运行态对接口永不可见）
+
+> 0.10.23 的 from-import 修复只解了一半：实机复测 scheduler_alive 仍 False、
+> 心跳恒 0.0——根因是容器里 `python app.py` 直跑时模块名为 `__main__`，而
+> handlers.py `import app` 再载入第二份实例。调度线程（main 内启动，活在
+> __main__）更新的存活/心跳/_sync_state，handlers 读的第二实例永远看不到。
+
+- app.py `__main__` 块：`sys.modules.setdefault("app", sys.modules["__main__"])`
+  单实例别名——`import app` → `__main__`，全局态单实例（经典脚本双实例修法）
+- 连带修正：调度线程触发的同步，其运行态/退出码此前对 /api/status 恒 idle
+  （双实例另一处不可见），一并归一
+- 验证：fnOS 实机 scheduler_alive=True、心跳随轮询前进；Python 全量 +
+  Vitest 全绿
+
 ## [0.10.23] — 2026-09-06（修复：调度器存活判断恒假 + 数据资产卡迁入驾驶舱）
 
 - **修复**：/api/status 的 scheduler_alive 恒为 False——handlers from-import

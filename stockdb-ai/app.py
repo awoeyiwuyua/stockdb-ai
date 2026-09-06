@@ -2163,4 +2163,11 @@ def main():
 
 
 if __name__ == "__main__":
+    # W1 修复（0.10.24）：单实例别名——脚本直跑时本模块叫 __main__，而
+    # handlers.py `import app` 会再载入第二份实例：调度线程在 __main__ 里
+    # 更新的 _scheduler_alive/_scheduler_heartbeat/_sync_state 对 handlers
+    # 永不可见（实机实证 scheduler_alive 恒 False、调度运行态恒 idle，
+    # 0.10.23 的 from-import 修复只解了一半）。别名后 import app → __main__，
+    # 全局态单实例。
+    sys.modules.setdefault("app", sys.modules["__main__"])
     main()
