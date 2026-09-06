@@ -69,8 +69,8 @@
       <!-- ③ 时间线（W1 批 2：/api/timeline 七交易日聚合） -->
       <TimelineCard :rows="timeline" />
 
-      <!-- ④ 数据资产（用户 09-06 拍板迁入驾驶舱；自数据同步页移来，数据源同 /api/status） -->
-      <SyncAssetsCard :status="status" />
+      <!-- ④ 数据资产（W1 v0.4：三块资产清单——行情库/仓库/私有库） -->
+      <AssetsCard :status="status" :warehouse="warehouse" :totals="whTotals" :latest="store.health?.latest || ''" />
     </template>
 
     <!-- ── 抽屉群（批 3）：四页降级为抽屉内容组件，destroy-on-close 关闭即停轮询 ── -->
@@ -115,14 +115,15 @@ import OpsLogs from './OpsLogs.vue'
 import OpsDiag from './OpsDiag.vue'
 import OpsMcp from './OpsMcp.vue'
 import OpsMydb from './OpsMydb.vue'
-import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
+import AssetsCard from '../components/cockpit/AssetsCard.vue'
 
 const store = useGlobalStore()
 const router = useRouter()
 const route = useRoute()
-const { lights, worst, aggWord, status, loadAll } = useCockpit()
+const { lights, worst, aggWord, status, warehouse, loadAll } = useCockpit()
 const refreshing = ref(false)
 const timeline = ref([])
+const whTotals = ref(null)
 
 // —— 抽屉群（批 3）：alerts / logs / diag / query；diag 内 tab（check|mcp）——
 const dreducers = ref({ alerts: false, logs: false, diag: false, query: false })
@@ -146,6 +147,7 @@ async function loadTimeline() {
   try {
     const d = await getTimeline(7)
     timeline.value = d?.days ?? []
+    whTotals.value = d?.totals ?? null
   } catch { /* 保留旧值，时间线空态 */ }
 }
 

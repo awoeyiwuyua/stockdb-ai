@@ -288,6 +288,34 @@ def load_timeline(days: int = 7) -> list[dict]:
     return out
 
 
+def warehouse_totals() -> dict:
+    """仓库资产总量（W1 v0.4 数据资产卡）：交易日数 / 周K / 月K / 备份。纯读、静默降级。
+
+    交易日数与周/月K 数 = facts 下 parquet 文件名去重计数（date=YYYYMMDD）；
+    备份 = backups 目录文件数 + 最近一次落盘时间戳（前端换算年龄）。
+    """
+    import config as _config
+    facts = Path(_config.WAREHOUSE_DIR) / "facts"
+
+    def _count(sub: str) -> int:
+        try:
+            return len({p.name[5:13] for p in facts.glob(f"{sub}/*/*/date=*.parquet")
+                        if len(p.name) >= 13})
+        except Exception:
+            return 0
+
+    count, last_mtime = 0, 0.0
+    try:
+        bks = list((Path(_config.WAREHOUSE_DIR) / "backups").glob("warehouse-*.db"))
+        count = len(bks)
+        last_mtime = max((p.stat().st_mtime for p in bks), default=0.0)
+    except Exception:
+        pass
+    return {"sediment_days": _count("daily"), "weeks": _count("week"),
+            "months": _count("month"),
+            "backups": {"count": count, "last_mtime": last_mtime}}
+
+
 def _default_schedule() -> dict:
     return {"enabled": False, "times": ["15:30"], "trading_only": True,
             "fired": {}, "retried": {}, "retry_pending": None,

@@ -186,8 +186,17 @@ class TimelineTests(_OpsTestCase):
               "verified": "pass", "duration_sec": 3.2, "data_latest": "20260904"}]),
             encoding="utf-8")
 
+        # 仓库总量：daily 1 个交易日 / 周 1 / 月 0（仅放了 daily parquet）
+        facts = Path(self.tmp) / "warehouse" / "facts" / "daily" / "year=2026" / "market=sh"
+        facts.mkdir(parents=True)
+        (facts / "date=20260904.parquet").write_bytes(b"x")
+        wf = Path(self.tmp) / "warehouse" / "facts" / "week" / "year=2026" / "market=sh"
+        wf.mkdir(parents=True)
+        (wf / "date=20260904.parquet").write_bytes(b"x")
+
         with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"),                 mock.patch.object(app, "HISTORY_FILE", hist):
             rows = app.load_timeline(7)
+            totals = app.warehouse_totals()
 
         row = next(r for r in rows if r["date"] == "20260904")
         self.assertEqual(row["sediment"]["rows"], 5178)

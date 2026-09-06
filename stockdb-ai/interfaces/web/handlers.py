@@ -62,6 +62,7 @@ from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），
     list_mcp_calls,
     load_history,
     load_timeline,
+    warehouse_totals,
     load_schedule,
     mcp_dispatch,
     mcp_stats,
@@ -435,7 +436,8 @@ class Handler(BaseHTTPRequestHandler):
             days = int(parse_qs(urlparse(self.path).query).get("days", ["7"])[0])
         except (TypeError, ValueError):
             days = 7
-        self._send(200, json.dumps({"days": load_timeline(days)}, ensure_ascii=False))
+        self._send(200, json.dumps({"days": load_timeline(days),
+                                    "totals": warehouse_totals()}, ensure_ascii=False))
 
     def _schedule(self):
         q = parse_qs(urlparse(self.path).query)
