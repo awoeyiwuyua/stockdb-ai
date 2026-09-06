@@ -31,7 +31,7 @@
 
 | 环境变量 | 值 | 原因 |
 |---|---|---|
-| `STOCKDB_HOST` | `127.0.0.1` | MCP 模块默认 host 是 NAS 内网 IP（`100.66.1.1`），不设会打到失效通道 |
+| `STOCKDB_HOST` | `127.0.0.1` | MCP 模块默认 host 是 NAS 内网 IP（`100.66.1.5`），不设会打到失效通道 |
 | `STOCKDB_PORT` | `7899` | 引擎配置端口（原生目录 `stockdb.conf`） |
 | `PYBAO_DIR` | `C:\Users\75393\Desktop\stockdb\pybao` | pybao 扩展实际位置（任务书原约定 D:\stockdb 在本机为 C:\Users\75393\Desktop\stockdb） |
 | `PYTHONPATH` | 追加 `C:\Users\75393\Desktop\stockdb\pybao`（+ `stockdb-ai` 视脚本位置） | app.py `_mydb_import` 与 mcp 需要 `import stockdb` |

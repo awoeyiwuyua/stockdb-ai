@@ -1386,6 +1386,10 @@ def scheduler_loop() -> None:
             now_hm = now.strftime("%H:%M")
             if cfg["enabled"] and cfg["times"] and not _sync_state["running"]:
                 if cfg["trading_only"] and not is_trading_day(now.date()):
+                    # 0.10.18：非交易日必须先睡再 continue——此前直接 continue 跳过
+                    # 循环底部的 sleep(30)，周末/节假日整日满核忙转（load_schedule
+                    # 读盘 + 日历计算每秒上千次，实测烧满 1 核、NAS 升温）
+                    time.sleep(30)
                     continue  # 非交易日：不触发，也不安排重试
                 # 正常触发优先；每轮只启动一个任务（if/else 隔离），
                 # 避免同轮「正常触发 + 到期重试」并发启动两个线程，导致

@@ -1,21 +1,21 @@
 #!/bin/sh
 # webui 本地开发（Mac/任意有 python3 的机器）
 #
-# 直连远端 stockdb（默认 Tailscale 上的极空间 100.66.1.1:7899），
+# 直连远端 stockdb（默认 Tailscale 上的飞牛 100.66.1.5:7899），
 # 运维面板读功能（健康/状态/查询/港股拉取）完整可测。
 # 同步依赖 /opt/stockdb/数据更新 二进制（仅 NAS 单镜像容器内有），
 # 本地启动时同步接口优雅降级（不可用提示）。
 #
 # 用法：
-#   ./dev.sh                      # 默认连 100.66.1.1:7899，端口 8080
-#   STOCKDB_HOST=192.168.31.240 ./dev.sh  # 局域网直连极空间（Tailscale 不通时的补充通道）
+#   ./dev.sh                      # 默认连 100.66.1.5:7899，端口 8080
+#   STOCKDB_HOST=192.168.50.146 ./dev.sh  # 局域网直连飞牛（Tailscale 不通时的补充通道）
 #   STOCKDB_HOST=192.168.1.5 ./dev.sh   # 连其他实例
 #   WEBUI_PORT=18080 ./dev.sh           # 换本地端口
 set -eu
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-: "${STOCKDB_HOST:=100.66.1.1}"
+: "${STOCKDB_HOST:=100.66.1.5}"
 : "${STOCKDB_PORT:=7899}"
 : "${WEBUI_PORT:=8080}"
 # 0.10.0 治理批：数据落仓库根可见的 data/（gitignore；旧隐藏目录 .dev-data 已废）

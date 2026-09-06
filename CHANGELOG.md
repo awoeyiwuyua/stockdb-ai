@@ -4,6 +4,39 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.18] — 2026-09-04（验收周收官签字 + 周/月口径异源对账 + backfill 试跑）
+
+> 0.10.7~0.10.13 批次验收周（08-31~09-04）全绿收官。本版以签字与文档为主，
+> 代码零行为变更（搭载 webui 重构五批 + compose 注释修正）。
+
+- **验收周收官签字（09-04）**：0831~0904 四交易日 15:50 同步准点 / 打板收口
+  零偏差 / 16:40 沉淀逐日对账零差异 / warehouse.duckdb 日备份落盘；数据晚到
+  自愈三钩子 09-03 实战通过（stale 重试 2 → 补沉淀 → 对账 5179/5179 零差异）；
+  W36 周K 周五沉淀后自动级联进 v_week
+- **契约签字（问题池 #6）**：v_week/v_month vs 引擎日线手工聚合异源对账——
+  20 码（沪深各 10）× W35/W36 周K + 8 月月K 共 57 组，OHLC/volume/amount
+  **0 差异**（引擎无原生周K，对账基准 = 引擎日线按聚合口径手工重算）
+- **backfill 60 天试跑**：warehouse_run backfill 模式一晚补 0526~0818 共 60
+  交易日（52 分钟 ≈ 52s/日，0 对账失败、0 空交易日）；**6/7/8 月首根真月K
+  自动级联**（v_month 3 行落位，完整月守卫按设计放行）；仓库地板 0819→0526。
+  实测按日通道 ~52s/日（每天 104 次 SDK 往返）→ 全量历史回填不走此通道，
+  留 0.10.18 部署窗口用 scripts/backfill_daily_direct.py 按码通道（分钟级）
+- **随版搭载**：webui 重构五批（#130~#134：编排壳化/轮询收编/IA 重排/删跨页
+  重复，纯重构零功能变更）；docker-compose.yml 注释修正（镜像 tag = 面板版本
+  WEBUI_VERSION，上游引擎包 = Dockerfile ARG VERSION 0.3.2——注释仍写 0.3.1
+  已过时）
+- **修复：调度线程非交易日满核忙转**（fnOS 部署实测发现，0.10.17 同样存在）——
+  scheduler_loop 非交易日分支直接 continue 跳过循环底部 sleep(30)，周末/节假日
+  整日烧满 1 核（load_schedule 读盘 + 日历计算每秒上千次，实测 NAS 升温）；
+  修为先 sleep(30) 再 continue。仓库/打板/看门狗三循环本就有休眠，不受影响
+- **测试健壮性**：test_ops 滞后重试两用例注入 STALE_RETRY_UNTIL=23:59——
+  `_arm_stale_retry` 读真实挂钟，23:00 后跑套件必挂（当晚收官实测撞线），
+  测试时间无关化；产品代码零改动（372 全绿复验）
+
+- **部署主体迁移收尾：极空间退役，MCP/dev 默认 host 100.66.1.1→100.66.1.5（飞牛）**——
+  极空间实例与数据已删除；dev.sh/docker README/development-guide 同步改指向，
+  docker/README 加迁移声明；deployments.md 台账记 fnOS 转正
+
 ## [0.10.17] — 2026-08-29（backfill 语义修正：anchor 当天纳入回看——迁移空洞自愈）
 
 > NAS 迁移实证的边缘缺口：删 0828 分区文件后跑 backfill，目标集"从 anchor
