@@ -1,5 +1,9 @@
 # free-stockdb Docker 部署（极空间 Q4）
 
+> ⚠️ **2026-09-06 起部署主体已迁移至飞牛 fnOS**（SSH + 本地构建，compose 位于
+> /vol1/stockdb/，Tailscale 100.66.1.5 / 局域网 192.168.50.146）；极空间实例已退役。
+> 本文保留为极空间 Q4 时代的部署指南存档。
+
 free-stockdb 官方发行包是**静态链接的独立二进制**（服务端 `stockdb` + 更新器 `数据更新`），
 本目录把它容器化到 Linux Docker（极空间 Q4），多架构镜像（amd64 + arm64）一次构建，
 NAS 拉取时自动匹配自身 CPU 架构。
@@ -94,7 +98,7 @@ docker build -t ghcr.io/awoeyiwuyua/stockdb-ai:0.3.1 .
 `webui` 是纯 Python 标准库单文件应用，读功能（健康度/状态/查询/港股拉取）可完全在本地开发调试：
 
 ```bash
-stockdb-ai/dev.sh            # 默认直连 Tailscale 上极空间的 100.66.1.1:7899
+stockdb-ai/dev.sh            # 默认直连 Tailscale 上极空间的 100.66.1.5:7899
 STOCKDB_HOST=192.168.31.240 ./stockdb-ai/dev.sh  # 局域网直连（Tailscale 不通时的补充通道）
 STOCKDB_HOST=192.168.1.5 ./stockdb-ai/dev.sh   # 指定其他 stockdb 实例
 WEBUI_PORT=18080 ./stockdb-ai/dev.sh           # 换本地端口
@@ -189,7 +193,7 @@ webui 容器已内嵌 `/mcp` 路由（无需单独 mcp 容器），走 8081：
 
 > **安全注意**：`/mcp` 与 webui 的只读查询接口一致，均无鉴权（面向内网信任环境）。
 > 由于 webui 同时暴露同步/重启 stockdb 容器等写操作接口，若通过 `type:http` 把 webui
-> 暴露给公网 agent，务必修整：改走 Tailscale（`100.66.1.1`）等内网地址、或在前加反向
+> 暴露给公网 agent，务必修整：改走 Tailscale（`100.66.1.5`）等内网地址、或在前加反向
 > 代理鉴权，否则等于把可操控容器的高权限接口裸奔在公网。
 
 **体验特性**（`get_*` 工具通用）：

@@ -33,6 +33,10 @@
   `_arm_stale_retry` 读真实挂钟，23:00 后跑套件必挂（当晚收官实测撞线），
   测试时间无关化；产品代码零改动（372 全绿复验）
 
+- **部署主体迁移收尾：极空间退役，MCP/dev 默认 host 100.66.1.1→100.66.1.5（飞牛）**——
+  极空间实例与数据已删除；dev.sh/docker README/development-guide 同步改指向，
+  docker/README 加迁移声明；deployments.md 台账记 fnOS 转正
+
 ## [0.10.17] — 2026-08-29（backfill 语义修正：anchor 当天纳入回看——迁移空洞自愈）
 
 > NAS 迁移实证的边缘缺口：删 0828 分区文件后跑 backfill，目标集"从 anchor

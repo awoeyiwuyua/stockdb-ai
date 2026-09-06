@@ -3,7 +3,7 @@
 
 本脚本是一个长期驻留的 Model Context Protocol (MCP) server，由 ZCode /
 Claude Desktop 等 MCP 客户端通过 stdin/stdout（stdio）或 HTTP（NAS 容器部署）
-拉起。它把局域网部署的 free-stockdb（默认 100.66.1.1:7899，Tailscale 地址）
+拉起。它把局域网部署的 free-stockdb（默认 100.66.1.5:7899，Tailscale 地址）
 的 HTTP API 封装成 MCP 工具，供 agent 直接查询真实行情。只读，不写任何数据，
 不连接项目 SQLite。
 
@@ -14,14 +14,14 @@ Claude Desktop 等 MCP 客户端通过 stdin/stdout（stdio）或 HTTP（NAS 容
     GET / 返回健康检查文本（stockdb-mcp ok）
 
 Usage:
-    STOCKDB_HOST=100.66.1.1 STOCKDB_PORT=7899 \
+    STOCKDB_HOST=100.66.1.5 STOCKDB_PORT=7899 \
         uv run python interfaces/mcp/stockdb_mcp_server.py   # stdio（MCP 客户端自动拉起）
     uv run python interfaces/mcp/stockdb_mcp_server.py --self-check  # 连通性自检
     uv run python interfaces/mcp/stockdb_mcp_server.py --http \
         --host 0.0.0.0 --port 8080                           # HTTP（NAS 容器部署）
 
 环境变量:
-    STOCKDB_HOST   free-stockdb 服务地址，默认 100.66.1.1（NAS Tailscale）
+    STOCKDB_HOST   free-stockdb 服务地址，默认 100.66.1.5（NAS Tailscale）
     STOCKDB_PORT   free-stockdb 服务端口，默认 7899
     STOCKDB_TIMEOUT  HTTP 查询超时（秒），默认 15
 
@@ -133,7 +133,7 @@ SERVER_NAME = "stockdb-native"
 # 与 WEBUI_VERSION 同步（stockdb-ai/config.py；0.9.10 起手工对齐）
 SERVER_VERSION = "0.10.7"
 
-DEFAULT_HOST = "100.66.1.1"
+DEFAULT_HOST = "100.66.1.5"
 DEFAULT_PORT = 7899
 DEFAULT_HTTP_HOST = "0.0.0.0"
 DEFAULT_HTTP_PORT = 8080
@@ -239,7 +239,7 @@ def _http_get(cmd: str, table: str) -> object:
     """Query free-stockdb HTTP API: /?cmd=<cmd>&t=<table>.
 
     0.10.0 C1（双轨收敛）：传输统一走数据层闸口 storage.providers.free_stockdb.fetch
-    （信号量限并发 + 熔断治理全覆盖）；独立运行模式的默认 host（100.66.1.1）经
+    （信号量限并发 + 熔断治理全覆盖）；独立运行模式的默认 host（100.66.1.5）经
     base 参数透传，行为与收敛前一致。urllib 仍保留给无 storage 包的裁剪场景。
     """
     from storage.providers import free_stockdb as _fs
