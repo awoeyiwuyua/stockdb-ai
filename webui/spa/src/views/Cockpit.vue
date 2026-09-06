@@ -120,7 +120,7 @@ import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
 const store = useGlobalStore()
 const router = useRouter()
 const route = useRoute()
-const { lights, worst, aggWord, loadAll } = useCockpit()
+const { lights, worst, aggWord, status, loadAll } = useCockpit()
 const refreshing = ref(false)
 const timeline = ref([])
 
