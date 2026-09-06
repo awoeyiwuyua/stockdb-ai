@@ -4,6 +4,16 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.19] — 2026-09-06（webui 第六批：Element Plus ÷ Apple 皮肤）
+
+- **皮肤批**：skin.css 新增（药丸按钮/雾面表头/圆角弹层/浅底噪点清零，
+  html.dark 深色覆盖）；base.css 主题变量重构（:root 浅色默认）；默认主题
+  深→浅；6 视图直改 + OpsHealth/OpsSync 组件覆盖
+- **修复**：HealthContainerCard 漏导入 fmtUptime 致健康页 render error
+  （浏览器目测验收发现）
+- **验证**：Vitest 65 全绿；本地 dev 目测 6 页双主题；fnOS 重建部署复验
+- .gitignore：webui/static 构建产物不入库
+
 ## [0.10.18] — 2026-09-04（验收周收官签字 + 周/月口径异源对账 + backfill 试跑）
 
 > 0.10.7~0.10.13 批次验收周（08-31~09-04）全绿收官。本版以签字与文档为主，
