@@ -25,6 +25,10 @@
   重复，纯重构零功能变更）；docker-compose.yml 注释修正（镜像 tag = 面板版本
   WEBUI_VERSION，上游引擎包 = Dockerfile ARG VERSION 0.3.2——注释仍写 0.3.1
   已过时）
+- **修复：调度线程非交易日满核忙转**（fnOS 部署实测发现，0.10.17 同样存在）——
+  scheduler_loop 非交易日分支直接 continue 跳过循环底部 sleep(30)，周末/节假日
+  整日烧满 1 核（load_schedule 读盘 + 日历计算每秒上千次，实测 NAS 升温）；
+  修为先 sleep(30) 再 continue。仓库/打板/看门狗三循环本就有休眠，不受影响
 - **测试健壮性**：test_ops 滞后重试两用例注入 STALE_RETRY_UNTIL=23:59——
   `_arm_stale_retry` 读真实挂钟，23:00 后跑套件必挂（当晚收官实测撞线），
   测试时间无关化；产品代码零改动（372 全绿复验）
