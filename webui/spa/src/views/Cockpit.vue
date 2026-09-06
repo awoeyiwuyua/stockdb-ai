@@ -12,20 +12,10 @@
           最近刷新 {{ store.lastRefresh ? hhmmss(store.lastRefresh) : '等待首次刷新' }}
         </span>
       </div>
-      <div class="head-actions">
-        <el-button type="primary" :icon="Upload" :loading="syncing" size="small" @click="onHotSync">
-          {{ syncing ? '同步中…' : '热更新' }}
-        </el-button>
-        <el-button :icon="Refresh" :loading="refreshing" size="small" @click="onRefresh">
-          刷新
-        </el-button>
-      </div>
+      <el-button :icon="Refresh" :loading="refreshing" size="small" @click="onRefresh">
+        刷新
+      </el-button>
     </header>
-
-    <!-- 同步进行中：日志尾部滚动（§5 进行中态） -->
-    <el-alert v-if="syncing" type="info" :closable="false" class="top-alert">
-      <pre class="sync-tail">{{ syncTail || '已触发，等待日志…' }}</pre>
-    </el-alert>
 
     <!-- 刷新失败 → 顶部弱提示（不遮内容） -->
     <el-alert
@@ -109,9 +99,7 @@
 // 视图层零直连：取数走 src/api/ 封装、定时器走 usePolling。
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Refresh, Upload } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { runSync, getLog } from '../api/status.js'
+import { Refresh } from '@element-plus/icons-vue'
 import { useGlobalStore } from '../stores/global.js'
 import { useCockpit } from '../composables/use-cockpit.js'
 import { usePolling } from '../composables/use-polling.js'
@@ -174,53 +162,6 @@ async function onRefresh() {
 onMounted(onRefresh)
 usePolling(onRefresh, { fast: 15_000 })
 
-// —— 热更新确认流（§2.4/§5）：三行确认（水位/最新/上次同步）→ 触发 →
-//    轮询日志尾部直至「同步结束」（上限 20 分钟），完成后整体刷新 ——
-const NL = String.fromCharCode(10) // 换行（避免模板/字符串转义纠缠）
-const syncing = ref(false)
-const syncTail = ref('')
-
-async function onHotSync() {
-  const wm = warehouse.value?.watermark_daily || '—'
-  const latest = store.health?.latest || '—'
-  const lt = schedule.value?.last_trigger
-  const last = lt ? `${lt.ts || ''}（exit ${lt.exit ?? '—'}）` : '尚无记录'
-  try {
-    await ElMessageBox.confirm(
-      `仓库水位 ${wm} · 数据最新 ${latest} · 上次同步 ${last}`,
-      '立即热更新',
-      { confirmButtonText: '开始同步', cancelButtonText: '取消', type: 'info' },
-    )
-  } catch {
-    return // 用户取消
-  }
-  try {
-    await runSync(true)
-  } catch (e) {
-    ElMessage.error(e?.message || '同步启动失败')
-    return
-  }
-  syncing.value = true
-  syncTail.value = ''
-  const deadline = Date.now() + 20 * 60 * 1000
-  const poll = async () => {
-    try {
-      const d = await getLog(12)
-      const lines = (d.log || '').split(NL).filter((l) => l.trim())
-      syncTail.value = lines.slice(-4).join(NL)
-      if (lines.some((l) => l.includes('=== 同步结束'))) {
-        syncing.value = false
-        ElMessage.success('同步完成')
-        onRefresh()
-        return
-      }
-    } catch { /* 单轮日志失败忽略，继续轮询 */ }
-    if (Date.now() < deadline) setTimeout(poll, 5000)
-    else syncing.value = false
-  }
-  setTimeout(poll, 4000)
-}
-
 // 非绿灯列表（异常区）
 const abnormal = computed(() => lights.value.filter((l) => l.tone !== 'ok' && l.tone !== 'off'))
 
@@ -242,18 +183,6 @@ function onLightSelect(key) {
   display: flex;
   align-items: baseline;
   gap: 14px;
-}
-.head-actions {
-  display: flex;
-  gap: 8px;
-}
-.sync-tail {
-  margin: 0;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 12px;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 .head-sub {
   font-size: 13px;

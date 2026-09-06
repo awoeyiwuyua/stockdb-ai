@@ -5,8 +5,8 @@
       <el-icon><component :is="collapsed ? 'Expand' : 'Fold'" /></el-icon>
     </el-button>
 
-    <!-- 数据新鲜度 -->
-    <div class="sb-item" :class="lagClass">
+    <!-- 数据新鲜度（W1 v0.2：驾驶舱页隐藏——状态带为唯一出处，防双份冗余） -->
+    <div v-if="!onCockpit" class="sb-item" :class="lagClass">
       <span class="sb-value">
         <span class="sb-dot" aria-hidden="true" />
         {{ store.health?.latest ? fmtYMD(store.health.latest) : '—' }}
@@ -14,8 +14,8 @@
       </span>
     </div>
 
-    <!-- 告警红点 -->
-    <RouterLink class="sb-item link" to="/ops/alerts">
+    <!-- 告警红点（W1 v0.2：驾驶舱页隐藏，同上） -->
+    <RouterLink v-if="!onCockpit" class="sb-item link" to="/ops/alerts">
       <span class="sb-value">
         <span class="sb-dot alert-dot" aria-hidden="true" />
         告警
@@ -43,9 +43,14 @@
 <script setup>
 // 学习点：computed 从 store 派生展示数据；setInterval 在 onUnmounted 清理（防泄漏）。
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { useGlobalStore } from '../stores/global.js'
 import { fmtYMD } from '../utils/format.js'
 import ThemeToggle from '../components/ThemeToggle.vue'
+
+// W1 v0.2：驾驶舱（/）上隐藏 新鲜度/告警 胶囊——状态带已是唯一出处
+const route = useRoute()
+const onCockpit = computed(() => route.path === '/')
 
 defineProps({
   collapsed: { type: Boolean, default: false },
