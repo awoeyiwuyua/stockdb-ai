@@ -200,7 +200,7 @@ function rowClass({ row }) {
 // —— ECharts 柱状图 option（computed：数据变自动重绘） ——
 function themeColor(name) {
   // Canvas 不认 CSS 变量，这里读当前主题的实际色值（主题在挂载前已定好）
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#38bdf8'
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#0071e3'
 }
 const chartOption = computed(() => {
   const muted = themeColor('--muted')
@@ -243,35 +243,25 @@ usePolling(() => load(), { immediate: true })
 .ops-mcp {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text);
-}
+/* .page-title 全局样式在 card.css（英雄标题） */
 .page-actions {
   display: flex;
   gap: 8px;
 }
 .panel {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px; /* LuCI 密度：卡片内边距 12-14px */
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  box-shadow: var(--shadow-card);
 }
 .panel-title {
   margin: 0 0 12px;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 .panel-title-row {
@@ -283,7 +273,7 @@ usePolling(() => load(), { immediate: true })
 .tool-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 20px;
   align-items: start;
 }
 /* 窄屏时图与表上下堆叠，避免图表被压成一条缝 */
@@ -296,8 +286,9 @@ usePolling(() => load(), { immediate: true })
   min-width: 0;
 }
 .list-meta {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .stale-alert {
   margin-bottom: 0;

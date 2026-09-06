@@ -19,3 +19,5 @@ __pycache__/
 .uv-python/
 .tmp-test/
 .probe_*
+webui/static/assets/
+webui/static/index.html

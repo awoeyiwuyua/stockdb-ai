@@ -179,38 +179,28 @@ usePolling(() => load(), { immediate: true })
 .ops-alerts {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text);
-}
+/* .page-title 全局样式在 card.css（英雄标题） */
 .page-actions {
   display: flex;
   gap: 8px;
 }
 .panel {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px; /* LuCI 密度：卡片内边距 12-14px */
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-card);
 }
 .stale-alert {
   margin-bottom: 0;
 }
 .list-meta {
-  margin-bottom: 10px;
-  font-size: 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .muted-cell {
   color: var(--muted);

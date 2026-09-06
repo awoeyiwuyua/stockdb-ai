@@ -46,6 +46,7 @@
 
 <script setup>
 import { Document, RefreshRight } from '@element-plus/icons-vue'
+import { fmtUptime } from '../../utils/format.js'
 
 defineProps({
   container: { type: Object, default: null },
@@ -76,13 +77,13 @@ const emit = defineEmits(['toggle-log', 'restart'])
 }
 .log-pre {
   margin: 10px 0 0;
-  padding: 10px;
+  padding: 12px 14px;
   max-height: 300px;
   overflow: auto;
   background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  font: 12px/1.5 ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  font: 12px/1.55 var(--font-mono);
   color: var(--text);
   white-space: pre-wrap;
   word-break: break-all;

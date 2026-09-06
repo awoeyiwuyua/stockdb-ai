@@ -82,7 +82,7 @@ usePolling(() => db.loadTables(), { immediate: true })
 .two-col {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-  gap: 16px;
+  gap: 20px;
   align-items: start;
 }
 </style>

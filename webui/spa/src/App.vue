@@ -54,9 +54,19 @@ usePolling(() => store.refresh(), { immediate: true, slow: 5 * 60_000 })
   flex-direction: column;
 }
 
+/* 内容区：Apple 式内容列——留白呼吸 + 居中限宽（1200px），不让卡片贴边 */
 .app-content {
   flex: 1;
-  padding: 20px;
+  padding: 32px 36px 48px;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  box-sizing: border-box;
   overflow: auto; /* 内容超高时在区域内滚动，不撑破整体 */
+}
+@media (max-width: 768px) {
+  .app-content {
+    padding: 20px 16px 32px;
+  }
 }
 </style>

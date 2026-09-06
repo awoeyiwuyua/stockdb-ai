@@ -1,7 +1,28 @@
 <template>
-  <div class="side-nav">
+  <!-- Apple 皮肤侧栏：毛玻璃白底 + 圆角胶囊高亮菜单项（形态在 skin.css .el-menu 系列）。
+       折叠状态、路由高亮、徽标逻辑与旧版完全一致，仅换皮肤。 -->
+  <div class="side-nav" :class="{ collapsed }">
     <div class="side-logo">
-      <span class="logo-mark">📈</span>
+      <span class="logo-mark" aria-hidden="true">
+        <svg viewBox="0 0 28 28" width="28" height="28">
+          <defs>
+            <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#0a84ff" />
+              <stop offset="1" stop-color="#0055d4" />
+            </linearGradient>
+          </defs>
+          <rect x="0" y="0" width="28" height="28" rx="8" fill="url(#spark)" />
+          <path
+            d="M6 17.5 L10.5 13 L14 16 L22 8"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+          <circle cx="22" cy="8" r="2" fill="#fff" />
+        </svg>
+      </span>
       <span v-show="!collapsed" class="logo-text">stockdb 控制台</span>
     </div>
     <el-menu
@@ -40,6 +61,10 @@
         </el-menu-item>
       </el-sub-menu>
     </el-menu>
+
+    <div class="side-foot" v-show="!collapsed">
+      <span class="side-foot-text">数据基座 · 运维台</span>
+    </div>
   </div>
 </template>
 
@@ -60,29 +85,47 @@ const store = useGlobalStore() // 通知中心红点徽标数据源
 
 <style scoped>
 .side-nav {
-  height: 100%;
+  height: 100vh;
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--line);
-  background: var(--panel);
+  border-right: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  width: 64px;
+  flex-shrink: 0;
+  z-index: 10;
+  transition: width 0.2s ease;
+}
+.side-nav:not(.collapsed) {
+  width: 248px;
 }
 .side-logo {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 14px 18px;
+  gap: 10px;
+  padding: 16px 20px 14px;
   font-weight: 700;
   font-size: 15px;
-  border-bottom: 1px solid var(--line);
-  min-height: 52px;
+  letter-spacing: -0.01em;
+  min-height: 64px;
+  border-bottom: 1px solid var(--glass-border);
 }
 .logo-mark {
-  font-size: 20px;
+  display: flex;
+  align-items: center;
+  filter: drop-shadow(0 2px 6px rgba(0, 113, 227, 0.35));
+}
+.logo-text {
+  white-space: nowrap;
 }
 .side-menu {
   flex: 1;
-  border-right: none;
-  padding: 8px 0;
+  padding: 12px 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .nav-badge {
   width: 100%;
@@ -91,5 +134,15 @@ const store = useGlobalStore() // 通知中心红点徽标数据源
   transform: none;
   position: static;
   margin-left: 6px;
+  border-radius: 999px;
+}
+.side-foot {
+  padding: 12px 24px 16px;
+  border-top: 1px solid var(--glass-border);
+}
+.side-foot-text {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
 }
 </style>

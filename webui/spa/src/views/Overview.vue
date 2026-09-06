@@ -355,94 +355,26 @@ usePolling(() => {
 </script>
 
 <style scoped>
-/* 页面骨架：纵向卡片流，间距统一 12px（比旧版 16px 更紧凑） */
+/* 页面骨架：纵向卡片流，间距 20px（Apple 皮肤：白卡 + 大圆角，见 card.css） */
 .overview-page {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 20px;
 }
 
-/* —— 页头（.page-head 紧凑风格：小标题 + 右侧操作） —— */
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap; /* 窄屏时按钮自动换行，不被挤扁 */
-}
+/* —— 页头（英雄标题 + 右侧操作；.page-title 全局样式在 card.css） —— */
 .head-left {
   display: flex;
   align-items: baseline;
-  gap: 12px;
-}
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text);
+  gap: 14px;
 }
 .head-sub {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .top-alert {
   width: 100%;
-}
-
-/* —— 健康灯行：聚合灯 + 四域灯（判据 1 状态灯先行；.light-dot 全局样式在 card.css） —— */
-.light-strip {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  flex-wrap: wrap;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 10px 14px;
-}
-.agg-light {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.agg-word {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text);
-}
-.strip-divider {
-  width: 1px;
-  height: 18px;
-  background: var(--line);
-}
-.domain-light {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  text-decoration: none;
-}
-.domain-label {
-  font-size: 13px;
-  color: var(--muted);
-}
-.domain-value {
-  font-size: 13px;
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-.domain-light:hover .domain-label {
-  color: var(--brand);
-}
-
-/* —— 通用卡片：var(--panel) 底 + 12px 圆角 + var(--line) 边框；内边距 14px（密度约定 12-14px） —— */
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 .card-head {
   display: flex;
@@ -450,12 +382,6 @@ usePolling(() => {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
-}
-.card-title {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
 }
 .badge-row {
   display: flex;
@@ -465,11 +391,62 @@ usePolling(() => {
 .muted {
   color: var(--muted);
 }
+
+/* —— 健康灯行：聚合灯 + 四域灯（判据 1 状态灯先行；形态=白卡胶囊条） —— */
+.light-strip {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  flex-wrap: wrap;
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: 16px 22px;
+}
+.agg-light {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.agg-word {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.strip-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+}
+.domain-light {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  text-decoration: none;
+}
+.domain-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.domain-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.domain-light:hover .domain-label {
+  color: var(--brand);
+}
+
+/* —— 骨架片：与真实卡同外形 —— */
 .sk-card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  box-shadow: var(--shadow-card);
 }
 /* 灯行骨架片：与真实灯等宽占位 */
 .sk-chip {
@@ -478,7 +455,7 @@ usePolling(() => {
 .cards-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
+  gap: 20px;
   align-items: start; /* 卡片高度各自内容自适应，不强制拉伸 */
 }
 
@@ -486,17 +463,20 @@ usePolling(() => {
 .kv-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 10px;
+  font-size: 14px;
   flex-wrap: wrap;
+  padding: 3px 0;
 }
 .kv-label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
   flex-shrink: 0;
 }
 .kv-value {
   color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 .warn-text {
   color: var(--warn);
@@ -510,8 +490,8 @@ usePolling(() => {
 .alert-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 0;
+  gap: 9px;
+  padding: 7px 0;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
 }
@@ -532,6 +512,7 @@ usePolling(() => {
 .alert-src {
   color: var(--brand);
   font-size: 12px;
+  font-weight: 500;
   flex-shrink: 0;
 }
 .alert-msg {
@@ -541,17 +522,19 @@ usePolling(() => {
   white-space: nowrap; /* 超长文案截断，完整内容悬浮显示 */
 }
 
-/* —— 卡片底部链接（顶到卡片底部，卡片高度不一也整齐） —— */
+/* —— 卡片底部链接（Apple 链接：品牌蓝 + 箭头） —— */
 .card-foot {
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: 10px;
 }
 .foot-link {
   color: var(--brand);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   text-decoration: none;
 }
 .foot-link:hover {
-  text-decoration: underline;
+  color: var(--brand-strong);
+  text-decoration: none;
 }
 </style>
