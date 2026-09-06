@@ -114,18 +114,20 @@ const metaText = computed(() => {
   margin-right: auto; /* 摘要靠左、按钮靠右，窄屏自动换行 */
 }
 .status-word {
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 700;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
-/* 同步横幅：正在同步时显示阶段进度 */
+/* 同步横幅：正在同步时显示阶段进度（雾面浅底，跟随主题） */
 .sync-banner {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
-  border-radius: 8px;
+  padding: 14px 16px;
+  border-radius: 14px;
   background: var(--panel2);
+  border: 1px solid var(--line-soft);
 }
 .sync-meta {
   display: flex;

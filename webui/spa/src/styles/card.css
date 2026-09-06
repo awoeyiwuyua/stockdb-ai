@@ -1,44 +1,67 @@
-/* card.css — 卡片/页面骨架通用样式（0.10.18 自 OpsSync.vue scoped 提取为全局）。
-   提取依据：.card/.card-title/.card-hint/.hint/.actions 在 sync/ 各组件与多个
-   视图中真实重复（重复驱动提取）。其它视图 scoped 内的同名规则带 [data-v]
-   属性选择器优先级更高，不受影响；未定义处由这里兜底。 */
+/* card.css — 卡片/页面骨架通用样式（Apple 皮肤版）。
+   设计溯源：styles.refero.design/style/c9cabb96（Apple macbook-neo）——
+   28px 大圆角白卡、发丝描边 + 极轻投影、英雄级页标题（SF 式大标题）、
+   药丸状态词；信息架构与类名保持不变（webui.md 判据），只换皮肤。 */
 
-/* 页面容器：纵向排列各卡片，卡片之间 16px 间距 */
+/* 页面容器：纵向排列各卡片，卡片之间 20px 间距 */
 .page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
+
+/* —— 页头：英雄标题（左）+ 操作（右），Apple 产品页式排版 —— */
 .page-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 .page-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
   color: var(--text);
+}
+.page-sub {
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--muted);
 }
 .page-alert {
   margin-bottom: 0;
 }
 
-/* 通用卡片样式：与全局主题变量联动（--panel/--line） */
+/* —— 通用卡片：白卡 + 28px 圆角 + 发丝边 + 投影（fog 画布上的纯白展品）—— */
 .card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px; /* LuCI 密度：卡片内边距收紧到 12-14px */
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 .card-title {
-  margin: 0 0 10px;
-  font-size: 15px;
+  margin: 0 0 2px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
+/* 卡片是 flex 列（子项默认横向拉伸），直接子级按钮回退为内容宽度 */
+.card > .el-button:not(.is-block) {
+  align-self: flex-start;
+}
 .card-hint {
-  margin: 0 0 12px;
-  font-size: 12px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
   color: var(--muted);
 }
 
@@ -53,12 +76,11 @@
   margin-bottom: 4px;
 }
 .hint {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--muted);
 }
 
-/* 状态灯点（0.10.18 第四批，docs/design/webui.md 判据 1）：健康灯 → 分区 → 异常指引。
-   总览灯行 / 同步状态卡 / 前提检查三处共用（≥3 收全局）；tone 同名类与 StatCard 一致 */
+/* —— 状态灯点（webui.md 判据 1：灯 + 标准状态词）—— */
 .light-dot {
   width: 10px;
   height: 10px;
@@ -68,15 +90,19 @@
 }
 .light-dot.ok {
   background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
 }
 .light-dot.warn {
   background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent);
 }
 .light-dot.err {
   background: var(--err);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent);
 }
 .light-dot.brand {
   background: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
 }
 .light-dot.muted {
   background: var(--muted);

@@ -180,70 +180,62 @@ usePolling(() => load(), { immediate: true, fast: 60_000 })
 .ops-diag {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
-/* LuCI 紧凑页头：小标题 + 右侧操作 */
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 10px;
-}
+/* 页头：英雄标题 + 右侧操作（.page-title 全局样式在 card.css） */
 .head-left {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
 }
-.page-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text);
-}
 .summary-badge {
   font-weight: 600;
 }
 .refresh-hint {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .page-actions {
   display: flex;
   gap: 8px;
 }
+/* 面板：与 .card 同规格（白卡 + 28px 圆角 + 发丝边 + 极轻投影） */
 .panel {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  box-shadow: var(--shadow-card);
 }
 .panel-title {
   margin: 0 0 12px;
-  font-size: 14px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 /* —— 六检查卡片网格：auto-fit + minmax(220px,1fr)，窄屏自动换行 —— */
 .check-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
+  gap: 16px;
 }
 .check-card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px; /* LuCI 密度：卡片内边距 12-14px */
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-card);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-/* 失败卡：红边框 + 极浅红底（--err 6% 透明叠加，深浅主题都协调） */
+/* 失败卡：红边框 + 品牌红浅底（跟随主题） */
 .check-card.card-fail {
   border-color: var(--err);
-  background: rgba(239, 68, 68, 0.06);
+  background: color-mix(in srgb, var(--err) 6%, var(--panel));
 }
 .check-head {
   display: flex;
@@ -257,7 +249,7 @@ usePolling(() => load(), { immediate: true, fast: 60_000 })
   flex-shrink: 0; /* 圆点不随内容压缩变形 */
 }
 .check-label {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text);
 }
@@ -270,20 +262,20 @@ usePolling(() => load(), { immediate: true, fast: 60_000 })
 .st-ok  { color: var(--ok); }
 .st-err { color: var(--err); }
 .check-note {
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.6;
   color: var(--muted);
   word-break: break-all; /* note 可能是很长的路径/报错文本，允许折行 */
 }
 .note-panel {
-  padding: 14px 16px; /* 说明块收紧一点，弱化存在感 */
+  padding: 16px 20px; /* 说明块收紧一点，弱化存在感 */
 }
 .note-text {
   margin: 0;
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.7;
   color: var(--muted);
 }

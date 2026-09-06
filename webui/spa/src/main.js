@@ -9,14 +9,15 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue' // 全量图标�
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css' // Element Plus 深色变量（配合 html.dark）
 import './styles/base.css'
+import './styles/skin.css' // Element Plus ÷ Apple 皮肤（药丸按钮/雾面表格/圆角弹层）
 import './styles/card.css' // 卡片/页面骨架通用样式（0.10.18 提取，sync/ 组件与视图共用）
 import './styles/form.css' // 表单操作行通用样式（0.10.18 第三批提取，mydb 三面板共用）
 import App from './App.vue'
 import router from './router'
 
 // —— 主题初始化（必须在挂载前做，避免首屏闪一下错误配色）——
-// 读用户上次的选择（localStorage），没有记录则默认深色（与旧面板一致）。
-const savedTheme = localStorage.getItem('webui-theme') ?? 'dark'
+// 读用户上次的选择（localStorage），没有记录则默认浅色（Apple 皮肤以浅色为基准）。
+const savedTheme = localStorage.getItem('webui-theme') ?? 'light'
 // html 根元素带不带 dark class，决定 base.css 里 :root / html.dark 哪套变量生效
 document.documentElement.classList.toggle('dark', savedTheme === 'dark')
 

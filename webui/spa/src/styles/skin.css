@@ -1,0 +1,323 @@
+/* skin.css — Element Plus ÷ Apple 皮肤（主题变量在 base.css，形态在此）。
+   设计溯源：Apple macbook-neo——
+   药丸按钮、发丝边框表格、雾面表头、圆角弹层、浅底噪点清零。
+   覆盖顺序：先读 base.css 的变量，再在此做组件级形态统一。 */
+
+/* ═══════════ 按钮：药丸（980px）＋ 轻量字体，全尺寸统一 ═══════════ */
+.el-button {
+  border-radius: var(--radius-full);
+  font-weight: 500;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease,
+    transform 0.05s ease, box-shadow 0.2s ease;
+}
+.el-button:not(.is-text):not(.is-link):not(.is-plain):active {
+  transform: scale(0.97);
+}
+/* 主按钮：Apple Blue 平板蓝底，悬停微亮 */
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain) {
+  --el-button-hover-bg-color: #0077ed;
+  --el-button-hover-border-color: #0077ed;
+}
+.el-button--primary:not(.is-link):not(.is-text).is-plain {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--brand);
+}
+.el-button--primary:not(.is-link):not(.is-text).is-plain:hover {
+  background: var(--brand);
+  color: #fff;
+}
+html.dark .el-button--primary:not(.is-link):not(.is-text):not(.is-plain) {
+  --el-button-hover-bg-color: #2c9dff;
+  --el-button-hover-border-color: #2c9dff;
+}
+/* 危险按钮：Apple 红 */
+.el-button--danger:not(.is-link):not(.is-text):not(.is-plain) {
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+}
+.el-button--danger:not(.is-link):not(.is-text):not(.is-plain):hover {
+  background: #ff5247;
+  border-color: #ff5247;
+}
+html.dark .el-button--danger:not(.is-link):not(.is-text):not(.is-plain):hover {
+  background: #ff5c52;
+  border-color: #ff5c52;
+}
+/* 文字按钮：hover 浅底 */
+.el-button.is-text:hover {
+  background: var(--panel3);
+}
+
+/* ═══════════ 输入/下拉/选择：10px 圆角 + Apple 焦点蓝圈 ═══════════ */
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: var(--radius-sm);
+  transition: box-shadow 0.2s ease;
+}
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--brand) inset !important;
+}
+.el-input-number {
+  border-radius: var(--radius-sm);
+}
+.el-input-number .el-input__wrapper {
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════════ 分段选择器（radio-button 组）→ 苹果式分段控制 ═══════════ */
+.el-radio-group > .el-radio-button {
+  margin: 2px 0;
+}
+.el-radio-group > .el-radio-button + .el-radio-button {
+  margin-left: 2px;
+}
+.el-radio-group .el-radio-button__inner {
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  padding: 8px 16px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.el-radio-group {
+  background: var(--panel2);
+  border-radius: calc(var(--radius-sm) + 2px);
+  padding: 2px;
+  display: inline-flex;
+}
+.el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+html.dark .el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: var(--panel3);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* ═══════════ 表格：雾面表头 + 发丝分隔线（Apple 规格） ═══════════ */
+.el-table {
+  --el-table-border-color: var(--line);
+  --el-table-border: 1px solid var(--line);
+  --el-table-header-bg-color: var(--panel2);
+  --el-table-header-text-color: var(--muted);
+  --el-table-row-hover-bg-color: var(--panel2);
+  --el-table-tr-bg-color: transparent;
+  --el-table-bg-color: transparent;
+  border-radius: var(--radius-md);
+  color: var(--text);
+}
+.el-table th.el-table__cell {
+  height: 44px;
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+.el-table td.el-table__cell {
+  padding: 10px 0;
+}
+.el-table .el-table__cell {
+  border-color: var(--line);
+}
+.el-table__inner-wrapper::before {
+  background-color: var(--line);
+}
+/* 展开行详情底：极浅雾面 */
+.el-table__expanded-cell {
+  background: var(--panel2) !important;
+}
+.el-table__expanded-cell .hist-detail {
+  color: var(--muted);
+}
+
+/* ═══════════ 侧边菜单：苹果侧栏（圆角高亮胶囊），形态见 SideNav ═══════════ */
+.el-menu {
+  --el-menu-bg-color: transparent;
+  --el-menu-text-color: var(--text);
+  --el-menu-hover-bg-color: var(--panel3);
+  --el-menu-active-color: var(--brand);
+  --el-menu-item-height: 42px;
+  border-right: none;
+}
+.el-menu--vertical .el-menu-item,
+.el-menu--vertical .el-sub-menu__title {
+  margin: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+  color: var(--text);
+}
+.el-menu--vertical .el-menu-item:hover,
+.el-menu--vertical .el-sub-menu__title:hover {
+  background: var(--panel3);
+}
+.el-menu--vertical .el-menu-item.is-active {
+  background: var(--accent-soft);
+  color: var(--brand);
+  font-weight: 600;
+}
+.el-menu--vertical .el-sub-menu .el-menu-item {
+  margin-left: 16px;
+}
+/* 折叠态：侧栏收窄到 64px，边距收紧避免图标偏移 */
+.el-menu--collapse .el-menu-item,
+.el-menu--collapse .el-sub-menu__title {
+  margin: 2px 3px;
+}
+/* 折叠态弹出子菜单：浮层卡片 */
+.el-menu--popup {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  padding: 6px;
+  min-width: 180px;
+}
+.el-menu--popup .el-menu-item {
+  border-radius: 10px;
+  margin: 2px 4px;
+  height: 40px;
+  line-height: 40px;
+}
+.el-menu--popup .el-menu-item:hover {
+  background: var(--panel3);
+}
+.el-menu--popup .el-menu-item.is-active,
+.el-menu--popup .el-menu-item.is-active:focus {
+  background: var(--accent-soft);
+  color: var(--brand);
+}
+
+/* ═══════════ 折叠面板（前提检查/趋势）：发丝线 + 圆角标题 ═══════════ */
+.el-collapse {
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-header-text-color: var(--text);
+  --el-collapse-border-color: var(--line);
+  font-size: 14px;
+}
+.el-collapse-item__header {
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+.el-collapse-item__wrap {
+  background: transparent;
+}
+.el-collapse-item__content {
+  padding-bottom: 12px;
+}
+
+/* ═══════════ 提示条（el-alert）：Apple 圆角信息卡 ═══════════ */
+.el-alert {
+  border-radius: var(--radius-md);
+  --el-alert-padding: 11px 16px;
+  background: var(--panel2);
+  border: 1px solid var(--line-soft);
+  color: var(--text);
+}
+.el-alert--success {
+  background: var(--el-color-success-light-9);
+  color: var(--text);
+  border-color: transparent;
+}
+.el-alert--warning {
+  background: var(--el-color-warning-light-9);
+  color: var(--text);
+  border-color: transparent;
+}
+.el-alert--error {
+  background: var(--el-color-error-light-9);
+  color: var(--text);
+  border-color: transparent;
+}
+.el-alert__title {
+  font-weight: 600;
+}
+html.dark .el-alert {
+  background: var(--panel2);
+  border: 1px solid var(--line-soft);
+}
+html.dark .el-alert--success {
+  background: var(--el-color-success-light-9);
+  border-color: transparent;
+}
+html.dark .el-alert--warning,
+html.dark .el-alert--error {
+  background: var(--panel2);
+  border-color: transparent;
+}
+
+/* ═══════════ 标签（el-tag）：药丸 ═══════════ */
+.el-tag {
+  border-radius: var(--radius-full);
+  font-weight: 500;
+}
+
+/* ═══════════ 描述列表（el-descriptions）：雾面标签列 ═══════════ */
+.el-descriptions {
+  --el-descriptions-item-bordered-label-background: var(--panel2);
+  --el-descriptions-table-border: 1px solid var(--line);
+}
+.el-descriptions__label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.el-descriptions__body .el-descriptions__table {
+  border-color: var(--line);
+}
+
+/* ═══════════ 弹层：Message / MessageBox / Dialog / popper 苹果化 ═══════════ */
+.el-message {
+  border-radius: var(--radius-full);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+.el-message-box {
+  border-radius: 22px;
+  padding: 20px;
+}
+.el-message-box__title {
+  font-weight: 700;
+}
+.el-dialog {
+  border-radius: 22px;
+}
+.el-popper {
+  border-radius: var(--radius-sm);
+  border-color: var(--line);
+  box-shadow: var(--shadow-pop);
+}
+.el-dropdown-menu {
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  background: var(--panel);
+}
+.el-dropdown-menu__item {
+  border-radius: 8px;
+  margin: 2px 4px;
+}
+.el-dropdown-menu__item:hover {
+  background: var(--panel3);
+}
+
+/* ═══════════ 骨架屏：柔灰 ═══════════ */
+.el-skeleton__item {
+  background: var(--panel3);
+}
+
+/* ═══════════ 进度条：圆头 ═══════════ */
+.el-progress-bar__outer {
+  background: var(--panel3);
+}
+.el-progress-bar__inner {
+  border-radius: 999px;
+}
+
+/* ═══════════ 开关：默认即可，仅定高 ═══════════ */
+.el-switch {
+  --el-switch-on-color: var(--brand);
+}

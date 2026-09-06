@@ -180,18 +180,34 @@ usePolling(refreshAll, { immediate: true, fast: POLL_MS })
 </script>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 16px; }
+.page { display: flex; flex-direction: column; gap: 20px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
-.page-title { margin: 0; font-size: 18px; }
-.page-sub { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
+/* .page-title/.page-sub 全局样式在 card.css（英雄标题） */
 .page-actions { display: flex; gap: 10px; align-items: center; }
-.search-input { width: 260px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
-.sec-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.sec-title { margin: 0; font-size: 14px; font-weight: 600; }
+.search-input { width: 280px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 20px 24px;
+  box-shadow: var(--shadow-card);
+}
+.sec-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.sec-title { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
 .sec-right { display: flex; align-items: center; gap: 10px; }
-.sec-meta { font-size: 12px; color: var(--muted); }
-.log-pre { background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0; max-height: 420px; overflow: auto; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-all; }
+.sec-meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.log-pre {
+  background: var(--panel2);
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  font: 12px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 .log-empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
 .stale-alert { margin-bottom: 8px; }
 .retry-btn { margin-left: 8px; }

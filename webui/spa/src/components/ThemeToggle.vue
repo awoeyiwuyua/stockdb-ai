@@ -31,5 +31,9 @@ const toggle = () => applyTheme(!isDark.value)
 .theme-toggle {
   padding: 6px;
   font-size: 16px;
+  color: var(--muted);
+}
+.theme-toggle:hover {
+  color: var(--text);
 }
 </style>

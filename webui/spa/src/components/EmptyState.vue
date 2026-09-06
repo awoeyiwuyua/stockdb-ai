@@ -1,8 +1,10 @@
 <template>
-  <!-- 空态占位：整体居中排版（flex 纵向 + 水平居中），适合"暂无数据/占位页"场景 -->
+  <!-- 空态占位：图标进雾面圆盘（Apple 空状态范式），整体居中排版 -->
   <div class="empty-state">
-    <!-- icon：默认 Document 图标；component :is 支持"图标名字符串"或"图标组件对象"两种写法 -->
-    <el-icon class="empty-icon"><component :is="icon" /></el-icon>
+    <div class="empty-icon-wrap">
+      <!-- icon：默认 Document 图标；component :is 支持"图标名字符串"或"图标组件对象"两种写法 -->
+      <el-icon class="empty-icon"><component :is="icon" /></el-icon>
+    </div>
     <div v-if="title" class="empty-title">{{ title }}</div>
     <div v-if="description" class="empty-desc">{{ description }}</div>
     <!-- 默认插槽：调用方放入的操作按钮区；$slots.default 不存在时不渲染，避免留空白 -->
@@ -34,25 +36,39 @@ defineProps({
   align-items: center;   /* 水平居中 */
   justify-content: center;
   text-align: center;    /* 文字多行时也居中 */
-  padding: 48px 16px;
-  gap: 10px;
+  padding: 44px 16px;
+  gap: 8px;
+}
+/* 雾面圆盘：Apple 空状态的标准容器 */
+.empty-icon-wrap {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--panel2);
+  border: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 6px;
 }
 .empty-icon {
-  font-size: 48px;
+  font-size: 30px;
   color: var(--muted);   /* 图标用弱化色，突出"空"的感觉 */
 }
 .empty-title {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 .empty-desc {
   font-size: 13px;
+  line-height: 1.6;
   color: var(--muted);
   max-width: 420px;      /* 说明文字过长时限制行宽，可读性更好 */
 }
 .empty-actions {
-  margin-top: 8px;
+  margin-top: 10px;
   display: flex;
   gap: 8px;
 }

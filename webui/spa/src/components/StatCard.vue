@@ -1,10 +1,8 @@
 <template>
+  <!-- 苹果式指标瓦片：label 灰字 · 大号加粗等宽数字 · sub 辅助行 -->
   <div class="stat-card">
-    <!-- label：顶部小灰字；value：大号加粗的核心数字 -->
     <div class="stat-label">{{ label }}</div>
-    <!-- 只有传入 tone 才拼出颜色类（如 tone-warn），否则保持默认的 --text 颜色 -->
     <div class="stat-value" :class="tone ? `tone-${tone}` : ''">{{ value }}</div>
-    <!-- sub 可缺省：v-if 保证没传时不渲染空的辅助行 -->
     <div v-if="sub" class="stat-sub">{{ sub }}</div>
   </div>
 </template>
@@ -29,26 +27,28 @@ defineProps({
 </script>
 
 <style scoped>
-/* 卡片容器：圆角 12px、内边距 16px、1px 边框 —— 与任务约定一致 */
+/* 瓦片：白底 + 18px 圆角 + 发丝边 + 极轻投影（Apple 指标瓷砖） */
 .stat-card {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-card);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 /* label：小号灰字（--muted） */
 .stat-label {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--muted);
 }
 /* value：大号加粗，默认 --text 颜色；行高收紧避免数字顶到容器 */
 .stat-value {
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 700;
-  line-height: 1.2;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
   color: var(--text);
   font-variant-numeric: tabular-nums; /* 等宽数字：数据跳动时宽度不抖动 */
 }

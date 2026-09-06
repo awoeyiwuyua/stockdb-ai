@@ -1,4 +1,5 @@
 <template>
+  <!-- Apple 皮肤顶栏：毛玻璃 + 发丝底线；数据新鲜度/告警胶囊、时钟等宽数字 -->
   <header class="status-bar">
     <el-button text class="collapse-btn" @click="$emit('toggle-collapse')">
       <el-icon><component :is="collapsed ? 'Expand' : 'Fold'" /></el-icon>
@@ -6,8 +7,8 @@
 
     <!-- 数据新鲜度 -->
     <div class="sb-item" :class="lagClass">
-      <span class="sb-label">数据</span>
       <span class="sb-value">
+        <span class="sb-dot" aria-hidden="true" />
         {{ store.health?.latest ? fmtYMD(store.health.latest) : '—' }}
         <span v-if="store.lagDays !== null" class="sb-sub">滞后 {{ store.lagDays }} 天</span>
       </span>
@@ -15,10 +16,13 @@
 
     <!-- 告警红点 -->
     <RouterLink class="sb-item link" to="/ops/alerts">
-      <span class="sb-label">告警</span>
-      <el-badge :value="store.alertCount" :hidden="store.alertCount === 0" type="danger">
-        <span class="sb-value">{{ store.alertCount === 0 ? '无' : store.alertCount }}</span>
-      </el-badge>
+      <span class="sb-value">
+        <span class="sb-dot alert-dot" aria-hidden="true" />
+        告警
+        <el-badge :value="store.alertCount" :hidden="store.alertCount === 0" type="danger">
+          <span class="sb-count">{{ store.alertCount === 0 ? '无' : store.alertCount }}</span>
+        </el-badge>
+      </span>
     </RouterLink>
 
     <div class="sb-spacer" />
@@ -76,58 +80,85 @@ const lagClass = computed(() => {
 
 <style scoped>
 .status-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  gap: 14px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
   flex-wrap: wrap;
 }
 .collapse-btn {
   padding: 6px;
+  font-size: 16px;
+  color: var(--muted);
 }
 .sb-item {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   line-height: 1.3;
 }
 .sb-item.link {
-  color: inherit;
+  color: var(--text);
   text-decoration: none;
 }
-.sb-label {
-  font-size: 11px;
-  color: var(--muted);
-}
 .sb-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   font-size: 13px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
-.sb-value.stale {
-  color: var(--warn);
+.sb-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent);
 }
-.sb-sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-left: 6px;
-  font-weight: 400;
-}
-.sb-item.ok .sb-value { color: var(--ok); }
+.sb-item.ok .sb-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.sb-item.warn .sb-dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 20%, transparent); }
+.sb-item.err .sb-dot { background: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 20%, transparent); }
 .sb-item.warn .sb-value { color: var(--warn); }
 .sb-item.err .sb-value { color: var(--err); }
+.alert-dot {
+  background: var(--brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 20%, transparent);
+}
+.sb-count {
+  padding: 1px 8px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: var(--panel3);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.sb-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 400;
+}
 .sb-spacer { flex: 1; }
 .sb-error {
   color: var(--err);
   font-size: 12px;
+  font-weight: 600;
 }
 .sb-refresh {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 .sb-clock {
   font-variant-numeric: tabular-nums;
   font-size: 13px;
+  font-weight: 600;
   color: var(--text);
 }
 </style>

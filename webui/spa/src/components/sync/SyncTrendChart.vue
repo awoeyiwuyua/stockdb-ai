@@ -61,10 +61,10 @@ function resultText(row) {
 const chartOption = computed(() => {
   const rows = [...props.history].reverse()
   if (!rows.length) return null
-  const okColor = cssVar('--ok', '#22c55e')
-  const brandColor = cssVar('--brand', '#3b82f6')
-  const mutedColor = cssVar('--muted', '#8fa2bc')
-  const lineColor = cssVar('--line', '#1e2c45')
+  const okColor = cssVar('--ok', '#30d158')
+  const brandColor = cssVar('--brand', '#0071e3')
+  const mutedColor = cssVar('--muted', '#86868b')
+  const lineColor = cssVar('--line', '#dcdce1')
   return {
     grid: { left: 8, right: 8, top: 34, bottom: 8, containLabel: true },
     tooltip: {
