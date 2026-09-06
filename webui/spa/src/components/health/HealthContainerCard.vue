@@ -44,20 +44,27 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { Document, RefreshRight } from '@element-plus/icons-vue'
-import { fmtUptime } from '../../utils/format.js'
+import { fmtUptime } from '../../utils/format'
+import type { StatusPayload } from '../../types/api'
 
-defineProps({
-  container: { type: Object, default: null },
-  log: { type: String, default: '' },
-  logOpen: { type: Boolean, default: false },
-  restarting: { type: Boolean, default: false },
+withDefaults(defineProps<{
+  container?: StatusPayload['container']
+  log?: string
+  logOpen?: boolean
+  restarting?: boolean
   // 重启按钮禁用依据：同步进行中不允许重启（后端也有锁，前端先行拦截）
-  syncRunning: { type: Boolean, default: false },
+  syncRunning?: boolean
+}>(), {
+  container: null,
+  log: '',
+  logOpen: false,
+  restarting: false,
+  syncRunning: false,
 })
 
-const emit = defineEmits(['toggle-log', 'restart'])
+const emit = defineEmits<{ (e: 'toggle-log'): void; (e: 'restart'): void }>()
 </script>
 
 <style scoped>

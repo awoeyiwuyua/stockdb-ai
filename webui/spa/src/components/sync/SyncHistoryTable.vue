@@ -49,26 +49,25 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import EmptyState from '../EmptyState.vue'
-import { fmtYMD } from '../../utils/format.js'
+import { fmtYMD } from '../../utils/format'
+import type { SyncHistoryRow } from '../../types/api'
 
-defineProps({
-  history: { type: Array, default: () => [] },
-})
+withDefaults(defineProps<{ history?: SyncHistoryRow[] }>(), { history: () => [] })
 
 // 触发来源 → 中文（后端 trigger 字段）
-const TRIGGER_LABEL = { scheduled: '⏰ 定时', 'scheduled-retry': '↻ 定时·重试', manual: '手动' }
+const TRIGGER_LABEL: Record<string, string> = { scheduled: '⏰ 定时', 'scheduled-retry': '↻ 定时·重试', manual: '手动' }
 // 校验结果 → 中文（后端 verified 字段）
-const VERIFIED_LABEL = { pass: '通过', fail: '失败', skipped: '跳过' }
+const VERIFIED_LABEL: Record<string, string> = { pass: '通过', fail: '失败', skipped: '跳过' }
 
 // 结果标签类型：成功/未生效/运行中/失败 四态
-function resultTagType(row) {
+function resultTagType(row: SyncHistoryRow): 'success' | 'warning' | 'info' | 'danger' {
   if (row.exit_code === 0) return row.warn ? 'warning' : 'success'
   if (row.exit_code == null) return 'info'
   return 'danger'
 }
-function resultText(row) {
+function resultText(row: SyncHistoryRow): string {
   if (row.exit_code === 0) return row.warn ? '未生效' : '成功'
   if (row.exit_code == null) return '运行中'
   return '失败'

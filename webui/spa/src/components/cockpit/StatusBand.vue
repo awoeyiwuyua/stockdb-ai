@@ -27,14 +27,20 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 灯色 class 约定：ok 绿 / warn 黄 / err 红 / off 灰（card.css 全局）。
-defineProps({
-  lights: { type: Array, default: () => [] },   // [{key,label,tone,state,value,detail}]
-  worst: { type: String, default: 'off' },
-  aggWord: { type: String, default: '未知' },
+import type { Light, LightTone } from '../../types/ui'
+
+withDefaults(defineProps<{
+  lights?: Light[]
+  worst?: LightTone
+  aggWord?: string
+}>(), {
+  lights: () => [],
+  worst: 'off',
+  aggWord: '未知',
 })
-defineEmits(['select'])
+defineEmits<{ (e: 'select', key: string): void }>()
 </script>
 
 <style scoped>

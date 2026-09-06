@@ -1,16 +1,17 @@
-// router/index.js — 路由表从 nav.js 单一配置源生成，页面组件懒加载。
+// router/index.ts — 路由表从 nav.ts 单一配置源生成，页面组件懒加载。
 // W1 驾驶舱重设计批 3：路由仅剩 驾驶舱 + 数据同步；其余旧页转为驾驶舱抽屉
 // 内容组件，旧路径经 LEGACY_REDIRECTS（字符串或 {path,query}）重定向兜底。
-import { createRouter, createWebHistory } from 'vue-router'
-import { NAV_ITEMS, LEGACY_REDIRECTS } from '../layout/nav.js'
+import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import type { Component } from 'vue'
+import { NAV_ITEMS, LEGACY_REDIRECTS } from '../layout/nav'
 
 // 路径 → 页面组件（懒加载函数）
-const VIEWS = {
+const VIEWS: Record<string, () => Promise<Component>> = {
   '/': () => import('../views/Cockpit.vue'),
   '/ops/sync': () => import('../views/OpsSync.vue'),
 }
 
-const routes = [
+const routes: RouteRecordRaw[] = [
   ...NAV_ITEMS.map((it) => ({
     path: it.path,
     component: VIEWS[it.path],
@@ -29,7 +30,7 @@ const router = createRouter({
 })
 
 router.afterEach((to) => {
-  document.title = `${to.meta.title || ''} · stockdb 控制台`
+  document.title = `${to.meta.title ?? ''} · stockdb 控制台`
 })
 
 // 路由级错误兜底：懒加载失败/重定向异常时记录，不让导航静默失败

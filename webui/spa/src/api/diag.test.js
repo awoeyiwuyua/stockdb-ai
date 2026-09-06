@@ -6,7 +6,7 @@
 //      与 http.js 封装层的读取方式一一对应。
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { getDiag } from './diag.js'
+import { getDiag } from './diag'
 
 // 造一个"长得像 Response"的对象：http.js 只读 ok / status / text 三个属性
 const mockFetchOk = (body = '{}') =>

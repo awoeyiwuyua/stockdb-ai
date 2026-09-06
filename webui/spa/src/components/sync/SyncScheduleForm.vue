@@ -48,23 +48,36 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // TIME_OPTIONS 从 composable 导入（单一来源：选项生成逻辑不复制两份）
-import { TIME_OPTIONS } from '../../composables/use-schedule.js'
+import { TIME_OPTIONS } from '../../composables/use-schedule'
+import type { ScheduleInfo } from '../../types/api'
 
-defineProps({
-  schedule: { type: Object, default: null },
-  enabled: { type: Boolean, default: false },
-  times: { type: Array, default: () => [] },
-  trading: { type: Boolean, default: true },
-  saving: { type: Boolean, default: false },
-  dirty: { type: Boolean, default: false },
-  todayNote: { type: String, default: '' },
+withDefaults(defineProps<{
+  schedule?: ScheduleInfo | null
+  enabled?: boolean
+  times?: string[]
+  trading?: boolean
+  saving?: boolean
+  dirty?: boolean
+  todayNote?: string
+}>(), {
+  schedule: null,
+  enabled: false,
+  times: () => [],
+  trading: true,
+  saving: false,
+  dirty: false,
+  todayNote: '',
 })
 
-const emit = defineEmits([
-  'update:enabled', 'update:times', 'update:trading', 'mark-dirty', 'save',
-])
+const emit = defineEmits<{
+  (e: 'update:enabled', v: boolean): void
+  (e: 'update:times', v: string[]): void
+  (e: 'update:trading', v: boolean): void
+  (e: 'mark-dirty'): void
+  (e: 'save'): void
+}>()
 </script>
 
 <style scoped>

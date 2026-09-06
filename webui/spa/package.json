@@ -6,9 +6,10 @@
   "description": "free-stockdb webui 前端（Vue 3 SPA，Phase 5 重构）",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
@@ -22,7 +23,9 @@
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "^2.4.11",
     "happy-dom": "^20.11.2",
+    "typescript": "^5.9.3",
     "vite": "^6.2.0",
-    "vitest": "^3.0.5"
+    "vitest": "^3.0.5",
+    "vue-tsc": "^3.3.11"
   }
 }

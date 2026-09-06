@@ -1,7 +1,7 @@
 // format.test.js — 纯函数单测（Vitest）。运行：npm run test
 import { describe, it, expect } from 'vitest'
-import { fmtYMD, fmtMoney, fmtPct, fmtElapsed } from './format.js'
-import { buildQuery } from '../api/http.js'
+import { fmtYMD, fmtMoney, fmtPct, fmtElapsed } from './format'
+import { buildQuery } from '../api/http'
 
 describe('fmtYMD', () => {
   it('8 位日期加横线', () => {

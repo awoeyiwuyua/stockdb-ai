@@ -125,7 +125,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // OpsMcp — MCP 观测页：统计卡（total/ok_rate/avg_ms/p95_ms）+ 按工具分布
 // （ECharts 柱状图 + 表格）+ 调用明细表格（失败行红），30s 轮询。
 // 学习点：
@@ -134,36 +134,44 @@
 // 3) Canvas 画不了 CSS 变量：图表颜色要在 JS 里读 getComputedStyle 拿当前主题色。
 import { ref, computed } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
-import { getMcpStats, getMcpCalls } from '../api/ops.js'
+import { getMcpStats, getMcpCalls } from '../api/ops'
+import { errText } from '../api/http'
 import StatCard from '../components/StatCard.vue'
 import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import EChart from '../components/EChart.vue'
-import { fmtElapsed } from '../utils/format.js'
-import { usePolling } from '../composables/use-polling.js'
+import { fmtElapsed } from '../utils/format'
+import { usePolling } from '../composables/use-polling'
+
+interface McpToolStat { tool: string; n: number; ok?: number; avg_ms?: number; [k: string]: unknown }
+interface McpStats { total?: number; ok_rate?: number; avg_ms?: number; p95_ms?: number; by_tool?: McpToolStat[]; [k: string]: unknown }
+interface McpCallRow { ts?: string; tool?: string; ok?: boolean; is_error?: boolean; elapsed_ms?: number | null; bytes?: number | null; [k: string]: unknown }
 
 const loading = ref(true)
 const error = ref('')
-const stats = ref(null) // {total, ok_rate, avg_ms, p95_ms, by_tool:[{tool,n,ok,avg_ms}]}
-const calls = ref([])   // [{ts, tool, ok, is_error, elapsed_ms, bytes}]
+const stats = ref<McpStats | null>(null) // {total, ok_rate, avg_ms, p95_ms, by_tool}
+const calls = ref<McpCallRow[]>([])      // [{ts, tool, ok, is_error, elapsed_ms, bytes}]
 
 let busy = false
 
 // 有数据 = 统计块有内容（total>0）或明细有行；空态判定用
 const hasData = computed(() => (stats.value?.total ?? 0) > 0 || calls.value.length > 0)
 
-const tools = computed(() => stats.value?.by_tool || [])
+const tools = computed<McpToolStat[]>(() => stats.value?.by_tool ?? [])
 
 async function load() {
   if (busy) return
   busy = true
   try {
-    const [st, cl] = await Promise.all([getMcpStats(), getMcpCalls(50)])
+    const [st, cl] = await Promise.all([
+      getMcpStats() as Promise<McpStats | null>,
+      getMcpCalls(50) as Promise<{ calls?: McpCallRow[] } | null>,
+    ])
     stats.value = st || null
     calls.value = Array.isArray(cl?.calls) ? cl.calls : []
     error.value = ''
   } catch (e) {
-    error.value = e?.message || 'MCP 观测接口未就绪'
+    error.value = errText(e, 'MCP 观测接口未就绪')
   } finally {
     loading.value = false
     busy = false
@@ -171,34 +179,34 @@ async function load() {
 }
 
 // —— 展示派生 ——
-// 耗时统一走 utils/format.js 的 fmtElapsed（ms → '45ms' / '1.23s' / '2.1min'），
+// 耗时统一走 utils/format.ts 的 fmtElapsed（ms → '45ms' / '1.23s' / '2.1min'），
 // 不再在页面里手写 toFixed（全站数字展示统一入口）。
 // 成功率 0~1 → 百分比（如 0.9123 → '91.2%'）。
 // 注意不能用 fmtPct 直接套：fmtPct 期望的是"已经是百分数"的值（会加 +/- 号），
 // 而 ok_rate 是 0~1 的比值，这里 ×100 后展示即可，不带正负号。
-function fmtRate(v) {
+function fmtRate(v: number | null | undefined) {
   return v === null || v === undefined ? '—' : (Number(v) * 100).toFixed(1) + '%'
 }
-function rateTone(v) {
+function rateTone(v: number | null | undefined) {
   if (v === null || v === undefined) return ''
   if (v >= 0.9) return 'ok'
   if (v >= 0.7) return 'warn'
   return 'err'
 }
-function fmtTs(ts) {
+function fmtTs(ts: unknown) {
   return ts ? String(ts).slice(0, 19).replace('T', ' ') : '—'
 }
 // 成功判定与旧面板一致：ok 为真 且 不是错误记录
-function isOk(row) {
+function isOk(row: McpCallRow) {
   return !!row.ok && !row.is_error
 }
 // 失败行整体变红：给 tr 挂 row-fail 类，CSS 用 :deep 命中表格内部 td
-function rowClass({ row }) {
+function rowClass({ row }: { row: McpCallRow }) {
   return isOk(row) ? '' : 'row-fail'
 }
 
 // —— ECharts 柱状图 option（computed：数据变自动重绘） ——
-function themeColor(name) {
+function themeColor(name: string) {
   // Canvas 不认 CSS 变量，这里读当前主题的实际色值（主题在挂载前已定好）
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#0071e3'
 }

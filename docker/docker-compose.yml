@@ -35,6 +35,9 @@ services:
       TZ: Asia/Shanghai
       # 极空间无终端首次部署：取消注释并设为 1，容器启动时先增量同步再启动服务
       # STOCKDB_SYNC_FIRST: "1"
+      # 0.10.27 token 门禁：宿主侧 .env 写 WEBUI_TOKEN=... 即启用（空 = 关闭，纯内网）。
+      # 启用后浏览器首次访问需输入一次令牌（webui 登录卡片）；/mcp 豁免见 docs/design/webui-from-zero.md
+      WEBUI_TOKEN: ${WEBUI_TOKEN:-}
     healthcheck:
       # 0.5.0 amd64 运行时是 Debian slim，无 wget → 用镜像内置 curl；
       # 中文表名必须 URL 编码（%E8%82%A1...=股票代码），与 webui 内部 quote 一致

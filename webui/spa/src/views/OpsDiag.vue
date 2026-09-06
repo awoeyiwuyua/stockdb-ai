@@ -104,33 +104,44 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // OpsDiag — 诊断中心：一键体检（六检查卡片 + 环境信息 + 底部说明），60s 静默轮询。
 // 学习点：
 // 1) 「立即体检」是手动动作 → 按钮 loading（checking）；60s 轮询是静默动作 → 不闪 loading，
 //    两者共用 busy 互斥，防止上一轮没回来时请求堆积；
 // 2) 汇总徽标直接从后端 all_ok 派生：全绿 → 绿 tag「全部通过」，否则红 tag「N 项异常」；
 //    失败卡片用 :class 条件拼 card-fail 类 → 红边框（var(--err)），一眼定位问题项；
-// 3) uptime_seconds 单位是「秒」，而 utils/format.js 的 fmtElapsed 期望「毫秒」→ ×1000 再格式化。
+// 3) uptime_seconds 单位是「秒」，而 utils/format.ts 的 fmtElapsed 期望「毫秒」→ ×1000 再格式化。
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
-import { getDiag } from '../api/diag.js'
-import { getStatus } from '../api/status.js'
+import { getDiag } from '../api/diag'
+import { getStatus } from '../api/status'
+import { errText } from '../api/http'
 import EmptyState from '../components/EmptyState.vue'
-import { fmtYMD, fmtElapsed } from '../utils/format.js'
-import { usePolling } from '../composables/use-polling.js'
+import { fmtYMD, fmtElapsed } from '../utils/format'
+import { usePolling } from '../composables/use-polling'
+
+// /api/diag 载荷：{generated_at, env, checks, all_ok}
+interface DiagCheck { ok?: boolean; name?: string; detail?: string; [k: string]: unknown }
+interface DiagPayload {
+  generated_at?: string
+  env?: { uptime_seconds?: number | null; ui_mode?: string; [k: string]: unknown } | null
+  checks?: DiagCheck[]
+  all_ok?: boolean
+  [k: string]: unknown
+}
 
 const loading = ref(true)  // 首次加载中
 const checking = ref(false) // 「立即体检」按钮 loading（只随手动动作出现）
 const error = ref('')       // 最近一次失败文案
-const data = ref(null)      // /api/diag 全量载荷 {generated_at, env, checks, all_ok}
-const latencyMs = ref(null) // /api/status.code_stats.latency_ms（行情响应，自数据资产卡迁入）
+const data = ref<DiagPayload | null>(null) // /api/diag 全量载荷
+const latencyMs = ref<number | null>(null) // /api/status.code_stats.latency_ms（行情响应，自数据资产卡迁入）
 
 let busy = false // 互斥：上一轮请求未回就跳过本轮（轮询 + 手动共用一把锁）
 
-const checks = computed(() => data.value?.checks || [])
-const env = computed(() => data.value?.env || null)
+const checks = computed<DiagCheck[]>(() => data.value?.checks ?? [])
+const env = computed(() => data.value?.env ?? null)
 // 异常项数：徽标红色时显示「N 项异常」
 const failCount = computed(() => checks.value.filter((c) => !c.ok).length)
 
@@ -139,7 +150,7 @@ async function load(manual = false) {
   busy = true
   if (manual) checking.value = true
   try {
-    const [r, st] = await Promise.all([getDiag(), getStatus().catch(() => null)])
+    const [r, st] = await Promise.all([getDiag() as Promise<DiagPayload | null>, getStatus().catch(() => null)])
     data.value = r || null
     latencyMs.value = st?.code_stats?.latency_ms ?? null
     error.value = ''
@@ -148,7 +159,7 @@ async function load(manual = false) {
       ElMessage.success(r?.all_ok ? '体检完成：全部通过' : `体检完成：${failCount.value} 项异常`)
     }
   } catch (e) {
-    error.value = e?.message || '诊断接口未就绪'
+    error.value = errText(e, '诊断接口未就绪')
     // 手动体检失败要立刻告诉用户；轮询失败只写 error，由顶部弱提示兜底
     if (manual) ElMessage.error('体检失败：' + error.value)
   } finally {
@@ -160,14 +171,15 @@ async function load(manual = false) {
 
 // —— 展示派生 ——
 // generated_at 形如 '2026-08-14T23:38:06'：截前 19 位 + T 换空格，变成人读的时间
-function fmtClock(ts) {
+function fmtClock(ts: unknown) {
   return ts ? String(ts).slice(0, 19).replace('T', ' ') : '—'
 }
 // ui_mode 是机器名：spa / legacy，翻译成人话再展示，未知值原样兜底
-function uiModeLabel(mode) {
-  if (mode === 'spa') return 'SPA 新版'
-  if (mode === 'legacy') return '旧版界面'
-  return mode || '—'
+function uiModeLabel(mode: unknown) {
+  const m = String(mode ?? '')
+  if (m === 'spa') return 'SPA 新版'
+  if (m === 'legacy') return '旧版界面'
+  return m || '—'
 }
 // uptime_seconds 单位是秒，fmtElapsed 期望毫秒 → ×1000；缺失显示 '—'
 function uptimeText() {

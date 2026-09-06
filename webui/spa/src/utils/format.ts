@@ -1,14 +1,14 @@
-// format.js — 展示格式化纯函数（无 DOM 依赖，可单测）。
+// format.ts — 展示格式化纯函数（无 DOM 依赖，可单测）。
 // 学习点：纯函数 = 同样的输入永远得到同样的输出，测试最好写。
 
 // 20260814 → 2026-08-14（非 8 位数字原样返回）
-export function fmtYMD(v) {
+export function fmtYMD(v: unknown): string {
   const s = String(v ?? '')
   return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : s
 }
 
 // 1234567.8 → '1,234,567.80'（千分位，固定小数位）
-export function fmtMoney(v, digits = 2) {
+export function fmtMoney(v: unknown, digits = 2): string {
   if (v === null || v === undefined || v === '') return '—'
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
@@ -19,7 +19,7 @@ export function fmtMoney(v, digits = 2) {
 }
 
 // 1.2345 → '+1.23%'
-export function fmtPct(v, digits = 2) {
+export function fmtPct(v: unknown, digits = 2): string {
   if (v === null || v === undefined || v === '') return '—'
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
@@ -28,7 +28,7 @@ export function fmtPct(v, digits = 2) {
 }
 
 // 1234 → '1.23s'；123456 → '2.06min'
-export function fmtElapsed(ms) {
+export function fmtElapsed(ms: unknown): string {
   if (ms === null || ms === undefined || ms === '') return '—'
   const n = Number(ms)
   if (!Number.isFinite(n) || n < 0) return '—'
@@ -40,12 +40,12 @@ export function fmtElapsed(ms) {
 // ---------- 0.10.18 自 OpsSync.vue 迁入（跨视图复用候选） ----------
 
 // '2026-02-14 08:30:15' → '02-14 08:30'（x 轴紧凑标签：月-日 时:分，信息密度优先）
-export function fmtTsShort(ts) {
+export function fmtTsShort(ts: unknown): string {
   return ts ? String(ts).slice(5, 16) : ''
 }
 
 // epoch 秒 → 'x 天 x 小时 x 分钟'（进程启动时长）
-export function fmtUptime(started) {
+export function fmtUptime(started: number | null | undefined): string {
   if (!started) return '—'
   const sec = Math.max(0, Math.floor(Date.now() / 1000 - started))
   const d = Math.floor(sec / 86400)
@@ -56,7 +56,7 @@ export function fmtUptime(started) {
 
 // 读主题 CSS 变量（ECharts canvas 无法直接用 var()，需解析成具体颜色以跟随深/浅主题）
 // 有 DOM 访问，注意：仅浏览器环境可用（happy-dom 下 getComputedStyle 存在）
-export function cssVar(name, fallback) {
+export function cssVar(name: string, fallback = ''): string {
   try {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
   } catch {

@@ -32,15 +32,14 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue'
 import EChart from '../EChart.vue'
 import EmptyState from '../EmptyState.vue'
-import { fmtTsShort, cssVar } from '../../utils/format.js'
+import { fmtTsShort, cssVar } from '../../utils/format'
+import type { SyncHistoryRow } from '../../types/api'
 
-const props = defineProps({
-  history: { type: Array, default: () => [] },
-})
+const props = withDefaults(defineProps<{ history?: SyncHistoryRow[] }>(), { history: () => [] })
 
 // 是否有可画的数值（耗时/下载数至少出现一次）：决定画折线图还是空态
 const chartHasData = computed(() =>
@@ -49,7 +48,7 @@ const chartHasData = computed(() =>
 
 // 结果标签四态判定（与 SyncHistoryTable 的 resultText 同口径——历史拆分时
 // 两处各自独立成组件，口径若有变化以 use-sync 侧注释为准）
-function resultText(row) {
+function resultText(row: SyncHistoryRow): string {
   if (row.exit_code === 0) return row.warn ? '未生效' : '成功'
   if (row.exit_code == null) return '运行中'
   return '失败'
@@ -70,9 +69,9 @@ const chartOption = computed(() => {
     tooltip: {
       trigger: 'axis',
       // 自定义悬浮窗：完整时间 + 各轴数值 + 结果标签（复用历史表格的 resultText 四态判定）
-      formatter: (params) => {
+      formatter: (params: Array<{ marker?: string; seriesName?: string; value?: string | number; dataIndex?: number }>) => {
         const i = params[0]?.dataIndex ?? 0
-        const r = rows[i] || {}
+        const r = rows[i] ?? {}
         const lines = [`<b>${r.ts || '—'}</b>`]
         for (const p of params) lines.push(`${p.marker}${p.seriesName}：${p.value ?? '—'}`)
         lines.push(`结果：${resultText(r)}`)

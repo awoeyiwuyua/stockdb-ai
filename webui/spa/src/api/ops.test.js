@@ -5,7 +5,7 @@
 //   2) getAlerts 的 limit 必须进 query 参数，与后端 handler 读取方式一一对应。
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { getAlerts, clearAlerts, getMcpStats, getMcpCalls, getVersion } from './ops.js'
+import { getAlerts, clearAlerts, getMcpStats, getMcpCalls, getVersion } from './ops'
 
 // 造一个"长得像 Response"的对象：http.js 只读 ok / status / text 三个属性
 const mockFetchOk = () =>

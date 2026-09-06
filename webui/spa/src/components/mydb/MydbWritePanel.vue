@@ -62,14 +62,13 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { EditPen } from '@element-plus/icons-vue'
+import { useMydb } from '../../composables/use-mydb'
 
-defineProps({
-  db: { type: Object, required: true },
-})
+defineProps<{ db: ReturnType<typeof useMydb> }>()
 
-const emit = defineEmits(['write'])
+const emit = defineEmits<{ (e: 'write'): void }>()
 </script>
 
 <style scoped>

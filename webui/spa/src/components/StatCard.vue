@@ -7,22 +7,20 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：defineProps 声明"父组件可传入的属性"，且全部可选（都有默认值）。
 // 组件尽量宽容：调用方只传自己关心的字段，其余用缺省值兜底，不会渲染出错。
-defineProps({
-  label: { type: String, default: '' },
-  // value 既可能是数字也可能是字符串，用联合类型 [String, Number]；
-  // 缺省显示占位符 —（与 utils/format.js 的'—'风格保持一致）
-  value: { type: [String, Number], default: '—' },
-  sub: { type: String, default: '' },
-  // tone 限定四种语义色之一；validator 是运行时校验——传错值 Vue 会给出警告，
-  // 帮助新手尽早发现拼写笔误（比如把 'warn' 写成 'warning'）
-  tone: {
-    type: String,
-    default: '',
-    validator: (v) => ['', 'ok', 'warn', 'err', 'brand'].includes(v),
-  },
+// 0.10.27 TS 化：tone 的运行时 validator 升级为编译期字面量联合类型。
+withDefaults(defineProps<{
+  label?: string
+  value?: string | number // 数字或字符串皆可；缺省显示占位符 —
+  sub?: string
+  tone?: '' | 'ok' | 'warn' | 'err' | 'brand' // 四种语义色之一（编译期校验）
+}>(), {
+  label: '',
+  value: '—',
+  sub: '',
+  tone: '',
 })
 </script>
 

@@ -40,27 +40,25 @@
   </header>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：computed 从 store 派生展示数据；setInterval 在 onUnmounted 清理（防泄漏）。
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { useGlobalStore } from '../stores/global.js'
-import { fmtYMD } from '../utils/format.js'
+import { useGlobalStore } from '../stores/global'
+import { fmtYMD } from '../utils/format'
 import ThemeToggle from '../components/ThemeToggle.vue'
 
 // W1 v0.2：驾驶舱（/）上隐藏 新鲜度/告警 胶囊——状态带已是唯一出处
 const route = useRoute()
 const onCockpit = computed(() => route.path === '/')
 
-defineProps({
-  collapsed: { type: Boolean, default: false },
-})
-defineEmits(['toggle-collapse'])
+withDefaults(defineProps<{ collapsed?: boolean }>(), { collapsed: false })
+defineEmits<{ (e: 'toggle-collapse'): void }>()
 
 const store = useGlobalStore()
 
 const clock = ref('--:--:--')
-let clockTimer = null
+let clockTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
   const tick = () => {
     clock.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -68,9 +66,11 @@ onMounted(() => {
   tick()
   clockTimer = setInterval(tick, 1000)
 })
-onUnmounted(() => clearInterval(clockTimer))
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
+})
 
-const hhmm = (d) =>
+const hhmm = (d: Date) =>
   `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 
 // 数据滞后着色：1 天以内正常；2 天警告；更多/未知显示错误色

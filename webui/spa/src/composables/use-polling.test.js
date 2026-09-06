@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { defineComponent, h } from 'vue'
 import { mount } from '@vue/test-utils'
-import { usePolling } from './use-polling.js'
+import { usePolling } from './use-polling'
 
 function mountWith(fn, opts) {
   let unmounted = false

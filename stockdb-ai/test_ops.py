@@ -60,7 +60,9 @@ from unittest import mock
 
 import app                       # 生产实现（被测对象）
 import config                    # 配置单一入口（0.9.1）
-from interfaces.web.handlers import Handler as _WebHandler  # 0.9.11：Handler 已不在 app 模块级
+from interfaces.web import handlers as web_handlers          # 0.10.27：snapshot 载荷
+from interfaces.web.auth import authorized                   # 0.10.27：token 门禁
+from interfaces.web.handlers import Handler as _WebHandler   # 0.9.11：Handler 已不在 app 模块级
 from ops import alerts as ops_alerts  # 告警中心（0.9.2 批次 2 迁 ops/alerts.py）
 from storage.providers import free_stockdb as free_stockdb_mod  # 引擎闸口（批次 3）
 from storage.providers import mydb_store as mydb_store_mod      # mydb 读写（批次 3）
@@ -104,6 +106,7 @@ class _OpsTestCase(unittest.TestCase):
         app._mcp_loaded = False
         app._mcp_file_lines = 0
         app._RELEASE_CACHE.update(at=0.0, val=None)
+        app._wh_totals_cache = (0.0, {})  # 0.10.27：仓库总量 TTL 缓存复位（防用例间串扰）
         app._mydb_rd._rd = None  # 0.8.10：rd 连接缓存复位（防用例间串扰）
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -212,6 +215,98 @@ class TimelineTests(_OpsTestCase):
         rows = app.load_timeline(3)
         self.assertLessEqual(len(rows), 3)
         self.assertTrue(all(r["sediment"] is None and r["sync"] == [] for r in rows))
+
+
+class WarehouseTotalsCacheTest(_OpsTestCase):
+    """0.10.27：warehouse_totals 60s TTL 缓存（进 15s 轮询后不能每拍扫盘）。"""
+
+    def _make_facts(self, dates):
+        facts = Path(self.tmp) / "warehouse" / "facts" / "daily" / "year=2026" / "market=sh"
+        facts.mkdir(parents=True, exist_ok=True)
+        for d8 in dates:
+            (facts / f"date={d8}.parquet").write_bytes(b"x")
+
+    def test_second_call_within_ttl_hits_cache(self):
+        self._make_facts(["20260904"])
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            first = app.warehouse_totals()
+            second = app.warehouse_totals()
+        self.assertIs(first, second)  # 同一对象 = 命中缓存，未重新扫盘
+        self.assertEqual(first["sediment_days"], 1)
+
+    def test_force_bypasses_cache_and_sees_new_data(self):
+        self._make_facts(["20260904"])
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            first = app.warehouse_totals()
+            self._make_facts(["20260907"])
+            second = app.warehouse_totals(force=True)
+        self.assertEqual(first["sediment_days"], 1)
+        self.assertEqual(second["sediment_days"], 2)
+
+    def test_cache_expires_after_ttl(self):
+        self._make_facts(["20260904"])
+        # 时钟注入：两拍间隔 61s > TTL(60s) → 第二拍重新计算（新对象）
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"),                 mock.patch.object(app, "_monotonic", side_effect=[1000.0, 1100.0]):
+            first = app.warehouse_totals()
+            second = app.warehouse_totals()
+        self.assertIsNot(first, second)
+
+
+class SnapshotPayloadTest(_OpsTestCase):
+    """0.10.27：/api/snapshot 单通道聚合——五块齐全 + timeline 走 app.* 动态引用。"""
+
+    def test_snapshot_aggregates_five_blocks(self):
+        payload = web_handlers.snapshot_payload(7)
+        self.assertEqual(set(payload.keys()),
+                         {"generated_at", "overview", "status", "schedule",
+                          "warehouse", "timeline"})
+        # timeline 块：days 列表 + totals 结构（离线临时目录下静默降级为空）
+        self.assertIsInstance(payload["timeline"]["days"], list)
+        self.assertIn("sediment_days", payload["timeline"]["totals"])
+        # overview 块保持 /api/overview 契约（health/alerts/mcp/version）
+        self.assertIn("health", payload["overview"])
+        self.assertIn("alerts", payload["overview"])
+        self.assertIn("version", payload["overview"])
+
+    def test_snapshot_timeline_reads_app_dynamically(self):
+        # timeline 必须走 app.*（patch 生效）；from-import 快照会绕过 patch（历史教训）
+        sentinel = [{"date": "20990101", "sediment": None, "sync": [],
+                     "backups": None, "alerts": {"count": 0, "err": 0, "warn": 0}}]
+        with mock.patch.object(app, "load_timeline", return_value=sentinel),                 mock.patch.object(app, "warehouse_totals", return_value={"sediment_days": 42}):
+            payload = web_handlers.snapshot_payload(7)
+        self.assertEqual(payload["timeline"]["days"], sentinel)
+        self.assertEqual(payload["timeline"]["totals"]["sediment_days"], 42)
+
+
+class WebuiTokenAuthTest(_OpsTestCase):
+    """0.10.27：webui token 门禁（interfaces/web/auth.py 纯函数）。
+
+    规则：expected 空 = 门禁关；/api/* 校验 X-StockDB-Token；静态//legacy 放行
+    （登录卡片要能加载）；/mcp 豁免（Mac MCP 客户端无法带头，见设计文档）。
+    """
+
+    def test_gate_disabled_when_expected_empty(self):
+        self.assertTrue(authorized("/api/status", None, ""))
+        self.assertTrue(authorized("/api/status", "wrong", ""))
+        self.assertTrue(authorized("/mcp", "whatever", ""))
+
+    def test_api_requires_matching_header_when_enabled(self):
+        self.assertFalse(authorized("/api/status", None, "sekrit"))
+        self.assertFalse(authorized("/api/status", "", "sekrit"))
+        self.assertFalse(authorized("/api/status", "wrong", "sekrit"))
+        self.assertTrue(authorized("/api/status", "sekrit", "sekrit"))
+        self.assertTrue(authorized("/api/status", "  sekrit  ", "sekrit"))  # 容忍首尾空白
+
+    def test_static_and_legacy_pass_through(self):
+        # SPA shell/assets 必须先于鉴权可达，登录卡片才有地方渲染
+        self.assertTrue(authorized("/", None, "sekrit"))
+        self.assertTrue(authorized("/assets/index-abc123.js", None, "sekrit"))
+        self.assertTrue(authorized("/legacy/index.html", None, "sekrit"))
+
+    def test_mcp_exempt_and_post_paths_gated(self):
+        self.assertTrue(authorized("/mcp", None, "sekrit"))
+        self.assertFalse(authorized("/api/sync", None, "sekrit"))       # 写路径同样把门
+        self.assertFalse(authorized("/api/warehouse/run", None, "sekrit"))
 
 
 class _LimitReferenceTests(_OpsTestCase):

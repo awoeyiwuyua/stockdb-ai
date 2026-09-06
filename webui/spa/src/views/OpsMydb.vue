@@ -56,7 +56,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 编排壳：图标 + 空态/指标卡 + mydb/ 域组件 + use-mydb 状态机 + 统一轮询。
 import { Refresh } from '@element-plus/icons-vue'
 import StatCard from '../components/StatCard.vue'
@@ -65,8 +65,8 @@ import EmptyState from '../components/EmptyState.vue'
 import MydbReadPanel from '../components/mydb/MydbReadPanel.vue'
 import MydbWritePanel from '../components/mydb/MydbWritePanel.vue'
 import MydbQueryConsole from '../components/mydb/MydbQueryConsole.vue'
-import { useMydb } from '../composables/use-mydb.js'
-import { usePolling } from '../composables/use-polling.js'
+import { useMydb } from '../composables/use-mydb'
+import { usePolling } from '../composables/use-polling'
 
 // 状态机实例（reactive）：下发三面板共享，壳里只处理轮询
 const db = useMydb()
