@@ -174,6 +174,120 @@ def append_history(entry: dict) -> None:
         log(f"  ⚠️ 同步历史写入失败: {exc}")
 
 
+def load_timeline(days: int = 7) -> list[dict]:
+    """驾驶舱时间线载荷（W1 批 2，docs/design/webui-cockpit-redesign.md §2.3）。
+
+    最近 days 个交易日逐日聚合四路事件（全部子块静默降级——读失败该日该块为空，
+    不阻塞整体；定义书 §4 唯一后端增量，纯读聚合）：
+      沉淀 = records/YYYYMMDD.jsonl 中 task=warehouse_sediment（取末条 + 对账 ok）
+      同步 = sync_history.json 按 ts 前缀日分组（trigger/exit_code/verified/时长）
+      备份 = warehouse/backups/warehouse-YYYYMMDD-*.db 按文件名日期计数
+      告警 = alerts 按 ts 日期计数（分 error/warn）
+    返回按日期倒序（新 → 旧）。路径全部运行期取 config（patchable，测试友好）。
+    """
+    import config as _config  # 函数内引用：测试 patch config.DATA_DIR/WAREHOUSE_DIR 生效
+    days = max(1, min(31, int(days)))
+
+    # 交易日序列：今天往回收集 days 个交易日（日历不可用时退化为跳过周末）
+    probes: list = []
+    probe = datetime.now().date()
+    guard = 0
+    while len(probes) < days and guard < days * 5 + 14:
+        guard += 1
+        try:
+            if not is_trading_day(probe):
+                probe -= timedelta(days=1)
+                continue
+        except Exception:
+            if probe.weekday() >= 5:
+                probe -= timedelta(days=1)
+                continue
+        probes.append(probe)
+        probe -= timedelta(days=1)
+
+    # —— 沉淀：records/YYYYMMDD.jsonl（task=warehouse_sediment，末条为准）——
+    sediment: dict[str, dict] = {}
+    try:
+        records_dir = Path(_config.DATA_DIR) / "records"
+        for d in probes:
+            p = records_dir / f"{d.strftime('%Y%m%d')}.jsonl"
+            if not p.exists():
+                continue
+            last = None
+            for line in p.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("task") == "warehouse_sediment":
+                    last = rec
+            if last:
+                sediment[d.strftime("%Y%m%d")] = {
+                    "rows": last.get("rows"),
+                    "ok": bool(last.get("ok")),
+                }
+    except Exception:
+        pass  # 降级：沉淀块整列缺席
+
+    # —— 同步：sync_history 按 ts 前缀日分组 ——
+    sync_by_day: dict[str, list] = {}
+    try:
+        for h in load_history():
+            day = str(h.get("ts") or "")[:10].replace("-", "")
+            if day:
+                sync_by_day.setdefault(day, []).append({
+                    "ts": h.get("ts"),
+                    "trigger": h.get("trigger"),
+                    "exit_code": h.get("exit_code"),
+                    "verified": h.get("verified"),
+                    "duration_sec": h.get("duration_sec"),
+                    "data_latest": h.get("data_latest"),
+                })
+    except Exception:
+        pass
+
+    # —— 备份：warehouse/backups/warehouse-YYYYMMDD-*.db 按文件名日期 ——
+    backups: dict[str, dict] = {}
+    try:
+        bdir = Path(_config.WAREHOUSE_DIR) / "backups"
+        for f in sorted(bdir.glob("warehouse-*.db")):
+            parts = f.name.split("-")
+            if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit():
+                b = backups.setdefault(parts[1], {"count": 0, "last": f.name})
+                b["count"] += 1
+                b["last"] = f.name
+    except Exception:
+        pass
+
+    # —— 告警：按 ts 日期计数（分 error/warn）——
+    alert_by_day: dict[str, dict] = {}
+    try:
+        for a in _get_alerts().list(500):
+            day = str(a.get("ts") or "")[:10].replace("-", "")
+            if not day:
+                continue
+            slot = alert_by_day.setdefault(day, {"count": 0, "err": 0, "warn": 0})
+            slot["count"] += 1
+            if a.get("level") == "error":
+                slot["err"] += 1
+            elif a.get("level") == "warning":
+                slot["warn"] += 1
+    except Exception:
+        pass
+
+    out = []
+    for d in sorted(probes, reverse=True):
+        d8 = d.strftime("%Y%m%d")
+        out.append({
+            "date": d8,
+            "sediment": sediment.get(d8),
+            "sync": sync_by_day.get(d8, []),
+            "backups": backups.get(d8),
+            "alerts": alert_by_day.get(d8, {"count": 0, "err": 0, "warn": 0}),
+        })
+    return out
+
+
 def _default_schedule() -> dict:
     return {"enabled": False, "times": ["15:30"], "trading_only": True,
             "fired": {}, "retried": {}, "retry_pending": None,

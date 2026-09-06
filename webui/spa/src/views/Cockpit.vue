@@ -66,18 +66,8 @@
         </ul>
       </section>
 
-      <!-- ③ 时间线（批 2 接 /api/timeline；当前为占位） -->
-      <section class="card">
-        <div class="card-head">
-          <h3 class="card-title">时间线</h3>
-          <span class="muted">最近 7 个交易日</span>
-        </div>
-        <EmptyState
-          icon="Clock"
-          title="时间线接入中"
-          description="逐日沉淀/同步/备份/告警事件流将在下一批次上线（/api/timeline）"
-        />
-      </section>
+      <!-- ③ 时间线（W1 批 2：/api/timeline 七交易日聚合） -->
+      <TimelineCard :rows="timeline" />
     </template>
   </div>
 </template>
@@ -93,12 +83,22 @@ import { useGlobalStore } from '../stores/global.js'
 import { useCockpit } from '../composables/use-cockpit.js'
 import { usePolling } from '../composables/use-polling.js'
 import StatusBand from '../components/cockpit/StatusBand.vue'
+import TimelineCard from '../components/cockpit/TimelineCard.vue'
 import EmptyState from '../components/EmptyState.vue'
+import { getTimeline } from '../api/status.js'
 
 const store = useGlobalStore()
 const router = useRouter()
 const { lights, worst, aggWord, loadAll } = useCockpit()
 const refreshing = ref(false)
+const timeline = ref([])
+
+async function loadTimeline() {
+  try {
+    const d = await getTimeline(7)
+    timeline.value = d?.days ?? []
+  } catch { /* 保留旧值，时间线空态 */ }
+}
 
 // 把 Date 格式化成 HH:MM:SS（最近刷新时间展示用；与旧 Overview 同款）
 const hhmmss = (d) => {
@@ -109,7 +109,7 @@ const hhmmss = (d) => {
 async function onRefresh() {
   refreshing.value = true
   try {
-    await Promise.all([store.refresh(), Promise.resolve(loadAll())])
+    await Promise.all([store.refresh(), Promise.resolve(loadAll()), loadTimeline()])
   } finally {
     refreshing.value = false
   }
