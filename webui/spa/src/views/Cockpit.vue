@@ -68,6 +68,9 @@
 
       <!-- ③ 时间线（W1 批 2：/api/timeline 七交易日聚合） -->
       <TimelineCard :rows="timeline" />
+
+      <!-- ④ 数据资产（用户 09-06 拍板迁入驾驶舱；自数据同步页移来，数据源同 /api/status） -->
+      <SyncAssetsCard :status="status" />
     </template>
 
     <!-- ── 抽屉群（批 3）：四页降级为抽屉内容组件，destroy-on-close 关闭即停轮询 ── -->
@@ -112,6 +115,7 @@ import OpsLogs from './OpsLogs.vue'
 import OpsDiag from './OpsDiag.vue'
 import OpsMcp from './OpsMcp.vue'
 import OpsMydb from './OpsMydb.vue'
+import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
 
 const store = useGlobalStore()
 const router = useRouter()

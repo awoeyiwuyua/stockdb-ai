@@ -38,8 +38,6 @@ from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），
     _auction_fired,
     _get_alerts,
     _mcp_tool_name,
-    _scheduler_alive,
-    _scheduler_heartbeat,
     _stockdb_breaker,
     _stockdb_breaker_open,
     _sync_lock,
@@ -413,15 +411,18 @@ class Handler(BaseHTTPRequestHandler):
             "coverage": data_coverage(),         # {earliest, latest} 或 null
             "sync_cap": sync_capability(),       # {ok, checks:{updater,source,writable,retry_pending}}
             "mirror": mirror_latest_date(),
+            # W1 修复：调度器存活必须动态读 app.*——布尔值 from-import 会在导入期
+            # 拷贝快照（恒为启动前的 False），调度线程后续的置位永远看不到
+            # （同 ops.DATA_DIR 教训；用户实测前提检查恒红发现）。
             "webui": {"version": WEBUI_VERSION, "started": _webui_started,
-                      "heartbeat": _scheduler_heartbeat},
+                      "heartbeat": app._scheduler_heartbeat},
             "data_dir": str(app.DATA_DIR),
             "last_sync": last_sync_summary(),
             "schedule": load_schedule(),
             "calendar": {"through": XSHG_HOLIDAYS_THROUGH,
                          "days": sum(len(v) for v in XSHG_HOLIDAYS.values())},
             "disk": disk_usage(),
-            "scheduler_alive": _scheduler_alive,
+            "scheduler_alive": app._scheduler_alive,
             "trading_today": is_trading_day(),   # 定时是否会在今天触发（严格交易日）
         }, ensure_ascii=False))
 
