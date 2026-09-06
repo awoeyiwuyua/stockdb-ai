@@ -58,7 +58,7 @@
           <span class="muted">展开定位将在后续批次接入对应抽屉</span>
         </div>
         <ul class="abnormal-list">
-          <li v-for="l in abnormal" :key="l.key">
+          <li v-for="l in abnormal" :key="l.key" class="abnormal-item" @click="onLightSelect(l.key)">
             <span class="light-dot" :class="l.tone" />
             <b>{{ l.label }}</b>
             <span class="muted">{{ l.detail }}</span>
@@ -69,6 +69,27 @@
       <!-- ③ 时间线（W1 批 2：/api/timeline 七交易日聚合） -->
       <TimelineCard :rows="timeline" />
     </template>
+
+    <!-- ── 抽屉群（批 3）：四页降级为抽屉内容组件，destroy-on-close 关闭即停轮询 ── -->
+    <el-drawer v-model="dreducers.alerts" title="通知中心" size="760px" destroy-on-close>
+      <OpsAlerts />
+    </el-drawer>
+    <el-drawer v-model="dreducers.logs" title="日志中心" size="820px" destroy-on-close>
+      <OpsLogs />
+    </el-drawer>
+    <el-drawer v-model="dreducers.diag" title="诊断" size="820px" destroy-on-close>
+      <el-tabs v-model="diagTab">
+        <el-tab-pane label="体检" name="check">
+          <OpsDiag />
+        </el-tab-pane>
+        <el-tab-pane label="MCP 观测" name="mcp">
+          <OpsMcp />
+        </el-tab-pane>
+      </el-tabs>
+    </el-drawer>
+    <el-drawer v-model="dreducers.query" title="数据查询" size="860px" destroy-on-close>
+      <OpsMydb />
+    </el-drawer>
   </div>
 </template>
 
@@ -76,8 +97,8 @@
 // 组合范式与旧 Overview 一致：全局 store（顶栏/健康/告警）+ 页面级 use-cockpit
 // （同步/仓库/磁盘灯）+ usePolling 统一节拍（15s，§5：驾驶舱讲究新鲜）。
 // 视图层零直连：取数走 src/api/ 封装、定时器走 usePolling。
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { useGlobalStore } from '../stores/global.js'
 import { useCockpit } from '../composables/use-cockpit.js'
@@ -86,12 +107,36 @@ import StatusBand from '../components/cockpit/StatusBand.vue'
 import TimelineCard from '../components/cockpit/TimelineCard.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { getTimeline } from '../api/status.js'
+import OpsAlerts from './OpsAlerts.vue'
+import OpsLogs from './OpsLogs.vue'
+import OpsDiag from './OpsDiag.vue'
+import OpsMcp from './OpsMcp.vue'
+import OpsMydb from './OpsMydb.vue'
 
 const store = useGlobalStore()
 const router = useRouter()
+const route = useRoute()
 const { lights, worst, aggWord, loadAll } = useCockpit()
 const refreshing = ref(false)
 const timeline = ref([])
+
+// —— 抽屉群（批 3）：alerts / logs / diag / query；diag 内 tab（check|mcp）——
+const dreducers = ref({ alerts: false, logs: false, diag: false, query: false })
+const diagTab = ref('check')
+
+function openDrawer(name, tab) {
+  if (!(name in dreducers.value)) return
+  if (name === 'diag' && tab) diagTab.value = tab
+  dreducers.value[name] = true
+}
+
+// 旧路径重定向落 /?drawer=xxx → 自动展开对应抽屉（含 tab）
+function applyQueryDrawer() {
+  const d = route.query.drawer
+  if (typeof d === 'string') openDrawer(d, typeof route.query.tab === 'string' ? route.query.tab : undefined)
+}
+watch(() => route.query.drawer, applyQueryDrawer)
+onMounted(applyQueryDrawer)
 
 async function loadTimeline() {
   try {
@@ -120,9 +165,10 @@ usePolling(onRefresh, { fast: 15_000 })
 // 非绿灯列表（异常区）
 const abnormal = computed(() => lights.value.filter((l) => l.tone !== 'ok' && l.tone !== 'off'))
 
-// 灯点击：抽屉批 3 接线；同步灯目标页尚在，先跳页兜底
+// 灯点击 / 异常区条目 → 对应抽屉；同步域仍是独立页（干预与表单密度高，W1 留痕 v0.1）
 function onLightSelect(key) {
   if (key === 'sync') router.push('/ops/sync')
+  else openDrawer('diag')
 }
 </script>
 

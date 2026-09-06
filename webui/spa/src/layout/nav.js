@@ -1,24 +1,13 @@
 // nav.js — 左侧导航唯一配置源（纯数据，可单测）。
-// W1 驾驶舱重设计（docs/design/webui-cockpit-redesign.md）：菜单 = 驾驶舱单页 +
-// 系统运维分组（批 1：系统健康/诊断中心并入驾驶舱抽屉的过渡期先移除独立入口，
-// 其信息由四灯 + 诊断抽屉承接）；每项一个职责、一条 URL；badge 挂通知中心。
+// W1 驾驶舱重设计批 3（docs/design/webui-cockpit-redesign.md）：导航收敛为
+// 驾驶舱 + 数据同步两页；私有存储/日志/通知/MCP 四页转为驾驶舱抽屉内容组件
+//（视图文件保留、路由删除，旧路径经 LEGACY_REDIRECTS 落 '/?drawer=' 自动展开）。
 export const TOP_ITEMS = [
   { path: '/', title: '驾驶舱', icon: 'Odometer' },
+  { path: '/ops/sync', title: '数据同步', icon: 'Refresh' },
 ]
 
-export const NAV_GROUPS = [
-  {
-    title: '系统运维',
-    icon: 'Setting',
-    items: [
-      { path: '/ops/sync', title: '数据同步', icon: 'Refresh' },
-      { path: '/ops/mydb', title: '私有存储', icon: 'Coin' },
-      { path: '/ops/logs', title: '日志中心', icon: 'Document' },
-      { path: '/ops/alerts', title: '通知中心', icon: 'Bell', badge: 'alertCount' },
-      { path: '/ops/mcp', title: 'MCP 观测', icon: 'Monitor' },
-    ],
-  },
-]
+export const NAV_GROUPS = []
 
 // 展平：全部页面（含分组信息，测试保证 path 唯一）
 export const NAV_ITEMS = [
@@ -27,17 +16,21 @@ export const NAV_ITEMS = [
 ]
 
 // 旧路径 → 新地址（路由 redirect 兜底，老书签不 404）。
-// W1 批 1：/overview、/ops/health、/ops/diag 并入驾驶舱（'/'）；批 3 起带
-// ?drawer= 参数自动展开对应抽屉（此处先落 '/'，抽屉参数在 Cockpit 内解析）。
+// 批 3：值为字符串直接跳转；值为 {path, query} 落驾驶舱并自动展开对应抽屉。
+// drawer 取值：alerts / logs / diag（含 MCP 标签）/ query。
 export const LEGACY_REDIRECTS = {
   '/overview': '/',
-  '/ops/health': '/',
-  '/ops/diag': '/',
+  '/ops/health': { path: '/', query: { drawer: 'diag' } },
+  '/ops/diag': { path: '/', query: { drawer: 'diag' } },
   '/ops/version': '/',
+  '/ops/alerts': { path: '/', query: { drawer: 'alerts' } },
+  '/ops/logs': { path: '/', query: { drawer: 'logs' } },
+  '/ops/mcp': { path: '/', query: { drawer: 'diag', tab: 'mcp' } },
+  '/ops/mydb': { path: '/', query: { drawer: 'query' } },
   '/data/sync': '/ops/sync',
-  '/data/mydb': '/ops/mydb',
+  '/data/mydb': { path: '/', query: { drawer: 'query' } },
   '/data': '/ops/sync',
-  '/alerts': '/ops/alerts',
+  '/alerts': { path: '/', query: { drawer: 'alerts' } },
   '/paper': '/',
   '/paper/audit': '/',
   '/paper/signal': '/',
