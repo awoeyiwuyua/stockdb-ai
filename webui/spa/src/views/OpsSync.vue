@@ -34,8 +34,8 @@
     </EmptyState>
 
     <!-- ③ 正常态：数据齐了，按 docs/design/webui.md §2.2 顺序逐块渲染：
-         状态(灯+操作同位) → 前提检查(全绿收起) → 数据资产 → 定时 →
-         历史 → 趋势(折叠钻取) → 港股。
+         状态(灯+操作同位) → 前提检查(全绿收起) → 定时 →
+         历史 → 趋势(折叠钻取) → 港股。（数据资产卡 0.10.23 迁往驾驶舱）
          第五批归属表：磁盘归系统健康页（前提检查"数据卷"项带用量）、
          同步日志归日志中心，本页不再重复渲染。 -->
     <template v-else>
@@ -43,8 +43,6 @@
       <SyncStatusCard :status="status" :sync-busy="syncBusy" @sync="doSync" />
 
       <SyncPrereqCard :status="status" />
-
-      <SyncAssetsCard :status="status" />
 
       <SyncScheduleForm
         v-model:enabled="schEnabled"
@@ -77,7 +75,6 @@ import { Refresh } from '@element-plus/icons-vue'
 import EmptyState from '../components/EmptyState.vue'
 import SyncStatusCard from '../components/sync/SyncStatusCard.vue'
 import SyncPrereqCard from '../components/sync/SyncPrereqCard.vue'
-import SyncAssetsCard from '../components/sync/SyncAssetsCard.vue'
 import SyncScheduleForm from '../components/sync/SyncScheduleForm.vue'
 import SyncHistoryTable from '../components/sync/SyncHistoryTable.vue'
 import SyncTrendChart from '../components/sync/SyncTrendChart.vue'

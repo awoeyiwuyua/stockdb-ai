@@ -4,6 +4,17 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.23] — 2026-09-06（修复：调度器存活判断恒假 + 数据资产卡迁入驾驶舱）
+
+- **修复**：/api/status 的 scheduler_alive 恒为 False——handlers from-import
+  布尔值在导入期拷贝快照，调度线程的置位永远不可见（同 ops.DATA_DIR 教训，
+  用户实测「前提检查恒红：调度线程未运行」发现）。改动态读 app.*；同步页
+  「定时调度器」前提检查随之转绿
+- **数据资产卡**：自数据同步页迁入驾驶舱（时间线之下；数据源同 /api/status，
+  SyncAssetsCard 组件原样复用），同步页不再重复渲染
+- 验证：Python 全量 + Vitest 64 全绿；fnOS 实机 scheduler_alive=true、
+  前提检查五项绿
+
 ## [0.10.22] — 2026-09-06（W1 v0.3：状态带重做——三段自解释灯）
 
 - 每灯三段：名称 + 状态词（着色，不靠颜色记忆）+ 关键值弱色——
