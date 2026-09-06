@@ -33,9 +33,9 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { Download } from '@element-plus/icons-vue'
-import { useHk } from '../../composables/use-hk.js'
+import { useHk } from '../../composables/use-hk'
 
 const { hkCodes, hkYears, hkBusy, hkResult, doHkSync } = useHk()
 </script>

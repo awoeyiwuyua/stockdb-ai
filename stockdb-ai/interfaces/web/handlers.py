@@ -24,6 +24,9 @@ import app  # noqa: E402 - 模块引用（而非 from-import）：DATA_DIR/fetch
 # 走 app.* 动态解析，测试 patch.object(app, ...) 才有效（0.9.6 拆分后绑定在
 # app 模块上；若 from-import 会在导入期拷贝引用，patch 失效——同 ops.DATA_DIR 教训）。
 
+import config  # noqa: E402 - WEBUI_TOKEN 动态读（测试 patch config.WEBUI_TOKEN 生效）
+from interfaces.web.auth import TOKEN_HEADER, authorized  # noqa: E402 - token 门禁
+
 from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），此时 app 已完整
     STATIC_DIR,
     WEBUI_UI,
@@ -104,6 +107,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            if not authorized(path, self.headers.get(TOKEN_HEADER), config.WEBUI_TOKEN):
+                # 0.10.27 token 门禁：静态资源放行（登录卡片要能加载），/api/* 校验头
+                self._send(401, json.dumps({"error": "unauthorized：缺少或错误的 X-StockDB-Token"}))
+                return
             if path == "/api" or path.startswith("/api/"):
                 self._route_api_get(path)
             elif path == "/legacy" or path.startswith("/legacy/"):
@@ -193,6 +200,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if not authorized(path, self.headers.get(TOKEN_HEADER), config.WEBUI_TOKEN):
+                self._send(401, json.dumps({"error": "unauthorized：缺少或错误的 X-StockDB-Token"}))
+                return
             handler = _WEB_POST_ROUTES.get(path)
             if handler is None:
                 self._send(404, json.dumps({"error": "not found"}))
@@ -393,39 +403,7 @@ class Handler(BaseHTTPRequestHandler):
             pybao_tools.clear_progress_hook()
 
     def _status(self):
-        state = container_state()
-        src = ""
-        cfg = app.DATA_DIR / "sync_url.txt"
-        if cfg.exists():
-            lines = [ln for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines()
-                     if ln.strip() and not ln.strip().startswith("#")]
-            src = lines[0] if lines else ""
-        self._send(200, json.dumps({
-            "container": state,          # {ok, status, note, image, started}
-            "source": src,
-            "sync_running": _sync_state["running"],
-            "sync_phase": _sync_state.get("phase", "idle"),
-            "sync_started": _sync_state.get("last_start"),
-            "exit_code": _sync_state["exit_code"],
-            "data_latest": data_latest_date(),
-            "code_stats": code_stats(),          # {stock, etf, other, latency_ms}
-            "coverage": data_coverage(),         # {earliest, latest} 或 null
-            "sync_cap": sync_capability(),       # {ok, checks:{updater,source,writable,retry_pending}}
-            "mirror": mirror_latest_date(),
-            # W1 修复：调度器存活必须动态读 app.*——布尔值 from-import 会在导入期
-            # 拷贝快照（恒为启动前的 False），调度线程后续的置位永远看不到
-            # （同 ops.DATA_DIR 教训；用户实测前提检查恒红发现）。
-            "webui": {"version": WEBUI_VERSION, "started": _webui_started,
-                      "heartbeat": app._scheduler_heartbeat},
-            "data_dir": str(app.DATA_DIR),
-            "last_sync": last_sync_summary(),
-            "schedule": load_schedule(),
-            "calendar": {"through": XSHG_HOLIDAYS_THROUGH,
-                         "days": sum(len(v) for v in XSHG_HOLIDAYS.values())},
-            "disk": disk_usage(),
-            "scheduler_alive": app._scheduler_alive,
-            "trading_today": is_trading_day(),   # 定时是否会在今天触发（严格交易日）
-        }, ensure_ascii=False))
+        self._send(200, json.dumps(status_payload(), ensure_ascii=False))
 
     def _history(self):
         self._send(200, json.dumps({"history": load_history()}, ensure_ascii=False))
@@ -438,6 +416,15 @@ class Handler(BaseHTTPRequestHandler):
             days = 7
         self._send(200, json.dumps({"days": load_timeline(days),
                                     "totals": warehouse_totals()}, ensure_ascii=False))
+
+    def _snapshot(self):
+        # GET /api/snapshot?days=7：驾驶舱单通道聚合（0.10.27 四件套之一；
+        # int 防护同 _timeline）。前端全局轮询 5 路收敛为 1 路。
+        try:
+            days = int(parse_qs(urlparse(self.path).query).get("days", ["7"])[0])
+        except (TypeError, ValueError):
+            days = 7
+        self._send(200, json.dumps(snapshot_payload(days), ensure_ascii=False))
 
     def _schedule(self):
         q = parse_qs(urlparse(self.path).query)
@@ -765,28 +752,94 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, json.dumps(version_payload(), ensure_ascii=False))
 
     def _overview(self):
-        """GET /api/overview：总览看板聚合（健康/告警/MCP 统计/版本）。
+        """GET /api/overview：总览看板聚合（健康/告警/MCP 统计/版本）。"""
+        self._send(200, json.dumps(overview_payload(), ensure_ascii=False))
+def status_payload() -> dict:
+    """GET /api/status 载荷（0.10.27 自 _status 提取，snapshot 复用；字段契约不变）。"""
+    state = container_state()
+    src = ""
+    cfg = app.DATA_DIR / "sync_url.txt"
+    if cfg.exists():
+        lines = [ln for ln in cfg.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if ln.strip() and not ln.strip().startswith("#")]
+        src = lines[0] if lines else ""
+    return {
+        "container": state,          # {ok, status, note, image, started}
+        "source": src,
+        "sync_running": _sync_state["running"],
+        "sync_phase": _sync_state.get("phase", "idle"),
+        "sync_started": _sync_state.get("last_start"),
+        "exit_code": _sync_state["exit_code"],
+        "data_latest": data_latest_date(),
+        "code_stats": code_stats(),          # {stock, etf, other, latency_ms}
+        "coverage": data_coverage(),         # {earliest, latest} 或 null
+        "sync_cap": sync_capability(),       # {ok, checks:{updater,source,writable,retry_pending}}
+        "mirror": mirror_latest_date(),
+        # W1 修复：调度器存活必须动态读 app.*——布尔值 from-import 会在导入期
+        # 拷贝快照（恒为启动前的 False），调度线程后续的置位永远看不到
+        # （同 ops.DATA_DIR 教训；用户实测前提检查恒红发现）。
+        "webui": {"version": WEBUI_VERSION, "started": _webui_started,
+                  "heartbeat": app._scheduler_heartbeat},
+        "data_dir": str(app.DATA_DIR),
+        "last_sync": last_sync_summary(),
+        "schedule": load_schedule(),
+        "calendar": {"through": XSHG_HOLIDAYS_THROUGH,
+                     "days": sum(len(v) for v in XSHG_HOLIDAYS.values())},
+        "disk": disk_usage(),
+        "scheduler_alive": app._scheduler_alive,
+        "trading_today": is_trading_day(),   # 定时是否会在今天触发（严格交易日）
+    }
 
-        全部复用现有只读函数，一次请求替代前端 4 次轮询；单个子块异常只降级该块
-        （None/[]），整体始终 200。
-        """
-        def _safe(fn, default):
-            try:
-                return fn()
-            except Exception:  # noqa: BLE001 - 总览聚合单块降级
-                return default
 
-        alerts = _safe(_get_alerts, None)
-        self._send(200, json.dumps({
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "health": _safe(health_status, None),
-            "alerts": {
-                "count": alerts.count() if alerts is not None else 0,
-                "recent": alerts.list(8) if alerts is not None else [],
-            },
-            "mcp": _safe(mcp_stats, None),
-            "version": _safe(version_payload, None),
-        }, ensure_ascii=False))
+def overview_payload() -> dict:
+    """GET /api/overview 载荷（0.10.27 自 _overview 提取，snapshot 复用）。
+
+    全部复用现有只读函数；单个子块异常只降级该块（None/[]），整体始终 200。
+    """
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 - 总览聚合单块降级
+            return default
+
+    alerts = _safe(_get_alerts, None)
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "health": _safe(health_status, None),
+        "alerts": {
+            "count": alerts.count() if alerts is not None else 0,
+            "recent": alerts.list(8) if alerts is not None else [],
+        },
+        "mcp": _safe(mcp_stats, None),
+        "version": _safe(version_payload, None),
+    }
+
+
+def snapshot_payload(days: int = 7) -> dict:
+    """GET /api/snapshot 载荷：驾驶舱单通道聚合（0.10.27 四件套之一）。
+
+    一拍返回 overview + status + schedule + warehouse + timeline 五块，前端全局
+    轮询从 5 路请求收敛为 1 路（同一瞬间一致视图）。逐块 _safe：任一子块异常
+    只降级该块（None/[]），整体始终 200。timeline 走 app.* 动态引用（测试可 patch）。
+    """
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 - 聚合单块降级
+            return default
+
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "overview": _safe(overview_payload, None),
+        "status": _safe(status_payload, None),
+        # schedule 直接放配置对象（扁平契约；/api/schedule 的 {"schedule": cfg} 包裹不复用）
+        "schedule": _safe(load_schedule, None),
+        "warehouse": _safe(warehouse_status, None),
+        "timeline": {"days": _safe(lambda: app.load_timeline(days), []),
+                     "totals": _safe(app.warehouse_totals, None)},
+    }
+
+
 def _static_file(rel: str):
     """在 STATIC_DIR 内安全定位文件：路径穿越 / 不存在一律返回 None。"""
     base = STATIC_DIR.resolve()

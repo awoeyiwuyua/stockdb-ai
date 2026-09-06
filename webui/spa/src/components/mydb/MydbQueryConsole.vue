@@ -55,15 +55,14 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { Search } from '@element-plus/icons-vue'
 import EmptyState from '../EmptyState.vue'
+import { useMydb } from '../../composables/use-mydb'
 
-defineProps({
-  db: { type: Object, required: true },
-})
+defineProps<{ db: ReturnType<typeof useMydb> }>()
 
-const emit = defineEmits(['query'])
+const emit = defineEmits<{ (e: 'query'): void }>()
 </script>
 
 <style scoped>

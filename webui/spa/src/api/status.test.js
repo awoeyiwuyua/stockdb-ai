@@ -18,7 +18,7 @@ import {
   restartContainer,
   runSync,
   hkSync,
-} from './status.js'
+} from './status'
 
 // 造一个"长得很像 Response"的对象：http.js 只读 ok / status / text 三个属性
 const mockFetchOk = () =>

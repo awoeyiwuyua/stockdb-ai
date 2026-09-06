@@ -5,7 +5,7 @@
   <div ref="el" class="echart" :style="{ height }" />
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 按需注册：折线/柱状/饼图 + 常用组件 + Canvas 渲染器
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart, PieChart } from 'echarts/charts'
@@ -25,16 +25,17 @@ echarts.use([
   CanvasRenderer,
 ])
 
-const props = defineProps({
-  option: { type: Object, required: true }, // ECharts option（数据变了自动重绘）
-  height: { type: String, default: '300px' },
-})
+const props = withDefaults(defineProps<{
+  option?: echarts.EChartsCoreOption | null // ECharts option（数据变了自动重绘；空态可为 null）
+  height?: string
+}>(), { height: '300px' })
 
-const el = ref(null)
-let chart = null
-let ro = null
+const el = ref<HTMLDivElement | null>(null)
+let chart: echarts.ECharts | null = null
+let ro: ResizeObserver | null = null
 
 onMounted(() => {
+  if (!el.value || !props.option) return
   chart = echarts.init(el.value)
   chart.setOption(props.option)
   // 容器尺寸变化（侧边栏折叠/窗口缩放）时自动 resize，图表不塌

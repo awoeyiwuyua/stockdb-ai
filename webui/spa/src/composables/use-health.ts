@@ -1,14 +1,16 @@
-// use-health.js — 系统健康页状态机（0.10.18 自 views/OpsHealth.vue 迁入；
+// use-health.ts — 系统健康页状态机（0.10.18 自 views/OpsHealth.vue 迁入；
 // 第五批按归属表收敛为双源：diag 环境源随环境卡移除，其唯一的家在诊断中心）。
 //
 // 双源状态（health/status）并行拉取、各自降级；busy 互斥防轮询请求堆积；
 // 容器日志懒加载（展开才拉）；重启为危险操作二次确认。无 DOM。
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getHealth, getStatus, getContainerLogs, restartContainer } from '../api/status.js'
+import { getHealth, getStatus, getContainerLogs, restartContainer } from '../api/status'
+import { errText } from '../api/http'
+import type { HealthStatus, StatusPayload } from '../types/api'
 
 // 秒数 → 'X天X时X分'（容器卡运行时长用；不足 1 小时只显示分钟）
-function fmtUptimeSec(sec) {
+function fmtUptimeSec(sec: number | null): string {
   if (sec == null || !Number.isFinite(sec) || sec < 0) return '—'
   const s = Math.floor(sec)
   const d = Math.floor(s / 86400)
@@ -18,13 +20,13 @@ function fmtUptimeSec(sec) {
 }
 
 export function useHealth() {
-  const health = ref(null)          // /api/health：数据健康卡
-  const status = ref(null)          // /api/status：容器/磁盘（取用其中子块）
-  const containerLog = ref('')      // /api/container/logs 容器日志文本
+  const health = ref<HealthStatus | null>(null) // /api/health：数据健康卡
+  const status = ref<StatusPayload | null>(null) // /api/status：容器/磁盘（取用其中子块）
+  const containerLog = ref('') // /api/container/logs 容器日志文本
   const containerLogOpen = ref(false) // 容器日志展开开关（懒加载）
-  const loading = ref(true)         // 首拉/手动刷新中（骨架屏依据）
-  const error = ref('')             // 最近一次失败文案（顶部弱提示）
-  const restarting = ref(false)     // 重启请求进行中（按钮 loading）
+  const loading = ref(true) // 首拉/手动刷新中（骨架屏依据）
+  const error = ref('') // 最近一次失败文案（顶部弱提示）
+  const restarting = ref(false) // 重启请求进行中（按钮 loading）
 
   // 互斥：上一轮还没回来就跳过本轮，避免轮询请求堆积
   let busy = false
@@ -44,7 +46,7 @@ export function useHealth() {
   })
   // 健康状态文案与颜色：ok→正常 / stale→落后 / unknown→未知
   const statusLabel = computed(
-    () => ({ ok: '正常', stale: '落后', unknown: '未知' })[health.value?.status] ?? '—'
+    () => ({ ok: '正常', stale: '落后', unknown: '未知' } as Record<string, string>)[health.value?.status ?? ''] ?? '—',
   )
   const statusTone = computed(() => {
     const st = health.value?.status
@@ -54,14 +56,14 @@ export function useHealth() {
   })
 
   // 磁盘：百分比（el-progress 需要 0~100 整数）；total 缺失/为 0 时给 null（不画条）
-  const diskPct = computed(() => {
+  const diskPct = computed<number | null>(() => {
     const d = status.value?.disk
     if (!d || d.total_gb == null || !d.total_gb) return null
-    return Math.round((d.used_gb / d.total_gb) * 100)
+    return Math.round(((d.used_gb ?? 0) / d.total_gb) * 100)
   })
   // 颜色走语义 CSS 变量（随主题自动切换）：>80% 红 / >60% 黄 / 否则绿
   const diskColor = computed(() =>
-    diskPct.value > 80 ? 'var(--err)' : diskPct.value > 60 ? 'var(--warn)' : 'var(--ok)'
+    diskPct.value != null && diskPct.value > 80 ? 'var(--err)' : diskPct.value != null && diskPct.value > 60 ? 'var(--warn)' : 'var(--ok)',
   )
   // 磁盘明细文案（note）：已用 / 共 / 可用
   const diskText = computed(() => {
@@ -71,23 +73,23 @@ export function useHealth() {
   })
 
   // 两个接口并行拉取、各自降级：单块失败只记 error，不影响其它卡片。
-  async function loadHealth() {
+  async function loadHealth(): Promise<boolean> {
     try {
       const data = await getHealth()
-      if (data) health.value = data
+      if (data) health.value = data as HealthStatus
       return true
     } catch (e) {
-      error.value = e?.message || '健康接口不可用'
+      error.value = errText(e, '健康接口不可用')
       return false
     }
   }
-  async function loadStatus() {
+  async function loadStatus(): Promise<boolean> {
     try {
       const data = await getStatus()
       if (data) status.value = data
       return true
     } catch (e) {
-      error.value = e?.message || '状态接口不可用'
+      error.value = errText(e, '状态接口不可用')
       return false
     }
   }
@@ -112,11 +114,11 @@ export function useHealth() {
     containerLogOpen.value = !containerLogOpen.value
     if (containerLogOpen.value) {
       try {
-        const r = await getContainerLogs(150)
+        const r = await getContainerLogs(150) as { log?: string; error?: string } | null
         containerLog.value = r?.log || ''
         if (r?.error) containerLog.value += `\n\n${r.error}`
       } catch (e) {
-        ElMessage.error(e?.message || '读取容器日志失败')
+        ElMessage.error(errText(e, '读取容器日志失败'))
       }
     }
   }
@@ -134,19 +136,19 @@ export function useHealth() {
     }
     restarting.value = true
     try {
-      const r = await restartContainer()
+      const r = await restartContainer() as { msg?: string } | null
       ElMessage.success(r?.msg || '已发送重启')
       // 立即刷新进程状态（后端容器探测有 5s 缓存，随后轮询继续跟进）
       await loadStatus()
     } catch (e) {
-      ElMessage.error(e?.message || '重启失败')
+      ElMessage.error(errText(e, '重启失败'))
     } finally {
       restarting.value = false
     }
   }
 
   // epoch 秒（进程启动时间）→ 'X天X时X分'（容器卡用）
-  function fmtUptime(started) {
+  function fmtUptime(started: number | null | undefined) {
     if (!started) return '—'
     return fmtUptimeSec(Date.now() / 1000 - started)
   }

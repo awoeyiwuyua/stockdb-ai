@@ -66,7 +66,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 编排壳：图标（:icon 需要真实组件对象）+ 空态组件 + sync/ 域组件 + composables。
 // 注意：getContainerLogs / restartContainer 已随容器区块迁往 /ops/health；
 // 同步操作按钮已并入 SyncStatusCard（判据 2 状态与操作同位）；
@@ -79,9 +79,9 @@ import SyncScheduleForm from '../components/sync/SyncScheduleForm.vue'
 import SyncHistoryTable from '../components/sync/SyncHistoryTable.vue'
 import SyncTrendChart from '../components/sync/SyncTrendChart.vue'
 import SyncHkPanel from '../components/sync/SyncHkPanel.vue'
-import { useSync } from '../composables/use-sync.js'
-import { useSchedule } from '../composables/use-schedule.js'
-import { usePolling } from '../composables/use-polling.js'
+import { useSync } from '../composables/use-sync'
+import { useSchedule } from '../composables/use-schedule'
+import { usePolling } from '../composables/use-polling'
 
 // —— 同步域状态机（status/history + doSync）——
 const {

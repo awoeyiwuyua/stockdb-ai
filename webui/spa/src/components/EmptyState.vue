@@ -14,18 +14,22 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：默认插槽（<slot />）——父组件写在标签里的任意内容都会被塞到这里。
 // 空态组件只负责"排版 + 文案"，按钮放什么由父组件决定，职责单一。
+import type { Component } from 'vue'
 import { Document } from '@element-plus/icons-vue'
 
-defineProps({
-  // icon 属性：默认给一个现成的 Document 图标组件对象。
-  // 显式 import 的原因：即使 main.js 没有做全局图标注册，这里也能正常工作，
-  // 不依赖"全局注册"这个环境约定，组件自包含、更稳。
-  icon: { type: [String, Object], default: Document },
-  title: { type: String, default: '' },
-  description: { type: String, default: '' },
+withDefaults(defineProps<{
+  // icon 默认给一个现成的 Document 图标组件对象：显式 import 自包含，
+  // 不依赖"main.ts 全局注册图标"这个环境约定，组件更稳。
+  icon?: string | Component
+  title?: string
+  description?: string
+}>(), {
+  icon: Document,
+  title: '',
+  description: '',
 })
 </script>
 

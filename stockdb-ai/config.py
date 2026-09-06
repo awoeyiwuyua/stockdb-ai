@@ -40,13 +40,18 @@ if os.name == "nt" and not DATA_DIR_EXPLICIT:
           file=sys.stderr)
 LISTEN_PORT: int = _env_int("WEBUI_PORT", 8080)
 
+# webui token 门禁（0.10.27）：空 = 关闭（纯内网）；设值后 /api/* 需带
+# X-StockDB-Token 头（webui 右上角锁卡片输入一次，存浏览器 localStorage）。
+# 供节点小宝等隧道出内网时兜底；规则见 interfaces/web/auth.py。
+WEBUI_TOKEN: str = os.environ.get("WEBUI_TOKEN", "").strip()
+
 # 引擎进程控制（同步器/重启检测）
 STOCKDB_PIDFILE: Path = Path(os.environ.get("STOCKDB_PIDFILE", "/data/stockdb.pid"))
 STOCKDB_PAUSE: Path = Path(os.environ.get("STOCKDB_PAUSE_FLAG", "/data/.stockdb-paused"))
 STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"))
 
 # 版本号（发布物标识，见 docs/release-policy.md）
-WEBUI_VERSION: str = "0.10.26"
+WEBUI_VERSION: str = "0.10.27"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致

@@ -288,12 +288,26 @@ def load_timeline(days: int = 7) -> list[dict]:
     return out
 
 
-def warehouse_totals() -> dict:
+# warehouse_totals TTL 缓存（0.10.27）：facts glob 每次扫数万 parquet 文件名，
+# snapshot 进驾驶舱 15s 轮询后不能每拍全量扫盘——60s 缓存对资产卡足够新鲜。
+# _monotonic 抽出模块级便于测试替换；force=True（备份落盘后）绕过缓存。
+_WH_TOTALS_TTL = 60.0
+_monotonic = time.monotonic
+_wh_totals_cache: tuple[float, dict] = (0.0, {})
+
+
+def warehouse_totals(force: bool = False) -> dict:
     """仓库资产总量（W1 v0.4 数据资产卡）：交易日数 / 周K / 月K / 备份。纯读、静默降级。
 
     交易日数与周/月K 数 = facts 下 parquet 文件名去重计数（date=YYYYMMDD）；
     备份 = backups 目录文件数 + 最近一次落盘时间戳（前端换算年龄）。
+    0.10.27：60s TTL 缓存（驱动 15s 轮询聚合快照；glob 数万文件不能每拍扫盘）。
     """
+    global _wh_totals_cache
+    now = _monotonic()
+    ts, cached = _wh_totals_cache
+    if not force and ts and now - ts < _WH_TOTALS_TTL:
+        return cached
     import config as _config
     facts = Path(_config.WAREHOUSE_DIR) / "facts"
 
@@ -311,9 +325,11 @@ def warehouse_totals() -> dict:
         last_mtime = max((p.stat().st_mtime for p in bks), default=0.0)
     except Exception:
         pass
-    return {"sediment_days": _count("daily"), "weeks": _count("week"),
-            "months": _count("month"),
-            "backups": {"count": count, "last_mtime": last_mtime}}
+    result = {"sediment_days": _count("daily"), "weeks": _count("week"),
+              "months": _count("month"),
+              "backups": {"count": count, "last_mtime": last_mtime}}
+    _wh_totals_cache = (now, result)
+    return result
 
 
 def _default_schedule() -> dict:

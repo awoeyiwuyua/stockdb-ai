@@ -3,7 +3,7 @@
 // 内容组件（路由删除，LEGACY_REDIRECTS 以 {path,query} 落驾驶舱自动展开抽屉）。
 
 import { describe, it, expect } from 'vitest'
-import { TOP_ITEMS, NAV_GROUPS, NAV_ITEMS, LEGACY_REDIRECTS } from './nav.js'
+import { TOP_ITEMS, NAV_GROUPS, NAV_ITEMS, LEGACY_REDIRECTS } from './nav'
 
 describe('TOP_ITEMS：驾驶舱 + 数据同步两页', () => {
   it('恰好 2 项且 path 依次为 / 与 /ops/sync', () => {

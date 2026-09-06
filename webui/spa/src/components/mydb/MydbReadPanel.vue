@@ -58,16 +58,15 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { Search } from '@element-plus/icons-vue'
 import EmptyState from '../EmptyState.vue'
+import { useMydb } from '../../composables/use-mydb'
 
-defineProps({
-  // use-mydb 的 reactive 状态机实例（壳创建后传下，多面板共享）
-  db: { type: Object, required: true },
-})
+// use-mydb 的 reactive 状态机实例（壳创建后传下，多面板共享）
+defineProps<{ db: ReturnType<typeof useMydb> }>()
 
-const emit = defineEmits(['read'])
+const emit = defineEmits<{ (e: 'read'): void }>()
 </script>
 
 <style scoped>

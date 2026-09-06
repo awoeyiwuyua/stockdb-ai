@@ -85,26 +85,30 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // OpsAlerts — 通知中心（/ops/alerts）：告警列表（最新在前）+ 清空（二次确认）+ 30s 轮询。
 // 学习点：
-// 1) 顶栏红点数据来自全局 store（/api/overview 的 alerts.count），
+// 1) 顶栏红点数据来自全局 store（snapshot.overview 的 alerts.count），
 //    清空成功后手动调 store.refresh() 把红点立刻归零，不用等下一轮 30s；
 // 2) 清空是危险操作：ElMessageBox.confirm 二次确认，用户取消则直接 return；
 // 3) 轮询失败但手里有旧数据 → 顶部弱提示 + 表格照常展示（降级不崩）。
 import { ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Delete } from '@element-plus/icons-vue'
-import { getAlerts, clearAlerts } from '../api/ops.js'
-import { useGlobalStore } from '../stores/global.js'
+import { getAlerts, clearAlerts } from '../api/ops'
+import { errText } from '../api/http'
+import { useGlobalStore } from '../stores/global'
 import EmptyState from '../components/EmptyState.vue'
-import { usePolling } from '../composables/use-polling.js'
+import { usePolling } from '../composables/use-polling'
+import type { AlertItem } from '../types/api'
+
+interface AlertRow extends AlertItem { message?: string }
 
 const store = useGlobalStore() // 只读顶栏红点计数，清空后主动 refresh() 同步
 
 const loading = ref(true) // 首次加载中
 const error = ref('')     // 最近一次失败文案
-const alerts = ref([])    // 告警数组 [{ts, level, source, message}, ...]，后端已按最新在前
+const alerts = ref<AlertRow[]>([]) // 告警数组 [{ts, level, source, message}, ...]，后端已按最新在前
 
 // 互斥：上一轮还没回来就跳过本轮，避免轮询请求堆积
 let busy = false
@@ -114,12 +118,12 @@ async function load() {
   busy = true
   try {
     // getAlerts(200) 与后端约定：{alerts: [...]}；容错兼容 items 字段名
-    const r = await getAlerts(200)
+    const r = await getAlerts(200) as { alerts?: AlertRow[]; items?: AlertRow[] } | null
     const list = Array.isArray(r?.alerts) ? r.alerts : Array.isArray(r?.items) ? r.items : []
     alerts.value = list
     error.value = ''
   } catch (e) {
-    error.value = e?.message || '告警接口未就绪'
+    error.value = errText(e, '告警接口未就绪')
   } finally {
     loading.value = false
     busy = false
@@ -143,30 +147,32 @@ async function onClear() {
     return
   }
   try {
-    const r = await clearAlerts()
+    const r = await clearAlerts() as { msg?: string } | null
     ElMessage.success(r?.msg || '已清空全部告警')
     alerts.value = []
-    // 顶栏红点读的是 store（/api/overview），清空后主动刷新一次，红点立即消失
+    // 顶栏红点读的是 store（snapshot），清空后主动刷新一次，红点立即消失
     store.refresh()
   } catch (e) {
-    ElMessage.error('清空失败：' + (e?.message || e))
+    ElMessage.error('清空失败：' + errText(e, String(e)))
   }
 }
 
 // —— 展示派生 ——
 // ts 形如 '2026-08-14T23:38:06'：截前 19 位 + T 换空格，变成人读的时间
-function fmtTs(ts) {
+function fmtTs(ts: unknown) {
   return ts ? String(ts).slice(0, 19).replace('T', ' ') : '—'
 }
 // 级别 → 颜色：错误红 / 警告黄（兼容 warn 别名）/ 其余（info）用品牌蓝
-function levelColor(level) {
-  if (level === 'error') return 'var(--err)'
-  if (level === 'warning' || level === 'warn') return 'var(--warn)'
+function levelColor(level: unknown) {
+  const l = String(level ?? '')
+  if (l === 'error') return 'var(--err)'
+  if (l === 'warning' || l === 'warn') return 'var(--warn)'
   return 'var(--brand)'
 }
-function levelLabel(level) {
-  if (level === 'error') return '错误'
-  if (level === 'warning' || level === 'warn') return '警告'
+function levelLabel(level: unknown) {
+  const l = String(level ?? '')
+  if (l === 'error') return '错误'
+  if (l === 'warning' || l === 'warn') return '警告'
   return '提示'
 }
 

@@ -32,26 +32,32 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 纯展示：status 由壳（use-sync 状态机）下发。检查项口径与旧「同步能力检查」一致：
 // check.ok === false → 红；check.warn → 黄；否则绿。
 import { ref, computed, watch } from 'vue'
-import { fmtUptime } from '../../utils/format.js'
+import { fmtUptime } from '../../utils/format'
+import type { StatusPayload } from '../../types/api'
 
-const props = defineProps({
-  status: { type: Object, default: null },
-})
+const props = withDefaults(defineProps<{ status?: StatusPayload | null }>(), { status: null })
 
-const openNames = ref([])
+const openNames = ref<string[]>([])
+
+interface CheckItem {
+  name: string
+  level: 'ok' | 'warn' | 'err'
+  detail: string
+  extra?: string
+}
 
 // sync_cap.checks{updater,source,writable,retry_pending} → 三态检查项。
 // 磁盘详情的家在系统健康页（webui.md §5 归属表），"数据卷"只就地带一句用量。
-const items = computed(() => {
+const items = computed<CheckItem[]>(() => {
   const s = props.status
   if (!s) return []
-  const cap = s.sync_cap?.checks || {}
-  const capItem = (name, key) => {
-    const c = cap[key] || {}
+  const cap = s.sync_cap?.checks ?? {}
+  const capItem = (name: string, key: string): CheckItem => {
+    const c = cap[key] ?? {}
     return {
       name,
       level: c.ok === false ? 'err' : c.warn ? 'warn' : 'ok',
@@ -60,9 +66,9 @@ const items = computed(() => {
   }
   const d = s.disk
   const diskNote = d && d.total_gb
-    ? `已用 ${Math.round((d.used_gb / d.total_gb) * 100)}%（${d.used_gb} / ${d.total_gb} GB）`
+    ? `已用 ${Math.round(((d.used_gb ?? 0) / d.total_gb) * 100)}%（${d.used_gb} / ${d.total_gb} GB）`
     : ''
-  const writable = cap.writable || {}
+  const writable = cap.writable ?? {}
   return [
     {
       name: 'stockdb 进程',
@@ -104,8 +110,8 @@ watch(
   { immediate: true },
 )
 
-const levelColor = (l) => (l === 'err' ? 'var(--err)' : l === 'warn' ? 'var(--warn)' : 'var(--ok)')
-const levelIcon = (l) =>
+const levelColor = (l: string) => (l === 'err' ? 'var(--err)' : l === 'warn' ? 'var(--warn)' : 'var(--ok)')
+const levelIcon = (l: string) =>
   l === 'err' ? 'CircleCloseFilled' : l === 'warn' ? 'WarningFilled' : 'CircleCheckFilled'
 </script>
 

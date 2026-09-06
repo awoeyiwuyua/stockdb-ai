@@ -1,8 +1,8 @@
 <template>
   <!-- ═══════════════ 驾驶舱（W1 单页重设计，docs/design/webui-cockpit-redesign.md）═══════════════
-       批 1 范围：骨架 + 四灯状态带 + 异常区（静态列出非绿项）+ 时间线占位。
-       数据来源：数据灯 = 全局 store（App 层 30s 轮询）；同步/仓库/磁盘灯 = 本页
-       use-cockpit 三路拉取（15s 节拍，§5）；时间线数据批 2 接 /api/timeline。 -->
+       数据来源（0.10.27 起单通道化）：全部四灯 + 时间线 + 资产 totals 来自全局 store
+       （App 层轮询 /api/snapshot，一拍拿全同一瞬间一致视图）；本页 15s 快拍只是
+       提前触发 store.refresh()。灯判定口径在 domain/lights.ts（纯函数，Vitest 独打）。 -->
   <div class="cockpit-page">
     <!-- ── 页头 ── -->
     <header class="page-head">
@@ -27,8 +27,8 @@
       class="top-alert"
     />
 
-    <!-- 加载态：首次渲染前骨架（overview 与三路页面级数据任一未到） -->
-    <template v-if="store.overview === null && !store.error">
+    <!-- 加载态：首次渲染前骨架（snapshot 未到） -->
+    <template v-if="store.snapshot === null && !store.error">
       <div class="sk-band sk-card">
         <el-skeleton animated :rows="1" />
       </div>
@@ -39,7 +39,7 @@
 
     <!-- 错误态：首次加载就失败 → 空态 + 重试 -->
     <EmptyState
-      v-else-if="store.overview === null"
+      v-else-if="store.snapshot === null"
       icon="CircleClose"
       title="驾驶舱数据加载失败"
       description="接口暂不可用，请检查后端服务后重试"
@@ -66,11 +66,11 @@
         </ul>
       </section>
 
-      <!-- ③ 时间线（W1 批 2：/api/timeline 七交易日聚合） -->
-      <TimelineCard :rows="timeline" />
+      <!-- ③ 时间线（W1 批 2：七交易日聚合，数据随 snapshot 一并到达） -->
+      <TimelineCard :rows="store.timelineDays" />
 
       <!-- ④ 数据资产（W1 v0.4：三块资产清单——行情库/仓库/私有库） -->
-      <AssetsCard :status="status" :warehouse="warehouse" :totals="whTotals" :latest="store.health?.latest || ''" />
+      <AssetsCard :status="store.status" :warehouse="store.warehouse" :totals="store.whTotals" :latest="store.health?.latest || ''" />
     </template>
 
     <!-- ── 抽屉群（批 3）：四页降级为抽屉内容组件，destroy-on-close 关闭即停轮询 ── -->
@@ -96,71 +96,61 @@
   </div>
 </template>
 
-<script setup>
-// 组合范式与旧 Overview 一致：全局 store（顶栏/健康/告警）+ 页面级 use-cockpit
-// （同步/仓库/磁盘灯）+ usePolling 统一节拍（15s，§5：驾驶舱讲究新鲜）。
-// 视图层零直连：取数走 src/api/ 封装、定时器走 usePolling。
+<script setup lang="ts">
+// 组合范式：全局 store（snapshot 单通道）+ use-cockpit（灯推导接线）+ usePolling
+// 统一节拍（15s 快拍，§5：驾驶舱讲究新鲜）。视图层零直连：取数走 src/api/ 封装。
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
-import { useGlobalStore } from '../stores/global.js'
-import { useCockpit } from '../composables/use-cockpit.js'
-import { usePolling } from '../composables/use-polling.js'
+import { useGlobalStore } from '../stores/global'
+import { useCockpit } from '../composables/use-cockpit'
+import { usePolling } from '../composables/use-polling'
 import StatusBand from '../components/cockpit/StatusBand.vue'
 import TimelineCard from '../components/cockpit/TimelineCard.vue'
 import EmptyState from '../components/EmptyState.vue'
-import { getTimeline } from '../api/status.js'
 import OpsAlerts from './OpsAlerts.vue'
 import OpsLogs from './OpsLogs.vue'
 import OpsDiag from './OpsDiag.vue'
 import OpsMcp from './OpsMcp.vue'
 import OpsMydb from './OpsMydb.vue'
 import AssetsCard from '../components/cockpit/AssetsCard.vue'
+import type { DrawerName } from '../types/ui'
 
 const store = useGlobalStore()
 const router = useRouter()
 const route = useRoute()
-const { lights, worst, aggWord, status, warehouse, loadAll } = useCockpit()
+const { lights, worst, aggWord } = useCockpit()
 const refreshing = ref(false)
-const timeline = ref([])
-const whTotals = ref(null)
 
 // —— 抽屉群（批 3）：alerts / logs / diag / query；diag 内 tab（check|mcp）——
-const dreducers = ref({ alerts: false, logs: false, diag: false, query: false })
+const dreducers = ref<Record<DrawerName, boolean>>({ alerts: false, logs: false, diag: false, query: false })
 const diagTab = ref('check')
 
-function openDrawer(name, tab) {
-  if (!(name in dreducers.value)) return
-  if (name === 'diag' && tab) diagTab.value = tab
+function openDrawer(name: DrawerName, tab?: string) {
   dreducers.value[name] = true
+  if (name === 'diag' && tab) diagTab.value = tab
 }
 
 // 旧路径重定向落 /?drawer=xxx → 自动展开对应抽屉（含 tab）
 function applyQueryDrawer() {
   const d = route.query.drawer
-  if (typeof d === 'string') openDrawer(d, typeof route.query.tab === 'string' ? route.query.tab : undefined)
+  if (typeof d === 'string' && d in dreducers.value) {
+    openDrawer(d as DrawerName, typeof route.query.tab === 'string' ? route.query.tab : undefined)
+  }
 }
 watch(() => route.query.drawer, applyQueryDrawer)
 onMounted(applyQueryDrawer)
 
-async function loadTimeline() {
-  try {
-    const d = await getTimeline(7)
-    timeline.value = d?.days ?? []
-    whTotals.value = d?.totals ?? null
-  } catch { /* 保留旧值，时间线空态 */ }
-}
-
 // 把 Date 格式化成 HH:MM:SS（最近刷新时间展示用；与旧 Overview 同款）
-const hhmmss = (d) => {
-  const p = (n) => String(n).padStart(2, '0')
+const hhmmss = (d: Date) => {
+  const p = (n: number) => String(n).padStart(2, '0')
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 async function onRefresh() {
   refreshing.value = true
   try {
-    await Promise.all([store.refresh(), Promise.resolve(loadAll()), loadTimeline()])
+    await store.refresh() // snapshot 一拍拿全：灯 + 时间线 + 资产 totals
   } finally {
     refreshing.value = false
   }
@@ -172,7 +162,7 @@ usePolling(onRefresh, { fast: 15_000 })
 const abnormal = computed(() => lights.value.filter((l) => l.tone !== 'ok' && l.tone !== 'off'))
 
 // 灯点击 / 异常区条目 → 对应抽屉；同步域仍是独立页（干预与表单密度高，W1 留痕 v0.1）
-function onLightSelect(key) {
+function onLightSelect(key: string) {
   if (key === 'sync') router.push('/ops/sync')
   else openDrawer('diag')
 }

@@ -6,7 +6,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 0.10.18 第四批：dense 变体已随总览页去 StatCard 化删除（唯一消费方消失，
 // 按克制纪律不保留死代码）。
 </script>

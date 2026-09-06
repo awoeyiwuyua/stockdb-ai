@@ -51,28 +51,29 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 状态灯语义（判据 1）：同步中蓝 / 上次成功绿 / 失败红 / 无记录灰
 import { computed } from 'vue'
 import { VideoPlay, SwitchButton } from '@element-plus/icons-vue'
+import type { StatusPayload } from '../../types/api'
 
-const props = defineProps({
-  status: { type: Object, default: null },
-  syncBusy: { type: Boolean, default: false },
-})
-const emit = defineEmits(['sync'])
+const props = withDefaults(defineProps<{
+  status?: StatusPayload | null
+  syncBusy?: boolean
+}>(), { status: null, syncBusy: false })
+const emit = defineEmits<{ (e: 'sync', hot: boolean): void }>()
 
 // 同步阶段 → 中文标签与进度百分比（对应后端 _sync_state.phase 取值）
-const PHASE_LABEL = {
+const PHASE_LABEL: Record<string, string> = {
   idle: '空闲', stopping: '停止服务', syncing: '同步数据中',
   restarting: '重启服务', verifying: '数据校验', done: '已完成',
 }
-const PHASE_PCT = {
+const PHASE_PCT: Record<string, number> = {
   idle: 0, stopping: 10, syncing: 45, restarting: 70, verifying: 85, done: 100,
 }
 
-const phasePct = computed(() => PHASE_PCT[props.status?.sync_phase] ?? 0)
-const phaseLabel = computed(() => PHASE_LABEL[props.status?.sync_phase] ?? '处理中')
+const phasePct = computed(() => PHASE_PCT[props.status?.sync_phase ?? ''] ?? 0)
+const phaseLabel = computed(() => PHASE_LABEL[props.status?.sync_phase ?? ''] ?? '处理中')
 // 已运行时长文本：sync_started 是 epoch 秒，和当前时间相减
 const elapsedText = computed(() => {
   const s = props.status?.sync_started

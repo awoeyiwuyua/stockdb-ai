@@ -5,7 +5,7 @@
 //   2) writeData 是整包透传：payload 原样进 body，序列化→解析回来必须逐字段一致。
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { getTables, readData, writeData, queryStockdb } from './data.js'
+import { getTables, readData, writeData, queryStockdb } from './data'
 
 // 造一个"长得像 Response"的对象：http.js 只读 ok / status / text 三个属性
 const mockFetchOk = () =>

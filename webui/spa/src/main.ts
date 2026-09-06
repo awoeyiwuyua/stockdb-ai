@@ -8,6 +8,7 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue' // 全量图标包（命名导出）
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css' // Element Plus 深色变量（配合 html.dark）
+import './styles/tokens.css' // 设计令牌单一来源（0.10.27 拆分：变量在此，重置在 base）
 import './styles/base.css'
 import './styles/skin.css' // Element Plus ÷ Apple 皮肤（药丸按钮/雾面表格/圆角弹层）
 import './styles/card.css' // 卡片/页面骨架通用样式（0.10.18 提取，sync/ 组件与视图共用）
@@ -18,7 +19,7 @@ import router from './router'
 // —— 主题初始化（必须在挂载前做，避免首屏闪一下错误配色）——
 // 读用户上次的选择（localStorage），没有记录则默认浅色（Apple 皮肤以浅色为基准）。
 const savedTheme = localStorage.getItem('webui-theme') ?? 'light'
-// html 根元素带不带 dark class，决定 base.css 里 :root / html.dark 哪套变量生效
+// html 根元素带不带 dark class，决定 tokens.css 里 :root / html.dark 哪套变量生效
 document.documentElement.classList.toggle('dark', savedTheme === 'dark')
 
 const app = createApp(App)
@@ -36,9 +37,10 @@ for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
 // —— 全局错误兜底（Phase 5.1 稳定性补丁）——
 // 任何未捕获的组件/渲染异常不再白屏：记录到控制台 + 右下角弹提示，
 // 提示里带错误文案，方便用户反馈、快速定位根因。
-app.config.errorHandler = (err, _instance, info) => {
+app.config.errorHandler = (err: unknown, _instance, info: string) => {
+  const msg = err instanceof Error ? err.message : String(err)
   console.error('[webui] 未捕获异常', info, err)
-  ElMessage.error(`界面异常：${err?.message || err}（${info || '未知位置'}）`)
+  ElMessage.error(`界面异常：${msg}（${info || '未知位置'}）`)
 }
 
 app.mount('#app')

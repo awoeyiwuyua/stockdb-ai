@@ -63,40 +63,42 @@
   </section>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 纯展示 + 本地展开态；取数由驾驶舱视图层驱动（rows 传入）。
 import { ref } from 'vue'
 import EmptyState from '../EmptyState.vue'
+import type { TimelineDay, SyncHistoryRow } from '../../types/api'
+import type { LightTone } from '../../types/ui'
 
-defineProps({ rows: { type: Array, default: () => [] } })
+withDefaults(defineProps<{ rows?: TimelineDay[] }>(), { rows: () => [] })
 const openKey = ref('')
 
-function toggle(date) {
+function toggle(date: string) {
   openKey.value = openKey.value === date ? '' : date
 }
 
 const WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-function fmtDate(d8) {
+function fmtDate(d8: string) {
   if (!d8 || d8.length !== 8) return d8
   const d = new Date(`${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}T00:00:00`)
   return `${d8.slice(4, 6)}-${d8.slice(6, 8)} ${WD[d.getDay()]}`
 }
-function hhmm(ts) {
+function hhmm(ts: unknown): string {
   return typeof ts === 'string' && ts.length >= 16 ? ts.slice(11, 16) : '—'
 }
-function sedimentTone(r) {
+function sedimentTone(r: TimelineDay): LightTone {
   if (!r.sediment) return 'off'
   return r.sediment.ok ? 'ok' : 'err'
 }
-function syncTone(s) {
+function syncTone(s: SyncHistoryRow): LightTone {
   const bad = (s.exit_code ?? 0) !== 0 || s.verified === 'fail'
   return bad ? 'err' : 'ok'
 }
-function syncMark(s) {
+function syncMark(s: SyncHistoryRow): string {
   const bad = (s.exit_code ?? 0) !== 0 || s.verified === 'fail'
   return bad ? '✗' : '✓'
 }
-function alertTone(a) {
+function alertTone(a: TimelineDay['alerts']): LightTone {
   if (!a || !a.count) return 'off'
   return a.err ? 'err' : 'warn'
 }

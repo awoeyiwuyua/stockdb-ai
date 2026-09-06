@@ -25,10 +25,12 @@ const { rejectAll } = vi.hoisted(() => ({
     return stub
   },
 }))
-vi.mock('./api/status.js', async (io) => rejectAll(await io()))
-vi.mock('./api/ops.js', async (io) => rejectAll(await io()))
-vi.mock('./api/diag.js', async (io) => rejectAll(await io()))
-vi.mock('./api/data.js', async (io) => rejectAll(await io()))
+vi.mock('./api/status', async (io) => rejectAll(await io()))
+// 0.10.27：store 单通道（snapshot）也纳入全灭
+vi.mock('./api/snapshot', async (io) => rejectAll(await io()))
+vi.mock('./api/ops', async (io) => rejectAll(await io()))
+vi.mock('./api/diag', async (io) => rejectAll(await io()))
+vi.mock('./api/data', async (io) => rejectAll(await io()))
 
 import Cockpit from './views/Cockpit.vue'
 import OpsSync from './views/OpsSync.vue'

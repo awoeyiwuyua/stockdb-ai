@@ -49,8 +49,8 @@
           <template #title>
             <el-badge
               v-if="it.badge"
-              :value="store[it.badge]"
-              :hidden="!store[it.badge]"
+              :value="store[it.badge as keyof typeof store] as string | number | undefined"
+              :hidden="!store[it.badge as keyof typeof store]"
               type="danger"
               class="nav-badge"
             >
@@ -68,16 +68,14 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：el-sub-menu 分组菜单树（LuCI 风格）；props 折叠开关；
 // el-menu router 模式 = 点菜单即跳路由，default-active 用当前路由路径高亮。
 import { useRoute } from 'vue-router'
-import { TOP_ITEMS, NAV_GROUPS } from './nav.js'
-import { useGlobalStore } from '../stores/global.js'
+import { TOP_ITEMS, NAV_GROUPS } from './nav'
+import { useGlobalStore } from '../stores/global'
 
-defineProps({
-  collapsed: { type: Boolean, default: false },
-})
+withDefaults(defineProps<{ collapsed?: boolean }>(), { collapsed: false })
 
 const route = useRoute()
 const store = useGlobalStore() // 通知中心红点徽标数据源

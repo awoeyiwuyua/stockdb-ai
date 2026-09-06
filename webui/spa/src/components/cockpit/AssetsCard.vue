@@ -53,17 +53,23 @@
   </section>
 </template>
 
-<script setup>
-// 数据源：status/warehouse/totals 由驾驶舱下发（复用既有轮询，不新增请求）；
+<script setup lang="ts">
+// 数据源：status/warehouse/totals 由驾驶舱下发（snapshot 单通道，不新增请求）；
 // 私有库表清单自取 /api/data/tables（低频，onMounted 一次）。
 import { ref, computed, onMounted } from 'vue'
-import { getTables } from '../../api/data.js'
+import { getTables } from '../../api/data'
+import type { StatusPayload, WarehouseStatus, WarehouseTotals } from '../../types/api'
 
-const props = defineProps({
-  status: { type: Object, default: null },     // /api/status（code_stats/coverage）
-  warehouse: { type: Object, default: null },  // /api/warehouse/status
-  totals: { type: Object, default: null },     // /api/timeline.totals
-  latest: { type: String, default: '' },       // health.latest（YYYY-MM-DD）
+const props = withDefaults(defineProps<{
+  status?: StatusPayload | null      // /api/status（code_stats/coverage）
+  warehouse?: WarehouseStatus | null // /api/warehouse/status
+  totals?: WarehouseTotals | null    // snapshot.timeline.totals
+  latest?: string                    // health.latest（YYYY-MM-DD）
+}>(), {
+  status: null,
+  warehouse: null,
+  totals: null,
+  latest: '',
 })
 
 const cs = computed(() => props.status?.code_stats ?? {})
@@ -85,7 +91,7 @@ const backupAge = computed(() => {
 })
 
 // 私有库表清单（上游保留表 + 自定义，与数据查询抽屉同源）
-const tables = ref([])
+const tables = ref<string[]>([])
 const tablesErr = ref(false)
 onMounted(async () => {
   try {

@@ -104,7 +104,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 编排壳：图标 + StatCard/EmptyState + health/ 域组件 + use-health 状态机 + 统一轮询。
 // 第五批归属表：同步能力 → 数据同步页前提检查；环境详情 → 诊断中心；本页 = 系统域。
 import { Refresh } from '@element-plus/icons-vue'
@@ -112,9 +112,9 @@ import StatCard from '../components/StatCard.vue'
 import StatGrid from '../components/common/StatGrid.vue'
 import EmptyState from '../components/EmptyState.vue'
 import HealthContainerCard from '../components/health/HealthContainerCard.vue'
-import { useHealth } from '../composables/use-health.js'
-import { fmtYMD } from '../utils/format.js'
-import { usePolling } from '../composables/use-polling.js'
+import { useHealth } from '../composables/use-health'
+import { fmtYMD } from '../utils/format'
+import { usePolling } from '../composables/use-polling'
 
 const {
   health, status, containerLog, containerLogOpen, loading, error, restarting,

@@ -14,26 +14,38 @@
         <RouterView />
       </main>
     </div>
+
+    <!-- token 门禁登录卡片（0.10.27）：任一 /api 请求被 401 拒绝时全屏弹出 -->
+    <TokenGate v-if="unauthorized" @unlock="reload" />
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：
 // 1) ref 定义响应式状态，模板里直接用；事件 @xx 绑定处理函数。
 // 2) onMounted 做首次数据拉取 + 开启轮询；onUnmounted 清理定时器和监听，防止泄漏。
-// 3) 轮询节拍（可见 30s / 后台 5min / 回前台补拉）已提取为 composables/use-polling.js
+// 3) 轮询节拍（可见 30s / 后台 5min / 回前台补拉）已提取为 composables/use-polling.ts
 //    ——App 是它的第一个使用者，页面级轮询（如 OpsSync）复用同一套策略（0.10.18）。
+// 4) 0.10.27：全局取数收敛为 /api/snapshot 单通道（store.refresh 一拍拿全）。
 import { ref } from 'vue'
 import SideNav from './layout/SideNav.vue'
 import StatusBar from './layout/StatusBar.vue'
-import { useGlobalStore } from './stores/global.js'
-import { usePolling } from './composables/use-polling.js'
+import TokenGate from './components/TokenGate.vue'
+import { useGlobalStore } from './stores/global'
+import { usePolling } from './composables/use-polling'
+import { onUnauthorized } from './api/http'
 
-// 全局数据仓库：refresh() 拉一次 /api/overview，各组件通过 getter 读取
+// 全局数据仓库：refresh() 拉一次 /api/snapshot，各组件通过 getter 读取
 const store = useGlobalStore()
 
 // 侧边栏折叠状态：SideNav 用 prop 读它，StatusBar 用事件改它（单向数据流）
 const collapsed = ref(false)
+
+// token 门禁：在 setup 同步注册（早于首个请求响应到达），401 → 弹登录卡片
+const unauthorized = ref(false)
+onUnauthorized(() => (unauthorized.value = true))
+// 令牌已存 localStorage，整页 reload 让全部请求带新令牌重来（校验在后端）
+const reload = () => window.location.reload()
 
 // 全局轮询：首拉一次 + 可见性感知节拍（策略在 use-polling，此处只声明"轮询什么"）
 usePolling(() => store.refresh(), { immediate: true, slow: 5 * 60_000 })

@@ -1,4 +1,4 @@
-// use-polling.js — 可见性感知轮询（composables 层，0.10.18 从 App.vue 提取）。
+// use-polling.ts — 可见性感知轮询（composables 层，0.10.18 从 App.vue 提取）。
 //
 // 设计逻辑（哲学 #2 复杂度定向转移 / #3 依赖方向）：
 //   「可见时 30s 快轮询、切后台 5min 慢轮询、回前台立即补拉一次」这套节拍
@@ -16,8 +16,14 @@ import { onMounted, onUnmounted } from 'vue'
 const DEFAULT_FAST = 30_000   // 标签页可见：30 秒一次（与全局约定一致）
 const DEFAULT_SLOW = 300_000  // 切到后台：放宽到 5 分钟（省请求）
 
-export function usePolling(tick, { immediate = false, fast = DEFAULT_FAST, slow = DEFAULT_SLOW } = {}) {
-  let timer = null
+export interface PollingOptions {
+  immediate?: boolean
+  fast?: number
+  slow?: number
+}
+
+export function usePolling(tick: () => void, { immediate = false, fast = DEFAULT_FAST, slow = DEFAULT_SLOW }: PollingOptions = {}) {
+  let timer: ReturnType<typeof setInterval> | null = null
   let stopped = false
 
   function start() {

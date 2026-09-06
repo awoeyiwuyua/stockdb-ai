@@ -95,13 +95,14 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 日志中心（0.8.0 起两源：同步日志 + 容器日志；模拟盘事件源已随模拟盘移除）
 // 只有展示/过滤，没有任何写操作；前端关键字过滤，不请求后端。
 import { ref, computed } from 'vue'
 import { Refresh, Search } from '@element-plus/icons-vue'
-import { getLog, getContainerLogs } from '../api/status.js'
-import { usePolling } from '../composables/use-polling.js'
+import { getLog, getContainerLogs } from '../api/status'
+import { errText } from '../api/http'
+import { usePolling } from '../composables/use-polling'
 
 const POLL_MS = 15_000  // 日志讲究新鲜，15s 一刷
 
@@ -109,43 +110,43 @@ const keyword = ref('')
 const refreshing = ref(false)
 
 // —— 同步日志源 ——
-const syncLog = ref(null)
+const syncLog = ref<string | null>(null)
 const syncError = ref('')
 const syncLoading = ref(false)
 const lastUpdated = ref({ sync: '', cont: '' })
 
-async function loadSyncLog(manual = false) {
+async function loadSyncLog(_manual = false) {
   if (syncLoading.value) return  // 在途互斥，防请求堆积
   syncLoading.value = true
   try {
-    const r = await getLog(200) // 约定返回 {log: 文本}
+    const r = await getLog(200) as { log?: unknown } | null // 约定返回 {log: 文本}
     syncLog.value = typeof r?.log === 'string' ? r.log : ''
     syncError.value = ''
     lastUpdated.value.sync = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e) {
-    syncError.value = e?.message || '接口不可用'
+    syncError.value = errText(e, '接口不可用')
   } finally {
     syncLoading.value = false
   }
 }
 
 // —— 容器日志源 ——
-const contLog = ref(null)
+const contLog = ref<string | null>(null)
 const contError = ref('')
 const contLoading = ref(false)
 const contDegraded = ref('')
 
-async function loadContLog(manual = false) {
+async function loadContLog(_manual = false) {
   if (contLoading.value) return
   contLoading.value = true
   try {
-    const r = await getContainerLogs(150) // 约定返回 {log: 文本, error?: 读失败原因}
+    const r = await getContainerLogs(150) as { log?: unknown; error?: string } | null // 约定返回 {log, error?}
     contLog.value = typeof r?.log === 'string' ? r.log : ''
     contDegraded.value = r?.error && !contLog.value ? r.error : ''
     contError.value = ''
     lastUpdated.value.cont = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e) {
-    contError.value = e?.message || '接口不可用'
+    contError.value = errText(e, '接口不可用')
   } finally {
     contLoading.value = false
   }

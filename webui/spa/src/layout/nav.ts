@@ -1,16 +1,25 @@
-// nav.js — 左侧导航唯一配置源（纯数据，可单测）。
+// nav.ts — 左侧导航唯一配置源（纯数据，可单测）。
 // W1 驾驶舱重设计批 3（docs/design/webui-cockpit-redesign.md）：导航收敛为
 // 驾驶舱 + 数据同步两页；私有存储/日志/通知/MCP 四页转为驾驶舱抽屉内容组件
 //（视图文件保留、路由删除，旧路径经 LEGACY_REDIRECTS 落 '/?drawer=' 自动展开）。
-export const TOP_ITEMS = [
+
+export interface NavItem {
+  path: string
+  title: string
+  icon: string
+  group?: string
+  badge?: string // store getter 名（如 'alertCount'），侧栏红点徽标
+}
+
+export const TOP_ITEMS: NavItem[] = [
   { path: '/', title: '驾驶舱', icon: 'Odometer' },
   { path: '/ops/sync', title: '数据同步', icon: 'Refresh' },
 ]
 
-export const NAV_GROUPS = []
+export const NAV_GROUPS: Array<{ title: string; icon?: string; items: NavItem[] }> = []
 
 // 展平：全部页面（含分组信息，测试保证 path 唯一）
-export const NAV_ITEMS = [
+export const NAV_ITEMS: NavItem[] = [
   ...TOP_ITEMS,
   ...NAV_GROUPS.flatMap((g) => g.items.map((it) => ({ ...it, group: g.title }))),
 ]
@@ -18,7 +27,8 @@ export const NAV_ITEMS = [
 // 旧路径 → 新地址（路由 redirect 兜底，老书签不 404）。
 // 批 3：值为字符串直接跳转；值为 {path, query} 落驾驶舱并自动展开对应抽屉。
 // drawer 取值：alerts / logs / diag（含 MCP 标签）/ query。
-export const LEGACY_REDIRECTS = {
+export interface LegacyTarget { path: string; query: Record<string, string> }
+export const LEGACY_REDIRECTS: Record<string, string | LegacyTarget> = {
   '/overview': '/',
   '/ops/health': { path: '/', query: { drawer: 'diag' } },
   '/ops/diag': { path: '/', query: { drawer: 'diag' } },

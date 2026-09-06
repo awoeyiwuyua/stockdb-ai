@@ -5,20 +5,20 @@
   </el-button>
 </template>
 
-<script setup>
+<script setup lang="ts">
 // 学习点：
-// 1) 深/浅主题的本质 = html 根元素带不带 .dark class（配合 base.css 双主题变量）。
-// 2) localStorage 持久化用户选择，刷新页面后由 main.js 恢复主题。
-// 3) 初始状态不写死，而是读 document 的现状，保证与 main.js 的初始化结果一致。
+// 1) 深/浅主题的本质 = html 根元素带不带 .dark class（配合 tokens.css 双主题变量）。
+// 2) localStorage 持久化用户选择，刷新页面后由 main.ts 恢复主题。
+// 3) 初始状态不写死，而是读 document 的现状，保证与 main.ts 的初始化结果一致。
 import { ref } from 'vue'
 
 const THEME_KEY = 'webui-theme' // localStorage 键名（值为 'dark' 或 'light'）
 
-// 初始值 = html 根元素现在是否带着 dark class（main.js 挂载前已按 localStorage 设好）
+// 初始值 = html 根元素现在是否带着 dark class（main.ts 挂载前已按 localStorage 设好）
 const isDark = ref(document.documentElement.classList.contains('dark'))
 
 // 把目标主题应用到根元素 + 存进 localStorage（唯一写主题的地方）
-const applyTheme = (dark) => {
+const applyTheme = (dark: boolean) => {
   document.documentElement.classList.toggle('dark', dark)
   localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light')
   isDark.value = dark // 同步 ref，让图标跟着切换
