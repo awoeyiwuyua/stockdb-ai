@@ -10,6 +10,7 @@ from __future__ import annotations
 GET_ROUTES: dict[str, str] = {
     "/api/status": "_status",
     "/api/history": "_history",
+    "/api/timeline": "_timeline",
     "/api/schedule": "_schedule",
     "/api/health": "_health",
     "/api/log": "_log",

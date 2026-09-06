@@ -7,6 +7,7 @@ export const getHealth = () => getJson('/api/health') // 健康卡（最新日�
 export const getHistory = () => getJson('/api/history') // 同步历史
 export const getSchedule = () => getJson('/api/schedule') // 定时计划
 export const getWarehouseStatus = () => getJson('/api/warehouse/status') // 仓库水位/最近沉淀/对账（W1 驾驶舱仓库灯）
+export const getTimeline = (days = 7) => getJson(`/api/timeline?days=${days}`) // 驾驶舱时间线（W1 批 2）
 // 保存定时：enabled 布尔；times 字符串数组（如 ['08:30','15:30']）；tradingOnly 布尔
 export const saveSchedule = (enabled, times, tradingOnly = true) =>
   getJson(`/api/schedule?action=save&enabled=${enabled}&times=${times.join(',')}&trading_only=${tradingOnly}`)

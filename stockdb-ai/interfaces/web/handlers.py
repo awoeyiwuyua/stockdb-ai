@@ -63,6 +63,7 @@ from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），
     last_sync_summary,
     list_mcp_calls,
     load_history,
+    load_timeline,
     load_schedule,
     mcp_dispatch,
     mcp_stats,
@@ -426,6 +427,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _history(self):
         self._send(200, json.dumps({"history": load_history()}, ensure_ascii=False))
+
+    def _timeline(self):
+        # GET /api/timeline?days=7：驾驶舱时间线聚合（W1 批 2；int 防护同 _log）
+        try:
+            days = int(parse_qs(urlparse(self.path).query).get("days", ["7"])[0])
+        except (TypeError, ValueError):
+            days = 7
+        self._send(200, json.dumps({"days": load_timeline(days)}, ensure_ascii=False))
 
     def _schedule(self):
         q = parse_qs(urlparse(self.path).query)

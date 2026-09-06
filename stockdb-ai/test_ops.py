@@ -157,6 +157,54 @@ class _QueryResultLike:
         return iter(self._d.items())
 
 
+
+class TimelineTests(_OpsTestCase):
+    """W1 批 2：驾驶舱时间线聚合（records 沉淀 / sync 历史 / backups / alerts）。
+
+    路径三入口（config.DATA_DIR / config.WAREHOUSE_DIR / app.HISTORY_FILE）全部
+    patch 到临时目录，不触碰真实数据卷。
+    """
+
+    def test_load_timeline_aggregates_four_sources(self):
+        d = Path(self.tmp)
+        # 沉淀记录：collect 干扰项 + 两条 warehouse_sediment（断言末条为准）
+        rec = d / "records"
+        rec.mkdir(parents=True)
+        (rec / "20260904.jsonl").write_text("\n".join([
+            '{"date":"20260904","task":"collect","ok":true}',
+            '{"date":"20260904","task":"warehouse_sediment","ok":true,"rows":5177}',
+            '{"date":"20260904","task":"warehouse_sediment","ok":true,"rows":5178}',
+        ]), encoding="utf-8")
+        # 备份（按文件名日期归组）
+        wb = Path(self.tmp) / "warehouse" / "backups"
+        wb.mkdir(parents=True)
+        (wb / "warehouse-20260904-164110-x.db").write_bytes(b"x")
+        # 同步历史
+        hist = d / "sync_history.json"
+        hist.write_text(json.dumps(
+            [{"ts": "2026-09-04 15:50:30", "trigger": "scheduled", "exit_code": 0,
+              "verified": "pass", "duration_sec": 3.2, "data_latest": "20260904"}]),
+            encoding="utf-8")
+
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"),                 mock.patch.object(app, "HISTORY_FILE", hist):
+            rows = app.load_timeline(7)
+
+        row = next(r for r in rows if r["date"] == "20260904")
+        self.assertEqual(row["sediment"]["rows"], 5178)
+        self.assertTrue(row["sediment"]["ok"])
+        self.assertEqual(row["backups"]["count"], 1)
+        self.assertEqual(row["sync"][0]["trigger"], "scheduled")
+        self.assertEqual(row["alerts"]["count"], 0)
+        # 交易日过滤：周末不得成行（2026-08-30 周日）
+        self.assertNotIn("20260830", [r["date"] for r in rows])
+
+    def test_load_timeline_empty_dir_degrades(self):
+        # 空目录：行数 ≤ days，全部子块空缺不抛异常
+        rows = app.load_timeline(3)
+        self.assertLessEqual(len(rows), 3)
+        self.assertTrue(all(r["sediment"] is None and r["sync"] == [] for r in rows))
+
+
 class _LimitReferenceTests(_OpsTestCase):
     """0.8.15：涨停判定参考价 = 普通日 lag close / 除权日 pre_close（验收修正版）。"""
 
