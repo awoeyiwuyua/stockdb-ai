@@ -4,6 +4,11 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.25] — 2026-09-06（修复：驾驶舱数据资产卡空白）
+
+- 批 3 搬卡漏解构 status（SyncAssetsCard 拿到 undefined 整卡空白）；补一行解构，
+  Vitest 64 全绿
+
 ## [0.10.24] — 2026-09-06（修复：webui 双实例——调度器存活/同步运行态对接口永不可见）
 
 > 0.10.23 的 from-import 修复只解了一半：实机复测 scheduler_alive 仍 False、
