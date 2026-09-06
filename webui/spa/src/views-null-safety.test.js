@@ -30,6 +30,7 @@ vi.mock('./api/ops.js', async (io) => rejectAll(await io()))
 vi.mock('./api/diag.js', async (io) => rejectAll(await io()))
 vi.mock('./api/data.js', async (io) => rejectAll(await io()))
 
+import Cockpit from './views/Cockpit.vue'
 import OpsSync from './views/OpsSync.vue'
 import OpsHealth from './views/OpsHealth.vue'
 import OpsDiag from './views/OpsDiag.vue'
@@ -39,6 +40,7 @@ import OpsMcp from './views/OpsMcp.vue'
 import OpsMydb from './views/OpsMydb.vue'
 
 const CASES = [
+  ['/', '驾驶舱', Cockpit],
   ['/ops/sync', '数据同步', OpsSync],
   ['/ops/health', '系统健康', OpsHealth],
   ['/ops/diag', '诊断中心', OpsDiag],

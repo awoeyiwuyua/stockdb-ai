@@ -1,17 +1,16 @@
 // nav.test.js — 导航配置纯数据单测（Vitest）。运行：npm run test
-// 学习点：nav.js 是"单一数据源"，路由表与侧边栏都从它生成；
-//         测试它 = 守护菜单结构（0.8.0 起只剩系统运维一个分组）：
-//         总览单页 + 系统运维 7 项、path 唯一、badge 只挂通知中心、
-//         旧路径重定向（含模拟盘旧路径 → /overview）全部落点有效。
+// W1 驾驶舱重设计（docs/design/webui-cockpit-redesign.md）：菜单 = 驾驶舱单页 +
+// 系统运维 5 项（系统健康/诊断中心并入驾驶舱）；测试守护菜单结构：
+// path 唯一、badge 只挂通知中心、旧路径重定向全部落点有效。
 
 import { describe, it, expect } from 'vitest'
 import { TOP_ITEMS, NAV_GROUPS, NAV_ITEMS, LEGACY_REDIRECTS } from './nav.js'
 
-describe('TOP_ITEMS：总览单页', () => {
-  it('恰好 1 项且 path 为 /overview', () => {
-    // 顶层只有总览一个入口；多一个顶层项说明菜单结构又变回多页模式
+describe('TOP_ITEMS：驾驶舱单页', () => {
+  it('恰好 1 项且 path 为 /', () => {
+    // 顶层只有驾驶舱一个入口；多一个顶层项说明菜单结构又变回多页模式
     expect(TOP_ITEMS).toHaveLength(1)
-    expect(TOP_ITEMS[0].path).toBe('/overview')
+    expect(TOP_ITEMS[0].path).toBe('/')
   })
 })
 
@@ -25,10 +24,10 @@ describe('NAV_GROUPS：仅系统运维一个分组', () => {
     expect(NAV_GROUPS.some((g) => g.title === '模拟盘')).toBe(false)
   })
 
-  it('分组「系统运维」恰好 7 项', () => {
+  it('分组「系统运维」恰好 5 项（W1：系统健康/诊断中心并入驾驶舱）', () => {
     const g = NAV_GROUPS[0]
     expect(g, '找不到分组「系统运维」').toBeTruthy()
-    expect(g.items).toHaveLength(7)
+    expect(g.items).toHaveLength(5)
   })
 
   it('每个分组都有 title 与 items 数组，且每个条目都有 path/title/icon', () => {
@@ -45,12 +44,12 @@ describe('NAV_GROUPS：仅系统运维一个分组', () => {
 })
 
 describe('NAV_ITEMS：展平全量菜单', () => {
-  it('共 8 项 = TOP_ITEMS 1 + 系统运维 7', () => {
+  it('共 6 项 = TOP_ITEMS 1 + 系统运维 5', () => {
     // 自洽性：展平总数必须等于"顶层 + 各组条目"相加（flatMap 的唯一作用就是展平）
     const sum = TOP_ITEMS.length + NAV_GROUPS.reduce((n, g) => n + g.items.length, 0)
     expect(NAV_ITEMS.length).toBe(sum)
-    // 钉死当前真实数量（1+7=8），防止误删菜单项；改菜单时记得同步这里
-    expect(NAV_ITEMS.length).toBe(8)
+    // 钉死当前真实数量（1+5=6），防止误删菜单项；改菜单时记得同步这里
+    expect(NAV_ITEMS.length).toBe(6)
   })
 
   it('path 全唯一', () => {
@@ -59,9 +58,10 @@ describe('NAV_ITEMS：展平全量菜单', () => {
     expect(new Set(paths).size).toBe(paths.length)
   })
 
-  it('不含任何 /paper 开头的路径（模拟盘页面已删除）', () => {
+  it('不含任何 /paper 或 /overview 开头的路径（均已并入驾驶舱）', () => {
     const paths = NAV_ITEMS.map((it) => it.path)
     expect(paths.some((p) => p.startsWith('/paper'))).toBe(false)
+    expect(paths.some((p) => p.startsWith('/overview'))).toBe(false)
   })
 })
 
@@ -81,18 +81,20 @@ describe('badge 红点徽标', () => {
 })
 
 describe('LEGACY_REDIRECTS：老书签兜底', () => {
-  it('恰好 9 条，映射与预期完全一致（含模拟盘旧路径 → /overview）', () => {
+  it('恰好 11 条，映射与预期完全一致（/overview、/ops/health、/ops/diag → 驾驶舱）', () => {
     // toEqual 同时校验键与值：多一条、少一条、改错目标都会失败
     expect(LEGACY_REDIRECTS).toEqual({
+      '/overview': '/',
+      '/ops/health': '/',
+      '/ops/diag': '/',
+      '/ops/version': '/',
       '/data/sync': '/ops/sync',
       '/data/mydb': '/ops/mydb',
-      '/ops/system': '/ops/health',
-      '/ops/version': '/overview',
       '/data': '/ops/sync',
       '/alerts': '/ops/alerts',
-      '/paper': '/overview',
-      '/paper/audit': '/overview',
-      '/paper/signal': '/overview',
+      '/paper': '/',
+      '/paper/audit': '/',
+      '/paper/signal': '/',
     })
   })
 

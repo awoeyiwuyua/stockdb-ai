@@ -1,23 +1,21 @@
 // router/index.js — 路由表从 nav.js 单一配置源生成，页面组件懒加载。
-// Phase 5.1（LuCI 经验版）→ 0.8.0 收敛：总览单页 + 系统运维 7 子页，模拟盘 3 页已移除，
-// 旧路径（含 /paper 系列）redirect 兜底。
+// W1 驾驶舱重设计（docs/design/webui-cockpit-redesign.md）：'/' = 驾驶舱单页 +
+// 系统运维子页；/overview、/ops/health、/ops/diag 三路由已并入驾驶舱（LEGACY
+// 重定向兜底，批 3 升级为 ?drawer= 自动展开对应抽屉）。
 import { createRouter, createWebHistory } from 'vue-router'
 import { NAV_ITEMS, LEGACY_REDIRECTS } from '../layout/nav.js'
 
 // 路径 → 页面组件（懒加载函数）
 const VIEWS = {
-  '/overview': () => import('../views/Overview.vue'),
+  '/': () => import('../views/Cockpit.vue'),
   '/ops/sync': () => import('../views/OpsSync.vue'),
   '/ops/mydb': () => import('../views/OpsMydb.vue'),
-  '/ops/health': () => import('../views/OpsHealth.vue'),
-  '/ops/diag': () => import('../views/OpsDiag.vue'),
   '/ops/logs': () => import('../views/OpsLogs.vue'),
   '/ops/alerts': () => import('../views/OpsAlerts.vue'),
   '/ops/mcp': () => import('../views/OpsMcp.vue'),
 }
 
 const routes = [
-  { path: '/', redirect: '/overview' },
   ...NAV_ITEMS.map((it) => ({
     path: it.path,
     component: VIEWS[it.path],
