@@ -107,6 +107,10 @@
 .light-dot.muted {
   background: var(--muted);
 }
+.light-dot.off {
+  background: var(--muted);
+  opacity: 0.55;
+}
 .light-dot.lg {
   width: 14px;
   height: 14px;

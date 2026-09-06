@@ -1,8 +1,9 @@
 // nav.js — 左侧导航唯一配置源（纯数据，可单测）。
-// Phase 5.1（LuCI 经验版）→ 0.8.0 收敛：菜单树 = 总览单页 + 一个分组（系统运维），
-// 每项一个职责、一条 URL；badge 字段挂全局 store 红点徽标。模拟盘分组已于 0.8.0 移除。
+// W1 驾驶舱重设计（docs/design/webui-cockpit-redesign.md）：菜单 = 驾驶舱单页 +
+// 系统运维分组（批 1：系统健康/诊断中心并入驾驶舱抽屉的过渡期先移除独立入口，
+// 其信息由四灯 + 诊断抽屉承接）；每项一个职责、一条 URL；badge 挂通知中心。
 export const TOP_ITEMS = [
-  { path: '/overview', title: '总览', icon: 'Odometer' },
+  { path: '/', title: '驾驶舱', icon: 'Odometer' },
 ]
 
 export const NAV_GROUPS = [
@@ -12,8 +13,6 @@ export const NAV_GROUPS = [
     items: [
       { path: '/ops/sync', title: '数据同步', icon: 'Refresh' },
       { path: '/ops/mydb', title: '私有存储', icon: 'Coin' },
-      { path: '/ops/health', title: '系统健康', icon: 'Cpu' },
-      { path: '/ops/diag', title: '诊断中心', icon: 'Aim' },
       { path: '/ops/logs', title: '日志中心', icon: 'Document' },
       { path: '/ops/alerts', title: '通知中心', icon: 'Bell', badge: 'alertCount' },
       { path: '/ops/mcp', title: 'MCP 观测', icon: 'Monitor' },
@@ -27,16 +26,19 @@ export const NAV_ITEMS = [
   ...NAV_GROUPS.flatMap((g) => g.items.map((it) => ({ ...it, group: g.title }))),
 ]
 
-// 旧路径 → 新地址（路由 redirect 兜底，老书签不 404）
-// 0.8.0：模拟盘三个旧路径（/paper、/paper/audit、/paper/signal）全部收敛到总览
+// 旧路径 → 新地址（路由 redirect 兜底，老书签不 404）。
+// W1 批 1：/overview、/ops/health、/ops/diag 并入驾驶舱（'/'）；批 3 起带
+// ?drawer= 参数自动展开对应抽屉（此处先落 '/'，抽屉参数在 Cockpit 内解析）。
 export const LEGACY_REDIRECTS = {
+  '/overview': '/',
+  '/ops/health': '/',
+  '/ops/diag': '/',
+  '/ops/version': '/',
   '/data/sync': '/ops/sync',
   '/data/mydb': '/ops/mydb',
-  '/ops/system': '/ops/health',
-  '/ops/version': '/overview',
   '/data': '/ops/sync',
   '/alerts': '/ops/alerts',
-  '/paper': '/overview',
-  '/paper/audit': '/overview',
-  '/paper/signal': '/overview',
+  '/paper': '/',
+  '/paper/audit': '/',
+  '/paper/signal': '/',
 }
