@@ -2,6 +2,8 @@
 
 > ⚠️ **2026-09-06 起部署主体已迁移至飞牛 fnOS**（SSH + 本地构建，compose 位于
 > /vol1/stockdb/，Tailscale 100.66.1.5 / 局域网 192.168.50.146）；极空间实例已退役。
+> ⚠️ **2026-09-07 起引擎包必须 ≥ 0.3.5**：上游数据源升级严禁旧客户端（0.3.2 同步器
+> 被拒，同步失败），旧 0.3.2 release 资产已删除；升级见 CHANGELOG 0.10.28。
 > 本文保留为极空间 Q4 时代的部署指南存档。
 
 free-stockdb 官方发行包是**静态链接的独立二进制**（服务端 `stockdb` + 更新器 `数据更新`），
@@ -13,7 +15,8 @@ NAS 拉取时自动匹配自身 CPU 架构。
 
 ## 版本约定（重要）
 
-- **镜像 tag = 上游 stockdb 发布包版本号**（当前 `0.3.1`）：workflow 手动触发时不填
+- **镜像 tag = 上游 stockdb 发布包版本号**（当前 `0.3.5`；⚠️ 0.3.2 已被上游删除且
+  服务端禁止旧客户端，勿回退）：workflow 手动触发时不填
   version 输入，就从 `docker/Dockerfile` 的 `ARG VERSION` 打 tag，如
   `ghcr.io/awoeyiwuyua/stockdb-ai:0.3.1` 与 `:latest`。
 - **webui 面板内部版本 = `WEBUI_VERSION`**（当前 0.5.1，见 `stockdb-ai/app.py`），
@@ -231,7 +234,7 @@ docker compose start stockdb
 ## 三、上游版本升级
 
 1. **拉上游**：本 fork 仓库 GitHub 页 → `Sync fork` → `Update branch`（上游发新版时）
-2. **改版本号**：`docker/Dockerfile` 顶部 `ARG VERSION=0.3.1` → 新版号；**SHA256 必须同步更新**（上游 Releases 页面 `.SHA256.txt`）；若上游 tag 名变化，同步改 `ARG GH_TAG_ENCODED`
+2. **改版本号**：`docker/Dockerfile` 顶部 `ARG VERSION=0.3.5` → 新版号；**SHA256 必须同步更新**（上游 Releases 页面 `.SHA256.txt`）；若上游 tag 名变化，同步改 `ARG GH_TAG_ENCODED`
 3. **重建镜像**：`Actions → Run workflow`（构建 `:新版本` + `:latest` 双 tag；旧 tag 保留）
 4. **NAS 升级**：compose 已用 `:latest`，无需改配置，直接 `docker compose pull && docker compose up -d` 即拉取最新（`data/` 卷不动，数据不丢）。若想固定某版本，把 compose 里 `image: ...:latest` 改回 `:<具体版本>` 即可
 

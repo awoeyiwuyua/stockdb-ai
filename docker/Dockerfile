@@ -2,6 +2,12 @@
 #
 # free-stockdb 单镜像 0.5.0 — stockdb 服务端 + 数据更新同步器 + webui 运维面板（一容器）
 #
+# 2026-09-07 引擎升级 0.3.2→0.3.5（必升，否则同步失败）：
+#   上游 09-07 数据源升级（旧域虹吸至新网关 + 公告「已禁止低旧版本使用」），
+#   旧客户端（X-Sync-UA: sync_client_0.3.2）被服务端拒绝（403/502，manifest 失败），
+#   且旧 0.3.2 release 资产已被上游删除（404，无法再 pin）。升级到 0.3.5
+#   （sync_client_0.3.5）后同步恢复。详见 CHANGELOG 0.10.28。
+#
 # 内容：
 #   - stockdb 服务端（7899 HTTP 行情库）
 #   - 数据更新 同步器（webui 网页一键同步时调用）
@@ -17,7 +23,7 @@
 #   - Python 3.14 GIL：上游 3.14t(free-threaded) 的 abi3t 变体实测 ABI 不匹配
 #     （_PyType_FromSlots 符号缺失），待上游修复后评估升级。
 
-ARG VERSION=0.3.2
+ARG VERSION=0.3.5
 ARG TARGETARCH
 
 # ================= 构建阶段：下载 stockdb 发布包（含服务端/同步器/pybao） =================
@@ -25,7 +31,7 @@ FROM alpine:3.20 AS build
 
 ARG VERSION
 ARG TARGETARCH
-ARG GH_TAG_ENCODED=%E6%B5%8B%E8%AF%950.3.2
+ARG GH_TAG_ENCODED=%E6%B5%8B%E8%AF%95%E7%89%88%E6%9C%AC0.3.5
 
 RUN apk add --no-cache curl tar
 
@@ -33,10 +39,10 @@ RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) \
         PLATFORM=manylinux-x64; \
-        SHA256=be5d9d6dec736982e95d3def81736bd99587dfdd41b9146d73be8336cae24ce1 ;; \
+        SHA256=64bc77f22bd9f0d4d36cf7f9f10b78da2f2a1e9ef31e7c1ae4beda91ca6180e3 ;; \
       arm64) \
         PLATFORM=alpine-arm64; \
-        SHA256=def0bcbec0acc54a569bff114a0ae31dff1a7c77d1e016e48369211284fd6bc1 ;; \
+        SHA256=0439995f54628f72b0db9c0ce49939b98c234b77badfc0c273f6491e39435086 ;; \
       *) \
         echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
