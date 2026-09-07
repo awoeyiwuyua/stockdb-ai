@@ -4,6 +4,41 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.28] — 2026-09-07（修复：数据同步失败——上游数据源升级严禁旧客户端）
+
+> **fnOS 实例同步失败根因**（2026-09-07 21:xx 定位）：上游 09-07 数据源升级——
+> ① 公告「因老/旧问题反复被提交，已禁止低旧版本使用…请升级到最新版」；
+> ② 旧同步域 ah/ad.123128.xyz 302 虹引至新网关（www.app.workbuddy.link，
+> CloudStudio Gateway），新协议 `sync_manifest.json`+设备校验，客户端经
+> `X-Sync-UA: sync_client_X` 声明版本；旧客户端（0.3.2）manifest 请求被拒
+> （403/502），同步必然失败；③ 上游已删除 0.3.2 release 资产（404）——旧 pin
+> 连镜像都构建不了，**非升级不可**。
+> 实证：本机 Windows 新客户端（`sync_client_0.3.5`，镜像源 09-06 分发版）实跑
+> 增量同步成功（~8GB）；旧二进制请求被拒。旧协议 / 旧域名不再可用，故本次为
+> 引擎包整体升级而非 sync_url.txt 配置变更。
+
+- **引擎升级 0.3.2 → 0.3.5**（docker/Dockerfile：ARG VERSION + GH_TAG_ENCODED
+  `测试版本0.3.5` + amd64/arm64 SHA256 同步重 pin；0.3.5 = 当前唯一仍带 release
+  资产的版本，`sync_client_0.3.5` 通过服务端版本校验）
+- 连带验证：0.3.5 manylinux-x64 发布包 SHA256 与 GitHub API digest 一致；
+  包结构（stockdb/数据更新/pybao abi3.so）与 Dockerfile 各阶段预期一致
+- 范围说明：仅换引擎发行包，webui/仓库层零代码变更；面板版本 0.10.28 仅作
+  发布标识。**部署动作 = 重建镜像 + 重启容器**（详见 docs/deployments.md 备注）。
+- 已知观察：同步期间本机曾触发数据源风控（连续批量拉取后 403/502），
+  属测试消耗勿作为判断依据；NAS 实例自身出口无此干扰。
+
+## [0.10.27] — 2026-09-06（webui「从零四件套」（补录 CHANGELOG 缺口））
+
+> 设计留痕 docs/design/webui-from-zero.md；部署验证见台账 0.10.27 行。
+
+- /api/snapshot 单通道五块聚合（overview+status+schedule+warehouse+timeline，
+  逐块 _safe 降级；warehouse_totals 60s TTL 缓存）
+- TypeScript 全量 + vue-tsc 进 build 门；灯判定抽 domain/lights.ts 纯函数独打
+- styles/tokens.css 单一来源（变量一处、禁裸写色值）
+- token 门禁：config.WEBUI_TOKEN + interfaces/web/auth.py（/api/* 校验、
+  静态放行、/mcp 豁免）；前端 TokenGate 登录卡片
+- 测试：Python 106 / Vitest 68 全绿；vue-tsc 0 错误
+
 ## [0.10.26] — 2026-09-06（W1 v0.4：数据资产卡重构——三块资产清单 + 行情响应迁诊断）
 
 - **数据资产六维定稿**：广度（标的）/深度（历史）/新鲜度/层级（类型）/

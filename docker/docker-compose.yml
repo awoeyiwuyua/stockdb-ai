@@ -19,9 +19,10 @@
 
 services:
   stockdb:
-    # 镜像 tag = 面板版本（stockdb-ai/config.py 的 WEBUI_VERSION，当前 0.10.17），单镜像构建；
-    # 上游引擎包版本 = docker/Dockerfile 的 ARG VERSION（当前 0.3.2，已 pin SHA256）。
-    # :latest 指向最新构建；如要固定版本回滚可改为 :0.10.17
+    # 镜像 tag = 面板版本（stockdb-ai/config.py 的 WEBUI_VERSION，当前 0.10.28），单镜像构建；
+    # 上游引擎包版本 = docker/Dockerfile 的 ARG VERSION（当前 0.3.5，已 pin SHA256；
+    # 0.10.28：0.3.2 已被上游禁用/删除，不可回退）。
+    # :latest 指向最新构建；如要固定版本回滚可改为 :0.10.27（引擎必须 ≥0.3.5）
     image: ghcr.io/awoeyiwuyua/stockdb-ai:latest
     container_name: stockdb
     restart: unless-stopped

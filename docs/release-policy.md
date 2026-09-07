@@ -67,6 +67,7 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 | release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"） |
 | 二进制打包丢可执行位 | sha256 OK 但 stockdb/数据更新 呈 -rw-rw-rw-，启动失败 | 0.3.2（tar 解包后补 chmod +x + test -x 断言） |
 | 同步域名静默更换 | 镜像 302 → 新域，旧 sync_url 失效 | ah.123128.xyz → workbuddy.link（**不写适配层**，只改 /data/sync_url.txt 配置） |
+| 数据源禁止旧客户端（09-07 实证） | 同步失败：manifest 403/502；旧 release 资产 404 | 0.3.2→0.3.5（协议版本门禁 X-Sync-UA: sync_client_X，**必须升级客户端二进制**，改 sync_url 无效；见 CHANGELOG 0.10.28） |
 | 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） |
 
 ### 6.2 换域/换资产半小时流程
