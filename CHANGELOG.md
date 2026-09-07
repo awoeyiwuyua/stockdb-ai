@@ -4,18 +4,41 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
-## [0.10.28] — 2026-09-07（修复：数据同步失败——上游数据源升级严禁旧客户端）
+## [0.10.29] — 2026-09-07（修复：引擎 0.3.5 HTTP 协议 JSON→MsgPack 适配 + 同步失败根因实测修正）
 
-> **fnOS 实例同步失败根因**（2026-09-07 21:xx 定位）：上游 09-07 数据源升级——
-> ① 公告「因老/旧问题反复被提交，已禁止低旧版本使用…请升级到最新版」；
-> ② 旧同步域 ah/ad.123128.xyz 302 虹引至新网关（www.app.workbuddy.link，
-> CloudStudio Gateway），新协议 `sync_manifest.json`+设备校验，客户端经
-> `X-Sync-UA: sync_client_X` 声明版本；旧客户端（0.3.2）manifest 请求被拒
-> （403/502），同步必然失败；③ 上游已删除 0.3.2 release 资产（404）——旧 pin
-> 连镜像都构建不了，**非升级不可**。
-> 实证：本机 Windows 新客户端（`sync_client_0.3.5`，镜像源 09-06 分发版）实跑
-> 增量同步成功（~8GB）；旧二进制请求被拒。旧协议 / 旧域名不再可用，故本次为
-> 引擎包整体升级而非 sync_url.txt 配置变更。
+> 0.10.28 部署中发现两件事：① fnOS 同步不动的**直接原因** = /data/sync_url.txt 被
+> 迁移期（09-06 09:44）改为单行 `https://workbuddy.link`（该源实测 404/不可用），
+> 加 data/data/disable（「Initial synchronization completed」首次全量完成标记，
+> 设计内应保留）→ source 0 跳过且无 source 1（always 每日增量）→ **0 下载**；
+> ② 容器内 0.3.2 客户端设备校验实际通过（`状态:有效`）——「旧客户端被封」并非
+> 当日直接阻塞（上游公告与资产删除仍是升级到 0.3.5 的理由），且上游数据流
+> 09-07 晚间全通道不稳（502/网络不通，与迁移期吻合）。
+
+- **引擎 HTTP 协议适配（核心）**：0.3.5 引擎 HTTP 响应由 JSON 改为
+  **MsgPack**（`Content-Type: application/x-msgpack`；官方样例文档已过时，
+  无请求侧开关），webui/MCP 全链路 JSON 解析失配（health.latest/coverage/
+  code_stats/同步完整性验证全部失败）。
+  - 新增 `storage/providers/msgpack_lite.py`：纯标准库零依赖解包器
+    （nil/bool/int 全宽/float32,64/str/bin/array/map；ext 弃用即抛）
+  - `free_stockdb.fetch` 按 Content-Type 嗅探：msgpack → 解包 → json 回序列化，
+    **调用方 json.loads 契约不变（webui + MCP 一处修复全通）**；其余 CT 透传
+  - 测试 `test_msgpack` 11 用例（标量向量 9 + 真实抓包 3 + fetch 集成 2）：
+    真实抓包向量与参考 msgpack 实现交叉验证 **100% 一致**（2026-09-07 引擎 0.3.5）
+- **顺手修复**：run_sync 日志「✅ 数据完整性验证通过」原为无条件打印（失败也打），
+  结果以 sync_history 的 verified 字段为准；本版移入通过分支（0.10.28 部署时
+  因此误读过一次）
+- 同步源配置：恢复默认双行 `ah.123128.xyz` + `ad.123128.xyz always`（09-06 被
+  改为单行 workbuddy.link 属回归；备份留 NAS data/sync_url.txt.bak-20260907）
+- 验证：Python 全量回归通过（含 test_msgpack 11）
+
+## [0.10.28] — 2026-09-07（引擎升级 0.3.2→0.3.5：上游数据源升级与旧资产删除）
+
+> **fnOS 实例同步失败根因**（2026-09-07，部署期实测修正，详见 0.10.29 前记）：
+> 上游 09-07 数据源升级（公告「已禁止低旧版本使用」+ 旧同步域 302 虹引至新网关
+> CloudStudio Gateway + 新协议 sync_manifest.json/设备校验/`X-Sync-UA` 版本门禁）
+> + **上游已删除 0.3.2 release 资产（404）**——旧 pin 连镜像都构建不了，非升级不可。
+> 但当日直接阻塞同步的另有其因（sync_url 被迁移期改坏，见 0.10.29），本版为
+> 引擎包 0.3.2→0.3.5 升级，修复动因以 0.10.29 实测为准。
 
 - **引擎升级 0.3.2 → 0.3.5**（docker/Dockerfile：ARG VERSION + GH_TAG_ENCODED
   `测试版本0.3.5` + amd64/arm64 SHA256 同步重 pin；0.3.5 = 当前唯一仍带 release

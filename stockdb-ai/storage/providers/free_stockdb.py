@@ -52,17 +52,37 @@ def fetch(path: str, timeout: float = 10.0, breaker: bool = False,
     if not _gate.acquire(blocking=block):
         raise RuntimeError("stockdb 并发已满（信号量限流），本次降级")
     try:
+        import json as _json
         import urllib.request
+        from . import msgpack_lite
         host_port = base if base else f"{config.STOCKDB_HOST}:{config.STOCKDB_PORT}"
         with urllib.request.urlopen(
                 f"http://{host_port}{path}", timeout=timeout) as resp:
-            data = resp.read().decode("utf-8", "replace")
+            body = resp.read()
+        # 0.10.29：引擎 0.3.5 起 HTTP 响应改为 MsgPack（旧版为 JSON）。
+        # 按 Content-Type 嗅探 → 解包后回序列化为 JSON 文本，调用方 json.loads
+        # 契约不变（webui + MCP 全链路一处修复）；其余 Content-Type 走原文本路径。
+        content_type = ""
+        try:
+            headers = getattr(resp, "headers", None)
+            if headers is not None and hasattr(headers, "get"):
+                content_type = str(headers.get("Content-Type") or "")
+        except Exception:
+            content_type = ""
+        if "msgpack" in content_type:
+            try:
+                decoded = _json.dumps(msgpack_lite.unpack(body),
+                                      ensure_ascii=False, allow_nan=True)
+            except Exception as exc:  # 解码失败不静默：让调用方降级路径生效
+                raise RuntimeError(f"msgpack 解码失败（引擎协议异常）: {exc}") from exc
+        else:
+            decoded = body.decode("utf-8", "replace")
         # 0.9.11：成功复位仅限探针路径（breaker=True）——控制路径成功不干扰
         # 探针失败计数（此前任何成功都复位，探针计数被控制路径冲刷）
         if breaker:
             with _breaker_lock:
                 _breaker["fails"] = 0
-        return data
+        return decoded
     except Exception:
         if breaker:
             with _breaker_lock:  # 0.9.11：读改写原子化（并发失败不再丢失更新）
