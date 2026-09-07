@@ -1408,7 +1408,7 @@ def run_sync(hot: bool = True, trigger: str = "manual", retry: bool = False) -> 
                             log(f"  ❌ 重启失败：{exc}")
                     else:
                         _last_verify_result = "pass"
-                    log("  ✅ 数据完整性验证通过（股票代码 + 抽样日K/复权/分钟K）")
+                        log("  ✅ 数据完整性验证通过（股票代码 + 抽样日K/复权/分钟K）")
             else:
                 _last_verify_result = "skipped"
                 log("  ⚠️ 同步退出码非 0，跳过完整性验证")
