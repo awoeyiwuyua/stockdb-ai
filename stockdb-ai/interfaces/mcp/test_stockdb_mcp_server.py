@@ -2279,6 +2279,46 @@ class _SnapshotPacingTests(unittest.TestCase):
         self.assertEqual(len(result["points"]), 60)
         self.assertFalse(result["truncated"])
 
+    def test_sdk_batch_uses_same_day_interval(self):
+        """0.10.33 回归：新引擎区间语义下批量须用 start==end 同日区间。
+
+        上游 2026-09-08 重传的 stockdb 二进制改了区间语义——0.9.11 为旧「开区间」
+        加的「end 顺延一日」在批量下几乎全返回空（实测 20 只 → 0~2 条），全市场
+        快照退化成 ~50~100 只（仓库沉淀零星行 / 打板清单漏检）。模拟该语义：仅
+        start==end 才返回行，验证快路径仍取到全量。
+        """
+        date = "20260814"
+        calls = []
+        bar_row = self.BAR
+        class FakeSDK:
+            def get_data(self, codes, start=None, end=None, **kw):
+                calls.append((start, end))
+                if end == start:  # 同日区间才返回（新语义）
+                    return {c: [dict(bar_row, code=c)] for c in codes}
+                return {c: [] for c in codes}
+        with self._patch_universe(), \
+             mock.patch.object(server.pybao_tools, "get_sdk_client", return_value=FakeSDK()):
+            result = server.query_point_snapshot({"date": date, "limit": 0})
+        self.assertEqual(len(result["points"]), 60)
+        self.assertTrue(all(s == e for s, e in calls))  # 全部走同日区间
+
+    def test_sdk_batch_bumped_interval_fallback(self):
+        """旧语义兼容：同日区间返回空时回落顺延一日（end=date+1）。"""
+        date = "20260814"
+        ends = []
+        bar_row = self.BAR
+        class FakeSDK:
+            def get_data(self, codes, start=None, end=None, **kw):
+                ends.append(end)
+                if end == start:      # 同日区间返回空
+                    return {c: [] for c in codes}
+                return {c: [dict(bar_row, code=c)] for c in codes}
+        with self._patch_universe(), \
+             mock.patch.object(server.pybao_tools, "get_sdk_client", return_value=FakeSDK()):
+            result = server.query_point_snapshot({"date": date, "limit": 0})
+        self.assertEqual(len(result["points"]), 60)
+        self.assertIn(server._bump_end(date, "1d"), ends)  # 回落路径被触发
+
 
 class _AuctionKeyContractTests(unittest.TestCase):
     """0.9.10 键契约回归：写端键形（表=打板指标:<date>，键=metrics）必须可读。"""

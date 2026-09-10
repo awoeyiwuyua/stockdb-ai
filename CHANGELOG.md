@@ -4,6 +4,28 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.33] — 2026-09-10（修复：新引擎批量 SDK 区间语义变更——全市场快照退化成 ~50~100 只）
+
+> 用户报「驾驶舱仍有告警」。实机核查（fnOS）：**告警为真**——仓库 `v_daily`
+> 09-07/08/09 三天完全缺失、09-10 仅 246 行（正常 5100+）。追根到引擎侧：
+> 上游 2026-09-08 重传的 `stockdb` 二进制（`/opt/stockdb/stockdb` 时间戳 09-08）
+> 改了 SDK 区间语义——0.9.11 为「开区间」旧契约加的「end 顺延一日」在**批量下
+> 几乎全返回空**（实测 20 只：`end=date+1` → 0~2 条且不确定；`end=date` → 20 条，
+> 稳定可复现；500 只 → 496），全市场快照因此退化，沉淀只写零星行、打板清单
+> 大范围漏检。单只调用不受影响，故 `get_kline` 一直正常——掩盖了这条链路。
+
+- `interfaces/mcp/stockdb_mcp_server._fullmarket_sdk_outcomes._pull`：批量取数改用
+  **同日区间 `start==end`**（与 pybao 筛选通道一致）；整块无行再回落顺延一日
+  兼容旧语义；仍按 `date` 精确过滤，两种语义都不混入他日数据
+- 连带影响面：`get_point_snapshot`（全市场）→ 仓库沉淀 / 打板采集与收口对账，
+  一处修复全通
+- 测试：`test_sdk_batch_uses_same_day_interval`（模拟新语义仅同日返回）+ 
+  `test_sdk_batch_bumped_interval_fallback`（旧语义兼容回落）；Python 全量 400 全绿
+- 数据修复：NAS 上删残缺 09-10 分区（备份 `/vol1/stockdb/backup-partial-0910/`）
+  → backfill 补 09-07~09-10 四日（本版部署后执行）
+- 教训：`_bump_end` 的「顺延一日」是为旧引擎写的适配，换引擎二进制必须回归
+  全市场快照链路（单只调用通过不代表批量通过）
+
 ## [0.10.32] — 2026-09-10（修复：entrypoint 等待上限 60s→300s——冷加载超出致启动竞态未消）
 
 > 0.10.30 的启动竞态修复（webui 等引擎就绪再起）上限设 60s，但 2026-09-10
