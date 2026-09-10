@@ -4,6 +4,36 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.30] — 2026-09-10（修复：MCP 引擎取址与 config 分叉——隧道地址超时致打板/仓库/MCP 全链路失败）
+
+> **fnOS 实机报错根因**（2026-09-10 定位）：实机 webui 0.10.29 / 引擎 0.3.5 /
+> 定时同步与 diag 全绿，但打板收口对账、仓库沉淀、MCP 的 get_kline/get_stock_list
+> 全部 `<urlopen error timed out>`。根因 = `stockdb_mcp_server._base_url()` 此前
+> 无条件回落 `DEFAULT_HOST = 100.66.1.5`（NAS Tailscale 地址）——容器内未注入
+> `STOCKDB_HOST`，MCP 全链路即打到隧道地址；隧道一断即超时，而同容器的 app.py
+> 探针走 `config`（127.0.0.1）仍正常，故状态灯绿而任务红，症状割裂。
+> 实证：同一 `get_stock_list` 09-07 21:15 成功（11ms）、09-10 20:44 超时
+> （15005ms）；直连引擎 7899 仅 0.1s，`code_stats` 延迟 7ms——本机通、隧道不通。
+
+- `stockdb_mcp_server._base_url()`：内嵌模式（app.py 组合根导入，config 在
+  sys.path）经 `config.STOCKDB_HOST/PORT` 取址，与 app.py 探针 / pybao 通道同源；
+  config 不可导入 = 独立运行（stdio/--http）才回退 `DEFAULT_HOST`（Tailscale），
+  独立运行行为不变。取址口径从「一半代码连本机、一半连隧道」收拢为一处
+- `docker/Dockerfile` 显式 `ENV STOCKDB_HOST=127.0.0.1`（引擎与 webui 同容器）——
+  代码修复之外的双保险，任意启动方式（compose / docker run）均生效
+- 测试：`test_tool_groups_trace.EngineBaseUrlTest` 3 用例（内嵌走 config / 内嵌
+  默认不落 Tailscale / 独立回退默认）；Python 全量 398 用例全绿
+- **CI 加固**：`test_ops.test_expected_latest_after_close_is_today` 原用真实 now()
+  反推、又无时刻守卫，CI（UTC）在交易日 UTC 15:00 前必挂（2026-09-07 main 两次
+  失败实证，非本版引入）——改为确定性注入收盘后时刻；`.github/workflows/test.yml`
+  补 `TZ: Asia/Shanghai` 对齐生产容器（应用按 CST 语义）
+- **随版搭载**：`entrypoint.sh` 启动竞态修复——webui 先于引擎监听上线，首个探针
+  批次（连接被拒 ×3）触发熔断 300s，重启后健康/数据灯失明 5 分钟并误报
+  「行情数据不可用（探针失败）」（09-09 21:12 启动、21:13 探针失败实证）。改为
+  引擎就绪（最等 60s）再起 webui，未就绪则照常起（熔断自愈兜底）
+- 部署动作：仅重建镜像 + 重启容器（数据卷不动）；验证 MCP 读引擎工具恢复毫秒级、
+  `/api/alerts` 不再新增 `<urlopen error timed out>`
+
 ## [0.10.29] — 2026-09-07（修复：引擎 0.3.5 HTTP 协议 JSON→MsgPack 适配 + 同步失败根因实测修正）
 
 > 0.10.28 部署中发现两件事：① fnOS 同步不动的**直接原因** = /data/sync_url.txt 被

@@ -59,7 +59,28 @@ fi
 ) &
 STOCKDB_WATCHER=$!
 
-# ---- 5. 前台循环拉起 webui（webui 退出自动重启，容器存活由它保持）----
+# ---- 5. 等 stockdb 就绪再起 webui（0.10.30：启动竞态修复）----
+# 此前 webui 先于引擎监听上线，首个探针批次（连接被拒 ×3）触发熔断 300s——
+# 每次重启后健康/数据灯失明 5 分钟并误报「行情数据不可用（探针失败）」。
+# 引擎最多等 60s（30 × 2s）；仍未就绪则照常起 webui（对账失败由熔断自愈兜底）。
+echo "[entrypoint] waiting for stockdb engine ready (max 60s) ..."
+WAIT_ACK=0
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i + 1))
+  if curl -fsS --max-time 2 'http://127.0.0.1:7899/?cmd=get&t=%E8%82%A1%E7%A5%A8%E4%BB%A3%E7%A0%81' >/dev/null 2>&1; then
+    WAIT_ACK=1
+    break
+  fi
+  sleep 2
+done
+if [ "$WAIT_ACK" = "1" ]; then
+  echo "[entrypoint] engine ready (after ~$((i * 2))s)"
+else
+  echo "[entrypoint] WARNING: engine not ready in 60s; starting webui anyway" >&2
+fi
+
+# ---- 6. 前台循环拉起 webui（webui 退出自动重启，容器存活由它保持）----
 # 注意：set -e 下循环体内的 python 失败会直接退出 entrypoint（容器随 webui 一起停），
 # 必须用 if 条件位置豁免——webui 崩溃（含被信号杀死）时循环继续重启，不影响 stockdb。
 echo "[entrypoint] starting webui (8080) ..."
