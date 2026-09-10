@@ -8,6 +8,13 @@
 #   且旧 0.3.2 release 资产已被上游删除（404，无法再 pin）。升级到 0.3.5
 #   （sync_client_0.3.5）后同步恢复。详见 CHANGELOG 0.10.28。
 #
+# 2026-09-08 上游**重传** 0.3.5 资产（同 tag、同 sync_client_0.3.5、同 MsgPack
+#   协议；stockdb 服务端二进制重建于 09-08，同步器仍 09-06），双平台 tar 哈希
+#   随之变化——原 09-07 pin（64bc77f2…/0439995f…）失效，重建镜像会在
+#   `sha256sum -c` 处失败。0.10.31 按上游 SHA256.txt 重新 pin：
+#   amd64=9ec47250…/arm64=c9aed3db…（上游 SHA256.txt + GitHub API digest +
+#   本机下载实测三方一致）。详见 CHANGELOG 0.10.31。
+#
 # 内容：
 #   - stockdb 服务端（7899 HTTP 行情库）
 #   - 数据更新 同步器（webui 网页一键同步时调用）
@@ -39,10 +46,10 @@ RUN set -eu; \
     case "${TARGETARCH}" in \
       amd64) \
         PLATFORM=manylinux-x64; \
-        SHA256=64bc77f22bd9f0d4d36cf7f9f10b78da2f2a1e9ef31e7c1ae4beda91ca6180e3 ;; \
+        SHA256=9ec47250f60cd35462446dfcf34db99ef33e6b73b3f02f0970ef329722c265cf ;; \
       arm64) \
         PLATFORM=alpine-arm64; \
-        SHA256=0439995f54628f72b0db9c0ce49939b98c234b77badfc0c273f6491e39435086 ;; \
+        SHA256=c9aed3db552c485f1f2f0ba301de0216b56a6cde44dbaf320662c8787836ec49 ;; \
       *) \
         echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \

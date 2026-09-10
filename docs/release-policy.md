@@ -64,7 +64,7 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 | 雷 | 症状 | 首修 |
 |---|---|---|
 | workflow YAML 解析失败 | push 触发全 0s 失败 / dispatch 422 | 0.8.x（shell 引号内嵌真实换行）；0.10.17 再犯（job name 裸冒号）→ **改 workflow 必跑 pyyaml 严格解析** |
-| release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"） |
+| release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"）；**0.3.5 同 tag 重传**（09-08，URL 不 404 但 tar 哈希变 → 原 pin 失效，`sha256sum -c` 构建失败；见 CHANGELOG 0.10.31） |
 | 二进制打包丢可执行位 | sha256 OK 但 stockdb/数据更新 呈 -rw-rw-rw-，启动失败 | 0.3.2（tar 解包后补 chmod +x + test -x 断言） |
 | 同步域名静默更换 | 镜像 302 → 新域，旧 sync_url 失效 | ah.123128.xyz → workbuddy.link（**不写适配层**，只改 /data/sync_url.txt 配置） |
 | 数据源禁止旧客户端（09-07 实证） | 同步失败：manifest 403/502；旧 release 资产 404 | 0.3.2→0.3.5（协议版本门禁 X-Sync-UA: sync_client_X，**必须升级客户端二进制**，改 sync_url 无效；见 CHANGELOG 0.10.28） |
