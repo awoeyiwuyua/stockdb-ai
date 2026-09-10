@@ -14,6 +14,10 @@ jobs:
   python-tests:
     name: Python 单测（离线）
     runs-on: ubuntu-latest
+    # 与生产容器同区（docker-compose TZ=Asia/Shanghai）：应用逻辑按 CST 语义
+    # （15:00 收盘判当日数据到位、15:50 调度）；CI 默认 UTC 属生产不存在的环境。
+    env:
+      TZ: Asia/Shanghai
     steps:
       - name: Checkout
         uses: actions/checkout@v4

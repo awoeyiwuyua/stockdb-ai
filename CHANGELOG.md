@@ -22,7 +22,11 @@
 - `docker/Dockerfile` 显式 `ENV STOCKDB_HOST=127.0.0.1`（引擎与 webui 同容器）——
   代码修复之外的双保险，任意启动方式（compose / docker run）均生效
 - 测试：`test_tool_groups_trace.EngineBaseUrlTest` 3 用例（内嵌走 config / 内嵌
-  默认不落 Tailscale / 独立回退默认）；Python 全量 397 用例全绿
+  默认不落 Tailscale / 独立回退默认）；Python 全量 398 用例全绿
+- **CI 加固**：`test_ops.test_expected_latest_after_close_is_today` 原用真实 now()
+  反推、又无时刻守卫，CI（UTC）在交易日 UTC 15:00 前必挂（2026-09-07 main 两次
+  失败实证，非本版引入）——改为确定性注入收盘后时刻；`.github/workflows/test.yml`
+  补 `TZ: Asia/Shanghai` 对齐生产容器（应用按 CST 语义）
 - **随版搭载**：`entrypoint.sh` 启动竞态修复——webui 先于引擎监听上线，首个探针
   批次（连接被拒 ×3）触发熔断 300s，重启后健康/数据灯失明 5 分钟并误报
   「行情数据不可用（探针失败）」（09-09 21:12 启动、21:13 探针失败实证）。改为

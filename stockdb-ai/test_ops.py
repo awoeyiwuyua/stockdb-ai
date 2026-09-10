@@ -1548,11 +1548,21 @@ class StaleSelfHealTest(_OpsTestCase):
     # ---- _expected_latest_date ----
 
     def test_expected_latest_after_close_is_today(self):
-        """工作日 15:00 后 → 应至今天（用真实今天反推：若今天是交易日则=今天）。"""
-        now = datetime.datetime.now()
-        exp = app._expected_latest_date(now)
-        if app.is_trading_day(now.date()):  # 测试环境无关化：今天非交易日则断言回退
-            self.assertEqual(exp, now.strftime("%Y%m%d"))
+        """工作日 15:00 后 → 应至当天（注入收盘后时刻，与挂钟/CI 时区无关）。
+
+        原用例用真实 now() 反推，但 _expected_latest_date 以 now.hour>=15 判收盘，
+        CI 跑在 UTC（无 TZ）且推送多在 UTC 15:00 之前 → 交易日必挂（2026-09-07
+        main CI 两次失败实证）。改用确定性注入，与同文件「收盘前」用例同法。
+        """
+        probe = datetime.datetime(2026, 9, 4, 20, 0)  # 周五盘中后（交易日）
+        self.assertTrue(app.is_trading_day(probe.date()))
+        self.assertEqual(app._expected_latest_date(probe), "20260904")
+
+    def test_expected_latest_after_close_matches_injected_probe(self):
+        """收盘后返回值 == 注入时刻当天（TZ/时刻无关的显式口径）。"""
+        probe = datetime.datetime(2026, 8, 3, 20, 0)  # 周一盘中后（交易日）
+        self.assertTrue(app.is_trading_day(probe.date()))
+        self.assertEqual(app._expected_latest_date(probe), probe.strftime("%Y%m%d"))
 
     def test_expected_latest_before_close_is_prev_trading_day(self):
         """盘前（15:00 前）→ 应至前一交易日（回退最多 10 天内必有）。"""
