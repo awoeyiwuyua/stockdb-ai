@@ -3,9 +3,9 @@
 
 本脚本是一个长期驻留的 Model Context Protocol (MCP) server，由 ZCode /
 Claude Desktop 等 MCP 客户端通过 stdin/stdout（stdio）或 HTTP（NAS 容器部署）
-拉起。它把局域网部署的 free-stockdb（默认 100.66.1.5:7899，Tailscale 地址）
-的 HTTP API 封装成 MCP 工具，供 agent 直接查询真实行情。只读，不写任何数据，
-不连接项目 SQLite。
+拉起。它把局域网部署的 free-stockdb（独立运行时默认 100.66.1.5:7899，Tailscale
+地址；内嵌 webui 时经 config 取址 = 127.0.0.1）的 HTTP API 封装成 MCP 工具，
+供 agent 直接查询真实行情。只读，不写任何数据，不连接项目 SQLite。
 
 依赖：纯 Python 标准库（urllib/json/sys/os/http.server/threading），零第三方包。
 传输：
@@ -21,7 +21,8 @@ Usage:
         --host 0.0.0.0 --port 8080                           # HTTP（NAS 容器部署）
 
 环境变量:
-    STOCKDB_HOST   free-stockdb 服务地址，默认 100.66.1.5（NAS Tailscale）
+    STOCKDB_HOST   free-stockdb 服务地址；独立运行默认 100.66.1.5（NAS
+                   Tailscale），内嵌 webui 时经 config（默认 127.0.0.1）
     STOCKDB_PORT   free-stockdb 服务端口，默认 7899
     STOCKDB_TIMEOUT  HTTP 查询超时（秒），默认 15
 
@@ -223,9 +224,26 @@ def _notify_progress(stage: str, detail: str | None = None) -> None:
 
 
 def _base_url() -> str:
-    host = os.environ.get("STOCKDB_HOST", DEFAULT_HOST)
-    port = os.environ.get("STOCKDB_PORT", str(DEFAULT_PORT))
-    return f"http://{host}:{port}"
+    """引擎基址（host:port）。
+
+    0.10.30 修复：此前无条件回落 DEFAULT_HOST（100.66.1.5 = NAS Tailscale），
+    容器内未注入 STOCKDB_HOST 时 MCP 全链路（get_kline/get_stock_list，以及经
+    query_point_snapshot 注入的打板采集/仓库沉淀）打到 NAS 自身 Tailscale 地址；
+    隧道一断即 `<urlopen error timed out>`，而 app.py 探针走 config=127.0.0.1
+    仍正常——症状割裂的根源即这唯一的取址不一致。
+
+    现内嵌模式（app.py 组合根导入本模块，config 在 sys.path）经 config 取址，
+    与 app.py 探针 / pybao 通道同口径（默认 127.0.0.1，容器内引擎同容器）；
+    config 不可导入 = 独立运行模式（stdio/--http），回退 DEFAULT_HOST（NAS
+    Tailscale），行为与收敛前一致。
+    """
+    try:
+        import config  # 内嵌模式：环境变量单一入口（见 config.py）
+        return f"http://{config.STOCKDB_HOST}:{config.STOCKDB_PORT}"
+    except Exception:  # noqa: BLE001 - 独立运行：config 不在 sys.path，回退默认
+        host = os.environ.get("STOCKDB_HOST", DEFAULT_HOST)
+        port = os.environ.get("STOCKDB_PORT", str(DEFAULT_PORT))
+        return f"http://{host}:{port}"
 
 
 def _timeout() -> float:
@@ -239,8 +257,9 @@ def _http_get(cmd: str, table: str) -> object:
     """Query free-stockdb HTTP API: /?cmd=<cmd>&t=<table>.
 
     0.10.0 C1（双轨收敛）：传输统一走数据层闸口 storage.providers.free_stockdb.fetch
-    （信号量限并发 + 熔断治理全覆盖）；独立运行模式的默认 host（100.66.1.5）经
-    base 参数透传，行为与收敛前一致。urllib 仍保留给无 storage 包的裁剪场景。
+    （信号量限并发 + 熔断治理全覆盖）；取址经 _base_url()（内嵌模式走 config，
+    独立运行回退默认 host），行为与收敛前一致。urllib 仍保留给无 storage 包的
+    裁剪场景。
     """
     from storage.providers import free_stockdb as _fs
     path = f"/?cmd={cmd}&t={urllib.parse.quote(table)}"

@@ -115,5 +115,36 @@ class TraceIdTest(unittest.TestCase):
         self.assertEqual(len(recs[0]["trace_id"]), 12)
 
 
+class EngineBaseUrlTest(unittest.TestCase):
+    """0.10.30：MCP 取址与 config 同源（内嵌 webui 时引擎=127.0.0.1）。
+
+    回归 2026-09-07~10 fnOS 故障：`_base_url()` 此前无条件回落 DEFAULT_HOST
+    （100.66.1.5 = NAS Tailscale），容器未注入 STOCKDB_HOST 时 MCP 全链路
+    （get_kline/get_stock_list + 打板采集/仓库沉淀快照）打到隧道地址，隧道一断
+    即 `<urlopen error timed out>`；同容器的 app.py 探针走 config 却正常。
+    """
+
+    def test_embedded_uses_config(self):
+        """内嵌模式（config 可导入）→ 取址即 config.STOCKDB_HOST/PORT。"""
+        import config
+        with mock.patch.object(config, "STOCKDB_HOST", "127.0.0.1"), \
+             mock.patch.object(config, "STOCKDB_PORT", 7899):
+            self.assertEqual(server._base_url(), "http://127.0.0.1:7899")
+
+    def test_embedded_never_defaults_to_tailscale(self):
+        """内嵌模式默认不得落在 DEFAULT_HOST（Tailscale 隧道地址）。"""
+        import config
+        with mock.patch.object(config, "STOCKDB_HOST", "127.0.0.1"), \
+             mock.patch.object(config, "STOCKDB_PORT", 7899):
+            self.assertNotIn(server.DEFAULT_HOST, server._base_url())
+
+    def test_standalone_falls_back_to_default(self):
+        """config 不可导入（独立运行）→ 回退 DEFAULT_HOST/PORT，行为不变。"""
+        with mock.patch.dict(sys.modules, {"config": None}):
+            self.assertEqual(
+                server._base_url(),
+                f"http://{server.DEFAULT_HOST}:{server.DEFAULT_PORT}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

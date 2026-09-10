@@ -122,6 +122,12 @@ COPY --from=spa-build /build/dist /opt/webui/static/
 COPY webui/static/legacy/ /opt/webui/static/legacy/
 ENV WEBUI_STATIC_DIR=/opt/webui/static
 
+# 0.10.30：引擎就在本容器，显式钉死 127.0.0.1——webui 与 MCP 模块共用此地址。
+# 此前未声明，MCP 取址回落到独立运行默认值 100.66.1.5（NAS Tailscale），隧道
+# 一断则 get_kline/get_stock_list/打板采集/仓库沉淀全部 <urlopen error timed out>。
+# 代码侧 _base_url() 已改为内嵌模式走 config（见 CHANGELOG 0.10.30），此处双保险。
+ENV STOCKDB_HOST=127.0.0.1
+
 # pybao 写库客户端路径注入（webui 的 mydb 私有存储 / 港股落盘）
 ENV PYTHONPATH=/opt/stockdb/pybao
 
