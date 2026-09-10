@@ -1851,15 +1851,33 @@ def _fullmarket_sdk_outcomes(codes: list[str], date: str):
     bars: dict[str, dict] = {}
 
     def _pull(chunk: list[str]) -> None:
-        # 0.9.11：SDK 区间为开区间（start<end 不含 end，见 _bump_end 契约）——
-        # start==end 是空区间，整批返回空会被静默判为全市场无 bar（SUSPENDED）
-        # 且 formal_usable 仍为 True。end 顺延一日，客户端过滤回原日期。
-        data = sdk.get_data(chunk, start=date, end=_bump_end(date, "1d"), fq=None) or {}
-        for c, recs in data.items():
-            recs = [r for r in (recs or []) if isinstance(r, dict)
-                    and str(r.get("date") or "")[:8] == date]
-            if recs:
-                bars[str(c)] = recs[-1]  # 单日区间，取最后一条
+        # 0.10.33：上游 2026-09-08 重传的 stockdb 二进制改了 SDK 区间语义——
+        # 0.9.11 为「开区间」旧契约加的「end 顺延一日」在批量下几乎全部返回空
+        # （实测 20 只：end=date+1 → 0~2 条；end=date → 20 条，稳定），全市场
+        # 快照因此退化成 ~50~100 只（仓库沉淀只有零星行、打板清单大范围漏检）。
+        # 现按同日区间取（与 pybao_tools 筛选通道一致，实测 500 只 → 496 条）；
+        # 整块无行再回落顺延一日以兼容旧语义。客户端仍按 date 精确过滤，两种
+        # 语义都不会混入他日数据。
+        answered = False
+        last_exc: Exception | None = None
+        for end_candidate in (date, _bump_end(date, "1d")):
+            try:
+                data = sdk.get_data(chunk, start=date, end=end_candidate, fq=None) or {}
+            except Exception as exc:  # noqa: BLE001 - 两种区间都失败才上抛回退 HTTP
+                last_exc = exc
+                continue
+            answered = True
+            got = 0
+            for c, recs in data.items():
+                keep = [r for r in (recs or []) if isinstance(r, dict)
+                        and str(r.get("date") or "")[:8] == date]
+                if keep:
+                    bars[str(c)] = keep[-1]  # 单日区间，取最后一条
+                    got += 1
+            if got:
+                return
+        if not answered and last_exc is not None:
+            raise last_exc
 
     try:
         # 分块 50：实测 pybao pipeline 单次响应上限 50 条（0.8.8 修复——
