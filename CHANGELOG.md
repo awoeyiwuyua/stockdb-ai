@@ -4,6 +4,28 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.34] — 2026-09-10（性能：仓库写入 CSV 批量导入——实测量 160× 提速）
+
+> 用户问「backfill 方式有没有优化空间，CPU 都没调用多少」。实机剖析（fnOS）
+> 定位瓶颈：单日沉淀 5176×26 行，写入阶段 `_write_parquet_atomic` 16.6s +
+> `write_codes` 23.5s（全市场快照只要 0.5s）——根因是 DuckDB 的 Python
+> **`executemany(INSERT ... VALUES (?,...))` 逐行绑定参数**，单核 ~9% CPU 全耗在
+> 解释器逐行栈开销上，与主键无关（去 PK 同样 ~30s/5000 行）。这也是 0.10.33
+> 回补每天 ~5 分钟的主因。
+
+- `storage/warehouse/sink`：新增 `_load_rows`——元组行 → 临时 CSV → DuckDB
+  `read_csv` 批量导入（`_write_parquet_atomic` 与 `write_codes` 共用）
+- 实测（fnOS，5176 行）：写入 **16.6s → 0.10s（≈160×）**；`write_codes`
+  24s → 亚秒级。等价性核对：产出 parquet 逐行一致（含 NULL / bool /
+  DATE / 中文含逗号名）
+- 语义保持：None → 空字段（NULL）、bool → true/false、csv 模块负责转义
+- 测试：`test_load_rows_preserves_nulls_bools_and_dates` +
+  `test_write_codes_csv_bulk_roundtrip`；Python 全量 402 全绿
+- 收益面：日常 16:40 沉淀（每日全市场写库）、历史 backfill、周/月聚合落盘
+- 关联数据修复（0.10.33 部署期）：0907/0908/0909 缺失 + 0910 残缺已 backfill
+  补齐（逐日 5173~5176 行）；其中 0908 曾被坏逻辑误标 `empty:` 标记致回补跳过，
+  已清除该标记后补回
+
 ## [0.10.33] — 2026-09-10（修复：新引擎批量 SDK 区间语义变更——全市场快照退化成 ~50~100 只）
 
 > 用户报「驾驶舱仍有告警」。实机核查（fnOS）：**告警为真**——仓库 `v_daily`
