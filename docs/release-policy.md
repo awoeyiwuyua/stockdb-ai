@@ -93,3 +93,27 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 4. MCP `warehouse_list_tables` + `run_sql` 任查一条 v_daily → 视图注册健康
    （schema/存量数据问题最先在这里炸）；
 5. `/api/alerts` 当日新增 → 部署触发的降级告警会在这里出现。
+
+### 6.4 fork 上游同步（消除「N commits behind」，零内容变更）
+
+> 本仓库是 `hello245m/free-stockdb` 的 GitHub fork（但为 docker/webui 封装与
+> 私有研究，**不追上游代码**）。GitHub 分支页会拿我们的 `main` 比上游 `main`，
+> 上游有新提交即显示「N commits behind」。消除方式（2026-09-10 首次执行）：
+
+```bash
+git remote add upstream https://github.com/hello245m/free-stockdb.git  # 一次性
+git remote set-url --push upstream no_push_allowed        # 结构上禁止误推上游
+git fetch upstream main
+git merge -s ours upstream/main --no-ff -m "chore(fork): 合并上游 main（-s ours，零内容变更）"
+git push origin main   # 本仓库有规则集要求走 PR → 推分支 + PR 合并
+```
+
+- **`-s ours`**：记录上游为祖先（behind 归零），整棵树保持本仓库版本，**零内容
+  变更**（`git diff HEAD^1 HEAD` 应为空）。上游 5 提交仅改 README，本仓库 README
+  已重写为自己项目说明，常规合并必冲突且**不应采纳上游内容**——故用 ours
+- **只动本仓库**，上游不受影响；`upstream` 的 pushurl 置为 `no_push_allowed`
+  双保险
+- 本仓库 main 有规则集「Changes must be made through a pull request」——`-s ours`
+  的合并需推分支走 PR（GitHub branch-protection API 对规则集不显示，以推送报错
+  为准）
+- **复发即重跑**：上游后续再有提交，behind 会重新出现，重复本节操作
