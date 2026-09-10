@@ -51,7 +51,7 @@ STOCKDB_PAUSE: Path = Path(os.environ.get("STOCKDB_PAUSE_FLAG", "/data/.stockdb-
 STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"))
 
 # 版本号（发布物标识，见 docs/release-policy.md）
-WEBUI_VERSION: str = "0.10.34"
+WEBUI_VERSION: str = "0.10.35"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致
@@ -72,6 +72,11 @@ def auction_env_time(name: str, default: str) -> str:
 
 AUCTION_COLLECT_TIME: str = auction_env_time("AUCTION_COLLECT_TIME", "09:26")
 AUCTION_CLOSE_TIME: str = auction_env_time("AUCTION_CLOSE_TIME", "16:30")
+# 0.10.35：竞价采集时间窗上界（HH:MM）——采集器数据源的「今开位」实际取当前价，
+# 仅当 09:26 前后 current==open 才等价于竞价价；过了连续竞价时段（09:30 开盘）再采
+# 会拿到盘中/收盘价冒充开盘价，对账必然全红（2026-09-10 容器反复重启致晚间采集
+# 实证）。采集仅在 [AUCTION_COLLECT_TIME, AUCTION_COLLECT_DEADLINE] 内执行。
+AUCTION_COLLECT_DEADLINE: str = auction_env_time("AUCTION_COLLECT_DEADLINE", "09:30")
 
 # ---- 仓库层（0.10.0 列式仓库：Parquet 事实沉淀 + DuckDB 查询，D12） ----
 # 总开关（回滚演练用）：0 = 调度/接口整体关闭，53 个既有工具不受影响
