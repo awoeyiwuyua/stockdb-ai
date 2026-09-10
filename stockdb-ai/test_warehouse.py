@@ -4,6 +4,7 @@ W1：availability 探针（duckdb 缺失/开关关闭降级）+ 层规则（serv
 W2：layout 分区规则 / sink 幂等·原子·独立可读·护栏 / catalog watermark 只前进。
 后续批次：W3 engine/run_sql、W4 沉淀任务、W5 MCP 工具。
 """
+import datetime
 import json
 import pathlib
 import sys
@@ -268,6 +269,41 @@ class WarehouseSinkTest(unittest.TestCase):
             )
         finally:
             con.close()
+
+    def test_write_codes_csv_bulk_roundtrip(self):
+        """0.10.34：codes 走 CSV 批量导入（替代逐行 executemany）后落库一致。
+
+        含特殊字符（逗号/引号）名与空名，验证 csv 转义 + NULL 往返。
+        """
+        payload = [{"code": "600000", "name": "浦发银行,股份"},
+                   {"code": "000001", "name": '带"引号"名'},
+                   {"code": "300750", "name": None}]
+        r = sink.write_codes(self.root, payload)
+        self.assertEqual(r["rows"], 3)
+        con = duckdb.connect(str(layout.duckdb_path(self.root)))
+        try:
+            got = dict(con.execute("SELECT code, name FROM codes").fetchall())
+        finally:
+            con.close()
+        self.assertEqual(got["600000"], "浦发银行,股份")
+        self.assertEqual(got["000001"], '带"引号"名')
+        self.assertIsNone(got["300750"])
+
+    def test_load_rows_preserves_nulls_bools_and_dates(self):
+        """0.10.34：CSV 批量导入的解析语义与逐行绑定一致——None→NULL、
+        bool→BOOLEAN、DATE 文本→DATE、浮点原值（回归 160× 提速改动）。"""
+        cols = (("code", "TEXT"), ("date", "DATE"), ("flag", "BOOLEAN"),
+                ("val", "DOUBLE"), ("name", "TEXT"))
+        rows = [("600000", "2026-09-08", True, 1.25, "浦发银行"),
+                ("000001", "2026-09-08", False, None, None)]
+        con = duckdb.connect()
+        try:
+            sink._load_rows(con, "t", rows, cols)
+            got = con.execute("SELECT * FROM t ORDER BY code").fetchall()
+        finally:
+            con.close()
+        self.assertEqual(got[0], ("000001", datetime.date(2026, 9, 8), False, None, None))
+        self.assertEqual(got[1], ("600000", datetime.date(2026, 9, 8), True, 1.25, "浦发银行"))
 
     def test_empty_write_advances_watermark_only(self):
         result = sink.write_daily(self.root, "20260826", [])
