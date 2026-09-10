@@ -1523,6 +1523,75 @@ class _AuctionBackfillTests(_OpsTestCase):
         self.assertIn("running", payload["backfill"])
 
 
+class AuctionTriggerWindowTest(_OpsTestCase):
+    """0.10.35 打板触发时间窗 + 守卫持久化（2026-09-10 晚间误采收盘价实证）。
+
+    根因：采集源取的是「当前价」，仅 09:26 前后 current==open 才等于竞价价。
+    旧调度 now>=09:26 无上界 + 守卫纯内存（重启即清空）→ 晚间重启再次采集，
+    采到收盘价冒充开盘价，16:30 对账全红（37 条误报）。
+    """
+
+    at_due = staticmethod(auction_tasks_mod._auction_due)
+
+    def setUp(self):
+        super().setUp()
+        # SCHEDULE_FILE 是 import 期从真实 DATA_DIR 求值的常量，DATA_DIR patch 盖不住
+        # （同 StaleSelfHealTest）——守卫落盘必须指向临时文件，避免污染真实 dev 库。
+        self._sched_patch = mock.patch.object(
+            app, "SCHEDULE_FILE", Path(self.tmp) / "sync_schedule.json")
+        self._sched_patch.start()
+        self.addCleanup(self._sched_patch.stop)
+
+    def test_collect_only_within_window(self):
+        """采集仅在 [09:26, 09:30] 触发；过窗不再补采（宁缺勿错）。"""
+        g = {"collect": False, "close": False}
+        self.assertIsNone(self.at_due("09:25", g))
+        self.assertEqual(self.at_due("09:26", g), "collect")
+        self.assertEqual(self.at_due("09:28", g), "collect")
+        self.assertEqual(self.at_due("09:30", g), "collect")
+        # 09:31 起超窗 → 当日不再采（关键回归：旧语义此刻仍会采集）
+        self.assertIsNone(self.at_due("09:31", g))
+        self.assertIsNone(self.at_due("15:00", g))
+        # 晚间 21:xx 重启（正是 09-10 误采时刻）→ 不得触发采集（只可触发收口）
+        self.assertNotEqual(self.at_due("21:56", g), "collect")
+
+    def test_collect_guard_blocks_repeat(self):
+        """采集守卫已置位 → 当日不再触发（防重复）。"""
+        self.assertIsNone(self.at_due("09:27", {"collect": True, "close": False}))
+
+    def test_close_after_threshold(self):
+        """收口 16:30 起任意时刻触发（对账用 K 线开盘价，与时刻无关）。"""
+        self.assertIsNone(self.at_due("16:29", {"collect": True, "close": False}))
+        self.assertEqual(self.at_due("16:30", {"collect": True, "close": False}), "close")
+        self.assertEqual(self.at_due("21:00", {"collect": True, "close": False}), "close")
+        self.assertIsNone(self.at_due("21:00", {"collect": True, "close": True}))
+
+    def test_guard_persisted_roundtrip(self):
+        """守卫落盘后可读回（进程重启不再清空——0.10.35 核心修复）。"""
+        app._mark_auction_fired("collect", "20260910")
+        self.assertIn("20260910", app._auction_fired_dates("collect"))
+        self.assertNotIn("20260910", app._auction_fired_dates("close"))
+        # 重载 schedule（模拟重启后从磁盘读）→ 守卫仍在
+        cfg = app.load_schedule()
+        self.assertIn("20260910", cfg["auction_fired"]["collect"])
+
+    def test_guard_state_merges_persisted(self):
+        """_auction_guard_state 合并落盘守卫：重启后 collect 仍视为已触发。"""
+        app._mark_auction_fired("collect", "20260911")
+        # 装配注入（_wire 在 main 装配；测试显式绑定，或用类级已绑定）
+        auction_tasks_mod.schedule_fired_provider = app._auction_fired_dates
+        with mock.patch.object(auction_tasks_mod, "_auction_fired", {}):
+            g = auction_tasks_mod._auction_guard_state("20260911")
+        self.assertTrue(g["collect"])
+        self.assertFalse(g["close"])
+
+    def test_guard_caps_dates(self):
+        """守卫日期仅保留最近 14 个（防累积）。"""
+        for i in range(20):
+            app._mark_auction_fired("collect", f"202609{i:02d}")
+        self.assertEqual(len(app._auction_fired_dates("collect")), 14)
+
+
 class StaleSelfHealTest(_OpsTestCase):
     """0.10.13 数据晚到自愈三件套（0.10.6 试运行 08-28 实证：镜像晚于 15:50 发布，
     定时同步 exit 0 但数据未前进，挂到次日）：

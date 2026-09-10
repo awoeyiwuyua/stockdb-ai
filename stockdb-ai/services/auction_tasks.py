@@ -64,6 +64,11 @@ except Exception as _auction_import_exc:  # noqa: BLE001 - 任一模块缺失时
 
 
 _auction_fired: dict = {}  # 日级防重触发守卫：{date: {"collect": bool, "close": bool}}
+# 0.10.35：守卫落盘（config.schedule_fired_provider 注入，见 app.py 装配）——
+# 此前纯内存，进程重启即清空 → 晚间重启后 now>=09:26 再次触发采集，采到收盘价
+# 冒充开盘价（2026-09-10 实证）。注入 None（未装配/测试）时退化为原内存语义。
+schedule_fired_provider = None  # (kind) -> set[str]；kind ∈ {"collect","close"}
+schedule_fired_marker = None    # (kind, date) -> None（落盘）
 _auction_backfill_state: dict = {"running": False, "started": None, "finished": None,
                                  "result": None}  # 回填任务状态（0.8.2 异步化 + 单飞防重）
 # 0.9.11：回填单飞守卫锁（检查+置位原子化，防并发双份回填）与序列写锁
@@ -621,15 +626,58 @@ def _daily_backup() -> None:
         pass
 
 
+def _auction_guard_state(date: str) -> dict:
+    """当日触发守卫状态（合并内存 + 落盘）。落盘来源注入不可用/异常时静默用内存。"""
+    guard = _auction_fired.setdefault(date, {"collect": False, "close": False})
+    if schedule_fired_provider is not None:
+        for kind in ("collect", "close"):
+            try:
+                if date in (schedule_fired_provider(kind) or set()):
+                    guard[kind] = True
+            except Exception:  # noqa: BLE001 - 读守卫失败退化为内存语义
+                pass
+    return guard
+
+
+def _mark_auction_fired(date: str, kind: str) -> None:
+    """置位当日触发守卫（内存 + 落盘）。落盘失败不阻塞（内存仍生效，重启前不重触发）。"""
+    guard = _auction_fired.setdefault(date, {"collect": False, "close": False})
+    guard[kind] = True
+    if schedule_fired_marker is not None:
+        try:
+            schedule_fired_marker(kind, date)
+        except Exception as exc:  # noqa: BLE001 - 落盘失败不阻塞任务结论
+            log(f"📈 打板触发守卫落盘失败（{kind} {date}）: {exc}")
+
+
+def _auction_due(now_hm: str, guard: dict) -> str | None:
+    """本次调度应触发的任务：\"collect\" / \"close\" / None（纯函数，供调度与测试）。
+
+    采集窗口 [AUCTION_COLLECT_TIME, AUCTION_COLLECT_DEADLINE]（默认 09:26~09:30）；
+    收口 now >= AUCTION_CLOSE_TIME（默认 16:30）。守卫已置位则不重复。
+    """
+    if (config.AUCTION_COLLECT_TIME <= now_hm <= config.AUCTION_COLLECT_DEADLINE
+            and not guard.get("collect")):
+        return "collect"
+    if now_hm >= config.AUCTION_CLOSE_TIME and not guard.get("close"):
+        return "close"
+    return None
+
+
 def auction_scheduler_loop() -> None:
     """打板竞价调度线程：每 2s 轮询，严格交易日触发采集/收口（独立线程，与现有调度并列）。
 
-    触发语义：now>=AUCTION_COLLECT_TIME（默认 09:26）且当日 collect 未触发 → 线程内
-    同步执行 auction_run_collect；now>=AUCTION_CLOSE_TIME（默认 16:30）且当日 close
-    未触发 → 同步执行 auction_run_close；任务完成后守卫置位（防重复触发）。
-    任务函数内部单块 try/except 降级不抛异常；即便硬异常也经 finally 置位守卫，
-    避免 2s 轮询空转重试。进程重启后内存守卫清空，同日可能再触发一次——采集/收口
-    均按 key 覆盖写/回写覆盖，天然幂等，不产生重复数据。
+    触发语义（0.10.35 时间窗 + 持久守卫）：
+      - 采集：AUCTION_COLLECT_TIME ≤ now ≤ AUCTION_COLLECT_DEADLINE（默认 09:26~09:30）
+        且当日 collect 未触发 → 执行 auction_run_collect。**上界关键**：采集源取的是
+        「当前价」，仅 09:26 前后 current==open 才等于竞价价；过 09:30 再采会采到盘中/
+        收盘价冒充开盘价（2026-09-10 实证全红）。超窗不再补采——当日竞价价不可回溯，
+        宁可缺数据也不写错数据。
+      - 收口：now >= AUCTION_CLOSE_TIME（默认 16:30）且当日 close 未触发 → 执行
+        auction_run_close（对账/指标用 K 线开盘价，16:30 任何时刻执行均正确）。
+      守卫 _auction_guard_state/_mark_auction_fired 内存 + 落盘双份（0.10.35）——
+      进程重启不再清空，杜绝晚间重启重复触发（旧语义正是该缺口）。
+      任务函数内部单块 try/except 降级不抛异常；即便硬异常也经 finally 置位守卫。
     """
     while True:
         try:
@@ -639,23 +687,24 @@ def auction_scheduler_loop() -> None:
                 continue
             today = dt_now.strftime("%Y%m%d")
             now_hm = dt_now.strftime("%H:%M")
-            guard = _auction_fired.setdefault(today, {"collect": False, "close": False})
-            if now_hm >= config.AUCTION_COLLECT_TIME and not guard["collect"]:
+            guard = _auction_guard_state(today)
+            due = _auction_due(now_hm, guard)
+            if due == "collect":
                 try:
                     res = auction_run_collect()
                     log(f"📊 打板竞价采集完成（{today}）: ok={res.get('ok')} "
                         f"collected={res.get('collected')} errors={res.get('errors_count')} "
                         f"reason={res.get('reason') or ''}")
                 finally:
-                    guard["collect"] = True  # 完成后置位：当日不重复触发
-            elif now_hm >= config.AUCTION_CLOSE_TIME and not guard["close"]:
+                    _mark_auction_fired(today, "collect")  # 完成即置位：当日不重复触发
+            elif due == "close":
                 try:
                     res = auction_run_close()
                     log(f"📊 打板收口对账完成（{today}）: ok={res.get('ok')} "
                         f"list={res.get('list_count')} reconciled={res.get('reconciled')} "
                         f"diff_alerts={res.get('diff_alerts')} reason={res.get('reason') or ''}")
                 finally:
-                    guard["close"] = True
+                    _mark_auction_fired(today, "close")
         except Exception as exc:  # noqa: BLE001 - 调度线程异常不退出（与 scheduler_loop 同级容错）
             log(f"📈 打板调度线程异常: {exc}")
         time.sleep(2)

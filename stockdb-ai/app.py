@@ -336,7 +336,8 @@ def _default_schedule() -> dict:
     return {"enabled": False, "times": ["15:30"], "trading_only": True,
             "fired": {}, "retried": {}, "retry_pending": None,
             "stale_retried": {}, "stale_retry_pending": None,
-            "last_trigger": None, "next_trigger": None}
+            "last_trigger": None, "next_trigger": None,
+            "auction_fired": {}}  # 0.10.35：打板采集/收口日级触发守卫（持久化）
 
 
 # ==================== A 股交易日历（休市日表，数据截至 2026 年） ====================
@@ -438,6 +439,9 @@ def load_schedule() -> dict:
     if not isinstance(stale_retried, dict):
         stale_retried = {}
     srp = data.get("stale_retry_pending")
+    auction_fired = data.get("auction_fired")
+    if not isinstance(auction_fired, dict):
+        auction_fired = {}
     norm_times = _normalize_times(times)
     return {
         "enabled": bool(data.get("enabled")),
@@ -449,6 +453,7 @@ def load_schedule() -> dict:
         "stale_retried": stale_retried,
         "stale_retry_pending": srp if isinstance(srp, str) else None,
         "last_trigger": last,
+        "auction_fired": auction_fired,
         "next_trigger": compute_next_trigger(norm_times, trading_only=bool(data.get("trading_only", True))),
     }
 
@@ -477,6 +482,8 @@ def save_schedule(enabled: bool, times, trading_only: bool = True) -> dict:
             cfg["stale_retried"] = old.get("stale_retried") if isinstance(old.get("stale_retried"), dict) else {}
             cfg["stale_retry_pending"] = (old.get("stale_retry_pending")
                                           if isinstance(old.get("stale_retry_pending"), str) else None)
+            cfg["auction_fired"] = (old.get("auction_fired")
+                                    if isinstance(old.get("auction_fired"), dict) else {})
             cfg["last_trigger"] = old.get("last_trigger") if isinstance(old.get("last_trigger"), dict) else None
             cfg["next_trigger"] = compute_next_trigger(cfg["times"], trading_only=trading_only)
             _write_schedule(cfg)
@@ -517,6 +524,40 @@ def _mark_fired(t: str) -> None:
             _write_schedule(cfg)
         except Exception as exc:
             log(f"⏰ 定时触发标记失败: {exc}")
+
+
+def _auction_fired_dates(kind: str) -> set:
+    """打板触发守卫：kind ∈ {"collect","close"} → 已触发日期集合（0.10.35）。
+
+    纯读；解析失败返回空集（退化为内存守卫语义，不误触发由调度侧兜底）。
+    """
+    try:
+        cfg = load_schedule()
+        v = (cfg.get("auction_fired") or {}).get(kind)
+        return set(v) if isinstance(v, list) else set()
+    except Exception:
+        return set()
+
+
+def _mark_auction_fired(kind: str, date: str) -> None:
+    """置位打板触发守卫并落盘（0.10.35）：auction_fired[kind] += [date]。
+
+    保留最近 14 天（防累积）；读写整体持 _schedule_lock，避免与调度线程/配置保存并发丢更新。
+    """
+    with _schedule_lock:
+        try:
+            cfg = load_schedule()
+            af = dict(cfg.get("auction_fired") or {})
+            dates = af.get(kind)
+            if not isinstance(dates, list):
+                dates = []
+            if date not in dates:
+                dates.append(date)
+            af[kind] = dates[-14:]  # 仅留最近 14 个日期
+            cfg["auction_fired"] = af
+            _write_schedule(cfg)
+        except Exception as exc:
+            log(f"⏰ 打板触发守卫落盘失败（{kind} {date}）: {exc}")
 
 
 def _mark_last_trigger(key: str, t: str | None = None, retry: bool = False) -> None:
@@ -2114,6 +2155,10 @@ def _wire_auction_tasks() -> None:
     # RESEARCH_STORE 环境变量切换；应用层只依赖 ResearchStore 接口）
     from storage.research_factory import get_research_store as _get_research_store
     _auction_tasks.research_store = _get_research_store()
+    # 0.10.35：打板触发守卫持久化（落 sync_schedule.json）——此前纯内存，进程重启
+    # 即清空，晚间重启会再次触发采集并采到收盘价冒充开盘价（2026-09-10 实证）。
+    _auction_tasks.schedule_fired_provider = _auction_fired_dates
+    _auction_tasks.schedule_fired_marker = _mark_auction_fired
 
 
 def _wire_warehouse_tasks() -> None:

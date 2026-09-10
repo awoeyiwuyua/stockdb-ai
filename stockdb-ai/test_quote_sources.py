@@ -8,9 +8,13 @@ from storage.providers import quote_sources as AC
 
 
 def _tencent_line(code: str, name: str, open_: str, prev: str, vol: str = "100",
-                  amt: str = "0") -> str:
-    """按实现契约构造腾讯行：字段位 1=代码 2=名称 3=今开 4=昨收 6=量 37=额。"""
-    fields = ["1", code, name, open_, prev, "10.60", vol]
+                  amt: str = "0", current: str = "0") -> str:
+    """按真实腾讯行布局构造（0.10.35 实测校准，split("~") 后 0-based）：
+
+    0=市场 1=名称 2=代码 3=当前价 4=昨收 5=今开 6=量 … 37=额。
+    current 默认为 "0"（与今开区分）：回归用「当前价 ≠ 今开」验证取值位正确。
+    """
+    fields = ["51", name, code, current, prev, open_, vol]
     fields += ["0"] * 30          # 7..36 占位
     fields += [amt, "0"]          # 37=成交额, 38=占位
     prefix = "sh" if code.startswith(("6", "9")) else "sz"
@@ -41,6 +45,19 @@ class TencentParseTests(unittest.TestCase):
         self.assertEqual(p["code"], "600000")
         self.assertAlmostEqual(p["open_price"], 10.50)
         self.assertAlmostEqual(p["prev_close"], 10.00)
+
+    def test_open_is_field5_not_current_field3(self):
+        """0.10.35 回归：今开取第 5 位，而非第 3 位（当前价）——2026-09-10 实证。
+
+        旧实现取第 3 位（当前价），仅 09:26 前后 current==open 才恰好正确；
+        过了连续竞价时段再采会拿盘中/收盘价冒充开盘价，对账全红。此处构造
+        「当前价 11.85 ≠ 今开 11.68」的收盘后形态，断言取到的是今开。
+        """
+        line = _tencent_line("000001", "平安银行", "11.68", "11.70", current="11.85")
+        p = AC._parse_tencent_line(line)
+        self.assertAlmostEqual(p["open_price"], 11.68)   # 今开（第 5 位）
+        self.assertAlmostEqual(p["prev_close"], 11.70)
+        self.assertNotEqual(p["open_price"], 11.85)      # 不得取当前价
 
     def test_suspended_open_empty(self):
         p = AC._parse_tencent_line(_tencent_line("600000", "X", "", "10.00"))
