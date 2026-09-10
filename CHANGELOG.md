@@ -4,6 +4,28 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.31] — 2026-09-10（修复：上游重传 0.3.5 资产致 pin 失效——重建镜像 sha256 校验必失败）
+
+> 排查「fork 落后上游 5 个提交」时发现：上游 2026-09-08 在**同一 tag**（测试版本
+> 0.3.5）下重传了发布资产（`created_at=09-08T10:21Z`），双平台 tar 哈希随之变化。
+> 0.10.28/0.10.30 所 pin 的 09-07 哈希（amd64 `64bc77f2…` / arm64 `0439995f…`）
+> 已失效——URL 仍可下载（不 404），但重建镜像会在 `sha256sum -c` 处失败，
+> **0.10.30 的部署会卡在构建阶段**。
+
+- **重 pin 双平台哈希**（`docker/Dockerfile`）：amd64 `9ec47250…` / arm64
+  `c9aed3db…`；三方独立核对一致（上游 `.SHA256.txt`、GitHub API asset digest、
+  本机下载实测 `sha256sum`）
+- 内容核对：同 tag、同 `sync_client_0.3.5` 协议串、`stockdb` 二进制仍含
+  `msgpack`/`x-msgpack` 标识（协议未变，0.10.29 适配依旧有效）；`stockdb` 服务端
+  二进制重建于 09-08，同步器 `数据更新` 仍为 09-06；包内布局（`stockdb/stockdb`、
+  `数据更新`、`pybao/`、`sync_url.txt`）与 Dockerfile 各阶段预期一致
+- **上游 5 个落后提交核对**：`74a26af`（0.3.5 链接）+ 4 个 README 链接提交，
+  **全部仅改 README.md**，无源码/协议/格式变更——无需同步代码，只需刷新 pin
+- `docs/release-policy.md` 雷区表「release 资产被删/替换」行补 09-08 同 tag
+  重传实例（URL 不 404、哈希变，症状与 404 不同）
+- 验证：本机解包 + 二进制协议串核对；Python 全量 398 全绿（代码零改动）
+- 部署动作：与 0.10.30 同批——fnOS 本地构建 `stockdb-ai:0.10.31` → `docker compose up -d`
+
 ## [0.10.30] — 2026-09-10（修复：MCP 引擎取址与 config 分叉——隧道地址超时致打板/仓库/MCP 全链路失败）
 
 > **fnOS 实机报错根因**（2026-09-10 定位）：实机 webui 0.10.29 / 引擎 0.3.5 /
