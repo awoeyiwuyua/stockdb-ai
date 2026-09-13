@@ -1888,6 +1888,85 @@ def evening_stale_alert(now_dt: datetime | None = None, *, alerts=None) -> bool:
     return False
 
 
+def _env_version_tag() -> str | None:
+    """构建期注入的引擎版本（Dockerfile 0.10.37 起 ARG VERSION → ENV IMAGE_TAG）。
+
+    环境变量为空串时返回 None（`A or B` 链会把 "" 当结果带出来 → 类型污染）；
+    IMAGE_TAG 与 STOCKDB_VERSION 两者取先有值者（后者为历史别名）。
+    """
+    for name in ("IMAGE_TAG", "STOCKDB_VERSION"):
+        val = (os.environ.get(name) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def upstream_status() -> dict:
+    """上游引擎版本状态（0.10.37 B）：单一判定源，供告警与 /api/diag 共用。
+
+    判定 = 上游最新 release tag > 运行中引擎版本（同类版本线）：
+      - 引擎版本优先读启动日志，其次扫引擎二进制版本字面量
+        （storage.providers.free_stockdb.engine_version_info；引擎无版本接口、
+        日志只落 ERROR 级，故双来源）；
+      - 都拿不到时退回构建期注入的 IMAGE_TAG（Dockerfile ARG VERSION）；
+      - 三者都拿不到 → kind="unknown"（无法比对，不等于"已最新"）。
+
+    kind：up_to_date / update_available / probe_failed / unknown
+    纯只读、不抛（探针/日志异常一律降级）。
+    """
+    try:
+        upstream = fetch_upstream_release()
+    except Exception:  # noqa: BLE001 - 探针异常按不可达处理
+        upstream = None
+    engine = None
+    try:
+        from storage.providers.free_stockdb import engine_version_info
+        engine = engine_version_info()
+    except Exception:  # noqa: BLE001
+        engine = None
+    engine_tag = (engine or {}).get("base") or _env_version_tag()
+    engine_display = (engine or {}).get("version") or engine_tag
+    base = {"engine_version": engine_display, "engine_tag": engine_tag,
+            "upstream": upstream}
+    if upstream is None or not upstream.get("tag_name"):
+        return {**base, "kind": "probe_failed",
+                "message": ("上游版本探测失败（GitHub 不可达或超出重试）："
+                            "本次无法判断是否有新版")}
+    up_tag = upstream["tag_name"]
+    ut = _version_tuple(up_tag)
+    ct = _version_tuple(engine_tag) if engine_tag else None
+    if ut is None or ct is None:
+        return {**base, "kind": "unknown",
+                "message": (f"版本号无法解析（上游 {up_tag!r} / 当前引擎 "
+                            f"{engine_tag!r}）——无法判断是否有新版")}
+    if ut > ct:
+        return {**base, "kind": "update_available",
+                "message": (f"上游引擎已发布 {up_tag}（当前运行 "
+                            f"{engine_display or engine_tag}），建议升级镜像"
+                            f"（重新 pin ARG VERSION + SHA256 后重建）")}
+    return {**base, "kind": "up_to_date",
+            "message": f"引擎已是最新（上游最新 {up_tag}，当前 {engine_display or engine_tag}）"}
+
+
+def upstream_release_alert(*, alerts=None, status: dict | None = None) -> str:
+    """上游版本看门狗（0.10.37 D）：探针失败 / 发现新版 / 版本号不可判定 → 告警。
+
+    此前 `stale` 判定恒 false（拿面板版本与引擎 tag 比较），且探针失败静默：
+    上游发新版、同名 tag 重传资产、GitHub 不可达三种情况都不会有人被叫醒
+    （NAS 实证：0.3.5 同 tag 重传是靠同步全线失败才发现的）。
+    本函数把三种情况接进告警中心（source="上游"，当日去重防刷屏）；
+    条件恢复（回到 up_to_date）时撤回同源告警——与数据类告警同一自愈纪律。
+    返回 status["kind"]（测试用）。
+    """
+    target = alerts if alerts is not None else _get_alerts()
+    st = status if status is not None else upstream_status()
+    kind = st.get("kind")
+    if kind in ("update_available", "probe_failed", "unknown"):
+        target.add("warning", "上游", st["message"])
+    else:
+        target.resolve("上游", "上游")
+    return kind
+
 def ops_watchdog_loop(interval: float = 60.0) -> None:
     """运营支撑看门狗线程：周期投递生产告警（告警中心的生产接线点）。
 
@@ -1896,7 +1975,9 @@ def ops_watchdog_loop(interval: float = 60.0) -> None:
       数据新鲜度：data_latest_date() 探针失败，或今日（交易日）滞后 > 阈值
       → data_freshness_alert 投递 warning（当日去重，不会刷屏）；
       晚间兜底（0.10.13）：交易日 21:00 后数据仍未到应至交易日 →
-      evening_stale_alert 投递 warning。
+      evening_stale_alert 投递 warning；
+      上游版本（0.10.37 D）：上游发新版 / 探针失败 / 版本号不可判定 →
+      upstream_release_alert 投递 warning（探针自带 1h TTL，不额外压 GitHub）。
     看门狗自身异常绝不退出线程（stderr 提示后继续，与调度线程同级容错）。
     """
     time.sleep(30)  # 预热：等待首次数据探针/日历就绪，避免进程启动瞬间误报
@@ -1909,6 +1990,10 @@ def ops_watchdog_loop(interval: float = 60.0) -> None:
             evening_stale_alert()
         except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
             _warn("晚间兜底告警评估异常（已忽略）")
+        try:
+            upstream_release_alert()
+        except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
+            _warn("上游版本看门狗评估异常（已忽略）")
         time.sleep(interval)
 
 

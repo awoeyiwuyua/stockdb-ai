@@ -690,6 +690,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 - 上游探针自身已降级，双保险
             upstream = None
         upstream_ok = bool(upstream and upstream.get("tag_name"))
+        # 0.10.37 D：核对诊断里的版本标注与真实判定一致（发新版/探针失败/不可判定
+        # 都在 note 里显式说明，不再只写「最新 release：<tag>」让巡检误判为已最新）
+        try:
+            up_status = app.upstream_status()
+        except Exception:  # noqa: BLE001
+            up_status = {"kind": "unknown", "message": "上游状态评估异常"}
+        up_note = ("不可达（网络受限时降级提示，不影响本机数据）" if not upstream_ok
+                   else f"最新 release：{upstream['tag_name']}｜{up_status.get('message', '')}")
 
         cs = None
         try:
@@ -709,8 +717,7 @@ class Handler(BaseHTTPRequestHandler):
 
         checks = [
             {"name": "upstream_github", "label": "上游 GitHub", "ok": upstream_ok,
-             "note": (f"最新 release：{upstream['tag_name']}" if upstream_ok
-                      else "不可达（网络受限时降级提示，不影响本机数据）")},
+             "note": up_note},
             {"name": "stockdb_service", "label": "stockdb 服务", "ok": stockdb_ok,
              "note": ((f"{cs.get('status')}：{cs.get('note', '')}；" if cs else "状态获取失败；")
                       + (f"上游闸口：熔断开（{_stockdb_breaker['fails']} 次失败，降级中）"
@@ -728,6 +735,7 @@ class Handler(BaseHTTPRequestHandler):
             "webui_version": WEBUI_VERSION,
             "ui_mode": WEBUI_UI,
             "image_tag": os.environ.get("IMAGE_TAG") or os.environ.get("STOCKDB_VERSION"),
+            "engine_version": (up_status.get("engine_version")),
             "started": datetime.fromtimestamp(_webui_started).strftime("%Y-%m-%d %H:%M:%S"),
             "uptime_seconds": int(time.time() - _webui_started),
             "data_dir": str(app.DATA_DIR),
@@ -863,23 +871,45 @@ def _ui_index() -> str:
         return f.read_text(encoding="utf-8") if f else _spa_index()
     return _spa_index()
 def version_payload() -> dict:
-    """版本信息载荷（_version 与 /api/overview 共用）。"""
+    """版本信息载荷（_version 与 /api/overview 共用）。
+
+    0.10.37（B）判定修正：stale = **上游最新 tag > 运行中引擎版本**（同类版本线）。
+    此前 cur_src 取 IMAGE_TAG/WEBUI_VERSION 兜底，等于拿「面板版本」比「上游引擎 tag」
+    （(0,3,6) vs (0,10,36)）→ 上游发布新版永远判为不落后、`stale` 恒 false（NAS 实证）。
+    engine 版本经 storage.providers.free_stockdb.engine_version_info 读引擎启动日志；
+    读不到时退回 IMAGE_TAG（构建期 ARG VERSION 注入），两者都无 → 无法比对
+    （`stale=false` + `msg` 说明），由 /api/diag 与看门狗告警兜底（D）。
+    """
     upstream = app.fetch_upstream_release()
-    image_tag = os.environ.get("IMAGE_TAG") or os.environ.get("STOCKDB_VERSION") or None
+    image_tag = app._env_version_tag()  # 空串→None（0.10.37：类型不污染下游判定）
+    try:
+        from storage.providers.free_stockdb import engine_version_info
+        engine = engine_version_info()
+    except Exception:  # noqa: BLE001 - 版本探测失败不影响版本载荷
+        engine = None
+    engine_ver = (engine or {}).get("base")
+    engine_display = (engine or {}).get("version")
+    cur_src = engine_ver or image_tag          # 同类版本线优先：引擎实测版本
     stale = False
     msg = ""
     if upstream is not None and upstream.get("tag_name"):
         up_tag = upstream["tag_name"]
-        cur_src = image_tag if image_tag else WEBUI_VERSION
         ut = _version_tuple(up_tag)
-        ct = _version_tuple(cur_src)
+        ct = _version_tuple(cur_src) if cur_src else None
         if ut and ct and ut > ct:
             stale = True
-            msg = (f"上游已发布 {up_tag}（当前{'镜像' if image_tag else '面板'} "
-                   f"{cur_src}），建议升级")
+            msg = (f"上游引擎已发布 {up_tag}（当前运行 "
+                   f"{engine_display or image_tag or cur_src}），建议升级镜像（"
+                   f"docker/Dockerfile 的 ARG VERSION + SHA256 重新 pin 后重建）")
+    elif upstream is None:
+        # D：探针失败不再静默——显式标注降级原因，前端/巡检据此判断
+        msg = "上游版本探测失败（GitHub 不可达或超出重试），本次无法判断是否有新版"
     return {
         "webui": {"version": WEBUI_VERSION},
         "image": {"tag": image_tag},
+        "engine": {"version": engine_display, "base": engine_ver,
+                   "source": (engine or {}).get("source"),
+                   "detail": (engine or {}).get("detail")},
         "upstream": upstream,
         "stale": stale,
         "msg": msg,

@@ -4,6 +4,43 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.37] — 2026-09-13（修复：上游新版探测——A/B/D）
+
+> 用户问「上游 stockdb 发新版，webui 能探测到吗」。逐层核对结论：**探得到、但永远不告警**。
+> 现有判定拿 `IMAGE_TAG`（**Dockerfile 从未注入** → 容器内恒 None，回落到 `WEBUI_VERSION`）
+> 与上游引擎 tag 比大小 → `(0,3,6) > (0,10,36) = False`，**上游发 0.3.6/0.4.0 一律判"不落后"**，
+> 只有上游号超过面板号（0.11.0+）才会亮；`/api/version` 的 `msg` 恒空、探针失败静默留空。
+> 本版修 A（版本来源）、B（同类版本线判定）、D（告警与显式降级）；C（同名 tag 重传资产
+> 指纹）留待下一批——0.3.5 同 tag 重传两次都是靠同步全线失败才发现的。
+
+- **A｜镜像 tag 注入**：`docker/Dockerfile` 新增 `ENV IMAGE_TAG=${VERSION}`（引擎版本，
+  本地 build 与 CI build 同源）；`/api/version` 的 `image.tag` 不再恒 null。
+  同时新增 `app._env_version_tag()`：空串→None（`A or B` 链带出 `""` 会污染下游类型判断）
+- **B｜判定改同类版本线**：新增 `storage.providers.free_stockdb.engine_version_info()`——
+  读引擎启动日志（`STOCKDB_LOG_FILE`）最后一条 `stockdb-server 0.3.5-stockdb` 取**运行中
+  引擎版本**（引擎未暴露版本接口，日志是唯一可靠来源；缓存 60s，文件 mtime/size 变化即失效）。
+  `stale` 判定改为 **上游最新 tag > 引擎实测版本**，`/api/version` 新增 `engine` 块
+  （version/base/source），`msg` 改为「上游引擎已发布 X（当前运行 Y），建议升级镜像
+  （重新 pin ARG VERSION + SHA256 后重建）」——与 `docs/release-policy.md` §6.2 的换版流程对齐
+- **D｜不再静默**：新增 `app.upstream_status()`（单一判定源，四态：`up_to_date` /
+  `update_available` / `probe_failed` / `unknown`）与 `app.upstream_release_alert()`
+  （接入看门狗 60s 巡更，source="上游"，当日去重；条件恢复即撤警——沿用 0.10.36 自愈纪律）。
+  探针失败 / 版本号无法解析也在 `/api/version.msg` 显式标注降级；`/api/diag` 的
+  `upstream_github` note 由「最新 release：<tag>」改为「<tag>｜<判定说明>」
+  （此前巡检看到 tag 会误判为已最新），env 块新增 `engine_version`
+- 测试：`test_ops` 新增 15 例（`EngineVersionProbeTest` 4：启动行解析/重启取最后一条/
+  缺失与无启动行降级/缓存随文件变化失效；`UpstreamVersionStatusTest` 11：四态判定、
+  面板版本不再误判的回归护栏、IMAGE_TAG 兜底、unknown 分支、告警投递/撤警/当日去重、
+  载荷 stale+engine+image+msg 四字段）→ **Python 全量 440 全绿**
+- 实机复验（fnOS 0.10.37，10/10 通过）：`image.tag` 0.3.5（原 null）、`engine.version` 0.3.5-stockdb
+  （`source=binary`，注明依据）、真实探针 `up_to_date`、注入上游 0.3.6 → `update_available` 且文案给出
+  重新 pin 的升级路径、探针失败 → `probe_failed` + `msg` 显式降级、`/api/diag` note 带判定说明 +
+  `env.engine_version`、看门狗链路 `up_to_date` 时不误报且残留告警被撤（0 条）。部署坑：`ENV` 不能写在
+  首个 `FROM` 之前（`no build stage`）；部署脚本须 ASCII-only（PowerShell 写文件加 BOM 并压行，已致一次静默失败）
+- 已知边界（未修，留 C 批）：`/releases/latest` 看不到 prerelease；**同 tag 重传二进制**
+  （0.3.5 已发生两次）tag_name/published_at 均不变，需靠资产 digest 指纹比对（C）；
+  探针 TTL 1h（发版后最多 1 小时被发现）
+
 ## [0.10.36] — 2026-09-13（修复：研究库跨线程断链 / MCP 版本漂移 / 告警不自愈）
 
 > 起因：用户要求 SSH 巡检飞牛 NAS 实例。体检**实测**三处缺陷（台账见 `docs/deployments.md`

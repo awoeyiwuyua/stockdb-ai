@@ -106,6 +106,7 @@ class _OpsTestCase(unittest.TestCase):
         app._mcp_loaded = False
         app._mcp_file_lines = 0
         app._RELEASE_CACHE.update(at=0.0, val=None)
+        free_stockdb_mod._engine_cache.update(at=0.0, mtime=None, size=None, val=None)
         app._wh_totals_cache = (0.0, {})  # 0.10.27：仓库总量 TTL 缓存复位（防用例间串扰）
         app._mydb_rd._rd = None  # 0.8.10：rd 连接缓存复位（防用例间串扰）
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -1058,6 +1059,195 @@ class FetchReleaseTest(_OpsTestCase):
             self.assertEqual(m.call_count, 1)
             self.assertIsNone(app.fetch_upstream_release(force=True))
             self.assertEqual(m.call_count, 2)
+
+
+# =====================================================================
+# 4b) 0.10.37：运行中引擎版本探测 + 上游版本判定/告警
+#     A：Dockerfile 注入 IMAGE_TAG；B：stale 判定改「上游 tag > 引擎版本」；
+#     D：探针失败/发现新版/版本号不可判定 → 告警中心（不再静默）。
+# =====================================================================
+class EngineVersionProbeTest(_OpsTestCase):
+    """storage.providers.free_stockdb.engine_version_info：启动日志 + 二进制双来源。"""
+
+    def setUp(self):
+        super().setUp()
+        self.log = Path(self.tmp) / "log.txt"
+        self.binary = Path(self.tmp) / "stockdb"
+        p = mock.patch.object(config, "STOCKDB_LOG_FILE", self.log)
+        q = mock.patch.object(free_stockdb_mod, "_ENGINE_BINARY", str(self.binary))
+        p.start()
+        q.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(q.stop)
+
+    def test_parses_startup_line(self):
+        """`stockdb-server 0.3.5-stockdb` → version 原样、base 去后缀（比较用）。"""
+        self.log.write_text("stockdb-server 0.3.5-stockdb\nStarted: 2026-09-13 10:52:17\n",
+                            encoding="utf-8")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertEqual(info["base"], "0.3.5")
+        self.assertEqual(info["version"], "0.3.5-stockdb")
+        self.assertEqual(info["source"], "log")
+        self.assertEqual(info["log"], str(self.log))
+
+    def test_last_startup_line_wins_after_restart(self):
+        """引擎重启换版本 → 取最后一条（不取首条）。"""
+        self.log.write_text("stockdb-server 0.3.2-stockdb\n"
+                            "stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info(force=True)["base"], "0.3.5")
+
+    def test_binary_fallback_when_log_has_no_banner(self):
+        """NAS 实况：日志只落 ERROR 级（无横幅）→ 退回二进制版本字面量。"""
+        self.log.write_text("[ERROR] open leveldb failed: Corruption: 10 missing files\n",
+                            encoding="utf-8")
+        self.binary.write_bytes(
+            b"\x7fELFjunk stockdb-server\x00" + b"0.3.5\x00" + b"0.3.5-stockdb\x00"
+            + b"1.12.12\x00" + b"120.53.53\x00" + b"127.0.0.1\x00" + b"0.0.0\x00")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertEqual(info["source"], "binary")
+        self.assertEqual(info["version"], "0.3.5-stockdb")  # 带产品后缀者优先
+        self.assertEqual(info["base"], "0.3.5")
+
+    def test_binary_scan_ignores_ip_like_tokens(self):
+        """IP/依赖版本噪声不误取：只认 X.Y.Z（后接 -后缀者优先）。"""
+        self.binary.write_bytes(b"120.53.53\x00127.0.0\x001.12.12\x000.3.5\x00")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertNotIn(info["version"], ("127.0.0", "120.53.53"))
+        self.assertEqual(info["base"], "0.3.5")
+
+    def test_missing_sources_return_none(self):
+        """日志与二进制都不可用 → None（调用方按"无法比对"降级，不抛）。"""
+        self.assertIsNone(free_stockdb_mod.engine_version_info(force=True))
+
+    def test_file_change_invalidates_cache(self):
+        """TTL 内日志 mtime/size 变化 → 立刻重读（引擎换版不被缓存掩盖）。"""
+        self.log.write_text("stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info(force=True)["base"], "0.3.5")
+        time.sleep(0.01)
+        self.log.write_text("stockdb-server 0.3.6-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info()["base"], "0.3.6")
+
+
+class UpstreamVersionStatusTest(_OpsTestCase):
+    """app.upstream_status / upstream_release_alert：同类版本线判定 + 告警接线。"""
+
+    def setUp(self):
+        super().setUp()
+        self.log = Path(self.tmp) / "log.txt"
+        p = mock.patch.object(config, "STOCKDB_LOG_FILE", self.log)
+        p.start()
+        self.addCleanup(p.stop)
+        self.alerts = app.Alerts.init(os.path.join(self.tmp, "upstream.json"))
+        self.log.write_text("stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+
+    def _release(self, tag):
+        return {"tag_name": tag, "html_url": "https://x", "published_at": "2026-07-19T00:00:00Z"}
+
+    def test_update_available_when_upstream_newer(self):
+        """上游 0.3.6 > 引擎 0.3.5 → update_available（旧逻辑在此恒 false）。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "update_available")
+        self.assertEqual(st["engine_version"], "0.3.5-stockdb")
+        self.assertIn("测试版本0.3.6", st["message"])
+        self.assertIn("建议升级镜像", st["message"])
+
+    def test_up_to_date_when_equal_or_older(self):
+        """上游 == 引擎 / 上游更旧 → up_to_date（不误报）。"""
+        for tag in ("测试版本0.3.5", "测试版本0.3.4"):
+            with mock.patch.object(app, "fetch_upstream_release",
+                                   return_value=self._release(tag)):
+                self.assertEqual(app.upstream_status()["kind"], "up_to_date")
+
+    def test_probe_failed_kind(self):
+        """探针 None → probe_failed（显式降级，不再静默留空）。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "probe_failed")
+        self.assertIn("探测失败", st["message"])
+
+    def test_unknown_when_engine_tag_missing(self):
+        """引擎版本与 IMAGE_TAG 都拿不到 → unknown（无法比对 ≠ 已最新）。"""
+        self.log.unlink()  # 启动日志不可用（无引擎版本来源）
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "", "STOCKDB_VERSION": ""}, clear=False):
+            st = app.upstream_status()
+        self.assertIsNone(st["engine_tag"])
+        self.assertEqual(st["kind"], "unknown")
+        self.assertIn("无法判断", st["message"])
+
+    def test_image_tag_fallback_when_log_missing(self):
+        """日志读不到时退回 IMAGE_TAG（A 注入的构建期版本）仍可判定。"""
+        self.log.unlink()
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "0.3.5"}, clear=False):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "update_available")
+        self.assertEqual(st["engine_tag"], "0.3.5")
+
+    def test_alert_warns_on_update_and_probe_failure(self):
+        """D：发现新版 / 探针失败 → 告警中心出现「上游」源 warning。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.9")):
+            self.assertEqual(app.upstream_release_alert(alerts=self.alerts),
+                             "update_available")
+        top = self.alerts.list()[0]
+        self.assertEqual((top["level"], top["source"]), ("warning", "上游"))
+        self.assertIn("0.3.9", top["message"])
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "probe_failed", "message": "上游版本探测失败（GitHub 不可达或超出重试）：本次无法判断是否有新版"})
+        self.assertEqual(len(self.alerts.list()), 2)
+        self.assertTrue(any("探测失败" in e["message"] for e in self.alerts.list()))
+
+    def test_alert_resolves_when_back_to_latest(self):
+        """条件恢复（已是最新）→ 撤回同源告警（自愈纪律一致）。"""
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "update_available", "message": "上游引擎已发布 0.3.9（当前运行 0.3.5-stockdb）"})
+        self.assertEqual(self.alerts.count(), 1)
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "up_to_date", "message": "引擎已是最新（上游最新 0.3.5）"})
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_alert_dedup_same_day(self):
+        """同一判定每 60s 巡更一次 → 当日去重不刷屏。"""
+        st = {"kind": "update_available", "message": "上游引擎已发布 0.3.9（当前运行 0.3.5-stockdb）"}
+        for _ in range(5):
+            app.upstream_release_alert(alerts=self.alerts, status=st)
+        self.assertEqual(self.alerts.count(), 1)
+
+    def test_version_payload_uses_engine_version(self):
+        """接口载荷：stale 由引擎版本判定；seam 字段（engine/image/msg）齐全。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "0.3.5"}, clear=False):
+            payload = web_handlers.version_payload()
+        self.assertTrue(payload["stale"])
+        self.assertIn("建议升级镜像", payload["msg"])
+        self.assertEqual(payload["engine"]["base"], "0.3.5")
+        self.assertEqual(payload["image"]["tag"], "0.3.5")
+        self.assertEqual(payload["upstream"]["tag_name"], "测试版本0.3.6")
+
+    def test_version_payload_not_stale_when_panel_newer(self):
+        """回归护栏：面板版本 0.10.x 远高于上游 0.x —— 旧逻辑会恒 false，
+        新逻辑必须依据引擎版本（此处 0.3.5 vs 上游 0.3.4 → 不落后）。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.4")):
+            payload = web_handlers.version_payload()
+        self.assertFalse(payload["stale"])
+        self.assertEqual(payload["msg"], "")
+
+    def test_version_payload_marks_probe_failure(self):
+        """D：探针失败 → msg 显式标注降级（前端/巡检可判断"没探测到"≠"已最新"）。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            payload = web_handlers.version_payload()
+        self.assertFalse(payload["stale"])
+        self.assertIn("探测失败", payload["msg"])
 
 
 # =====================================================================
