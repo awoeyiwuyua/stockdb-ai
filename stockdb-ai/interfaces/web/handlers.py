@@ -845,6 +845,8 @@ def snapshot_payload(days: int = 7) -> dict:
         "warehouse": _safe(warehouse_status, None),
         "timeline": {"days": _safe(lambda: app.load_timeline(days), []),
                      "totals": _safe(app.warehouse_totals, None)},
+        # 0.10.38 资产卡真身（研究库/双备份/磁盘分层；60s TTL，取不到即为 None）
+        "assets": _safe(app.assets_payload, None),
     }
 
 

@@ -8,6 +8,7 @@ import { getSnapshot } from '../api/snapshot'
 import type {
   Snapshot, OverviewPayload, HealthStatus, AlertItem, VersionPayload,
   StatusPayload, ScheduleInfo, WarehouseStatus, TimelineDay, WarehouseTotals,
+  AssetsPayload,
 } from '../types/api'
 
 export const useGlobalStore = defineStore('global', {
@@ -32,6 +33,8 @@ export const useGlobalStore = defineStore('global', {
     warehouse: (s): WarehouseStatus | null => s.snapshot?.warehouse ?? null,
     timelineDays: (s): TimelineDay[] => s.snapshot?.timeline?.days ?? [],
     whTotals: (s): WarehouseTotals | null => s.snapshot?.timeline?.totals ?? null,
+    // 资产卡真身（0.10.38：研究库/双备份/磁盘分层；旧后端无此块 → null，前端显示未监控）
+    assets: (s): AssetsPayload | null => s.snapshot?.assets ?? null,
     // 面板自身版本（status.webui.version；资产卡/页脚展示用）
     serverVersion: (s): string | null => s.snapshot?.status?.webui?.version ?? null,
   },

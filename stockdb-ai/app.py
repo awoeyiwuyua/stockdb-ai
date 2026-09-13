@@ -183,6 +183,11 @@ def load_timeline(days: int = 7) -> list[dict]:
       同步 = sync_history.json 按 ts 前缀日分组（trigger/exit_code/verified/时长）
       备份 = warehouse/backups/warehouse-YYYYMMDD-*.db 按文件名日期计数
       告警 = alerts 按 ts 日期计数（分 error/warn）
+
+    0.10.38 扩展（驾驶舱改版后端增量）：同步条目追加 reason/warn（此前只存
+    sync_history.json 里、没透出 → 前端无法解释失败）+ 逐条分类（class/label/
+    needs_action/detail，见 sync_failure_class）；每日追加 needs_action 汇总
+    与「今日尚未到同步点」的等待态（避免早盘就报"数据未更新"假警报）。
     返回按日期倒序（新 → 旧）。路径全部运行期取 config（patchable，测试友好）。
     """
     import config as _config  # 函数内引用：测试 patch config.DATA_DIR/WAREHOUSE_DIR 生效
@@ -229,7 +234,7 @@ def load_timeline(days: int = 7) -> list[dict]:
     except Exception:
         pass  # 降级：沉淀块整列缺席
 
-    # —— 同步：sync_history 按 ts 前缀日分组 ——
+    # —— 同步：sync_history 按 ts 前缀日分组（含 reason/warn 与分类）——
     sync_by_day: dict[str, list] = {}
     try:
         for h in load_history():
@@ -242,7 +247,28 @@ def load_timeline(days: int = 7) -> list[dict]:
                     "verified": h.get("verified"),
                     "duration_sec": h.get("duration_sec"),
                     "data_latest": h.get("data_latest"),
+                    "reason": h.get("reason"),
+                    "warn": h.get("warn"),
+                    "downloads": h.get("downloads"),
                 })
+        # 分类：先算当日「最新成功运行」的时刻，再逐条比较。0.10.38 两处修正：
+        # ① 回扫式 later_success 对当日最后一条永远为 False（09-07 21:58 被打断的
+        #    手动重试因此被误判成需处理）；② 语义是「该条**之后**还有成功运行」，
+        #    即 ts < 当日最新成功时刻（写成 last_success > ts 方向就反了——
+        #    21:54 > 21:58 == False，会把 09-07 与 09-11 两种情况全判错）。
+        for day, items in sync_by_day.items():
+            items.sort(key=lambda e: str(e.get("ts") or ""))
+            last_success_ts = None
+            for entry in items:
+                if entry.get("exit_code") == 0 and entry.get("verified") == "pass":
+                    last_success_ts = str(entry.get("ts") or "")
+            day_has_success = last_success_ts is not None
+            for idx, entry in enumerate(items):
+                ts = str(entry.get("ts") or "")
+                later = bool(last_success_ts and ts < last_success_ts)
+                entry.update(sync_failure_class(
+                    entry, has_later_success=later, day_has_success=day_has_success,
+                    is_last_of_day=(idx == len(items) - 1)))
     except Exception:
         pass
 
@@ -275,17 +301,145 @@ def load_timeline(days: int = 7) -> list[dict]:
     except Exception:
         pass
 
+    today8 = datetime.now().strftime("%Y%m%d")
+    now_hm = datetime.now().strftime("%H:%M")
+    try:
+        sync_times = load_schedule().get("times") or []
+    except Exception:
+        sync_times = []
+    sync_time = sorted(str(t) for t in sync_times)[-1] if sync_times else None
+
     out = []
     for d in sorted(probes, reverse=True):
         d8 = d.strftime("%Y%m%d")
+        sync_items = sync_by_day.get(d8, [])
+        actionable = [e for e in sync_items if e.get("needs_action")]
+        # 日级「等待态」：今天且尚未到同步点 → 不报未更新（早盘 09:00 看板不闪假警报）
+        awaiting_today = (d8 == today8 and not sync_items
+                          and sync_time is not None and now_hm < sync_time)
         out.append({
             "date": d8,
             "sediment": sediment.get(d8),
-            "sync": sync_by_day.get(d8, []),
+            "sync": sync_items,
             "backups": backups.get(d8),
             "alerts": alert_by_day.get(d8, {"count": 0, "err": 0, "warn": 0}),
+            "needs_action": bool(actionable),
+            "needs_action_count": len(actionable),
+            "awaiting": awaiting_today,
+            "action_hint": (f"等待 {sync_time} 定时同步" if awaiting_today
+                            else (actionable[-1].get("detail") if actionable else None)),
         })
     return out
+
+
+# ==================== 同步失败分类（0.10.38） ====================
+# 背景（NAS 实证）：时间线只透出 trigger/exit_code/verified/duration/data_latest，
+# 前端无法区分「真问题」与「等上游/部署打断」。09-07 21:58 的 verified=fail 是
+# 22:00 容器重启打断的手动重试（当日仓库 5176 行完整、次日同步正常），却被当成
+# 「需处理」；而 09-11 的 1660s 超时才是真问题。分类把两者分开，并给出中文标签。
+SYNC_CLASS_LABELS = {
+    "ok": "正常",
+    "self_healed": "已自愈",
+    "awaiting_mirror": "等上游发布",
+    "run_interrupted": "运行被打断",
+    "verify_failed": "数据未更新",
+    "data_source_error": "数据源失败",
+    "not_effective": "同步未生效",
+    "unknown": "未知异常",
+}
+_NETWORK_KEYWORDS = ("超时", "timeout", "timed out", "网络", "连接", "502", "403", "404")
+_INTERRUPTED_MAX_SEC = 30.0
+
+
+def sync_failure_class(record: dict, *, has_later_success: bool = False,
+                       day_has_success: bool = False,
+                       is_last_of_day: bool = False) -> dict:
+    """单条同步记录的分类（纯函数，零 IO）。
+
+    返回 {"class", "label", "needs_action", "detail"}。
+
+    三个上下文参数（由 load_timeline 按当日记录序列算出）：
+      has_later_success  该条**之后**当日还有成功运行（→ 已自愈）
+      day_has_success    当日**存在**成功运行（含更早的；用于识别"当日以手动实验失败收尾"）
+      is_last_of_day     该条是当日最后一条记录
+
+    判定顺序（NAS 真身数据驱动，最容易被误报的先判）：
+      1) ok                exit=0 且 verified=pass 且无 warn
+      2) awaiting_mirror   warn 含「数据未更新」→ 上游镜像未发布（等，非故障）
+      3) not_effective     其它 warn（清单变更等；真待查）
+      4) run_interrupted   手动、时长 ≤30s、无 data_latest、且**非当日最后一条**
+                           （NAS 09-07 21:58：22:00 容器重启打断的手动重试）
+      5) self_healed       verified=fail 或 exit≠0，但**之后**有成功运行
+                           （NAS 09-11 16:17 超时 1660s → 17:50 成功）
+      5b) run_interrupted  当日最后一条的手动短失败，但当日**确有**更早的成功运行
+                           （数据由该次保证；NAS 09-07 原样）
+      6) verify_failed     verified=fail 且无上述缓解 → 数据未前进（真问题）
+      7) data_source_error exit≠0 且无上述缓解（网络/上游通道异常）
+      8) awaiting_mirror   verified=skipped（未做验证，通常是数据未前进）
+      9) unknown           其它形态
+    """
+    if not isinstance(record, dict):
+        return {"class": "unknown", "label": SYNC_CLASS_LABELS["unknown"],
+                "needs_action": False, "detail": None}
+    exit_code = record.get("exit_code")
+    verified = str(record.get("verified") or "")
+    trigger = str(record.get("trigger") or "")
+    reason = record.get("reason")
+    warn = str(record.get("warn") or "")
+    latest = record.get("data_latest")
+    try:
+        duration = float(record.get("duration_sec") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    manual = trigger.startswith("manual")
+    short_manual = manual and 0 < duration <= _INTERRUPTED_MAX_SEC and not latest
+
+    def _out(cls: str, needs_action: bool, detail) -> dict:
+        return {"class": cls, "label": SYNC_CLASS_LABELS[cls],
+                "needs_action": needs_action, "detail": detail}
+
+    # 1) 真成功（无 warn）
+    if exit_code == 0 and verified == "pass" and not warn:
+        return _out("ok", False, None)
+    # 2) 镜像未发布：等上游，不是故障
+    if "数据未更新" in warn:
+        return _out("awaiting_mirror", False,
+                    "镜像尚未发布当日数据（自动滞后重试继续跟进）")
+    # 3) 其它 warn（清单变更等）
+    if warn:
+        return _out("not_effective", True, warn)
+    # 4) 手动重试被打断（部署/重启）——非当日最后一条即证据
+    if short_manual and not is_last_of_day:
+        return _out("run_interrupted", False,
+                    f"手动运行 {duration:.1f}s 后失败（容器重启/部署打断），非当日最后一次运行")
+    # 5) 失败但之后有成功 → 已自愈
+    if has_later_success and (verified == "fail" or exit_code not in (0, None)):
+        if verified == "fail":
+            kind = str(reason or "").strip() or "数据完整性验证未通过"
+        else:
+            kind = str(reason or "").strip() or f"退出码 {exit_code}"
+        return _out("self_healed", False, f"{kind}，后续重试已成功")
+    # 5b) 当日最后一条的手动短失败，但当日确有更早的成功运行
+    if short_manual and is_last_of_day and day_has_success:
+        return _out("run_interrupted", False,
+                    f"手动运行 {duration:.1f}s 后失败（容器重启/部署打断）；"
+                    f"当日已有成功运行，数据不受影响")
+    # 6) 验证未通过且无缓解 → 真问题
+    if verified == "fail":
+        return _out("verify_failed", True,
+                    reason or "数据完整性验证未通过（数据未前进）")
+    # 7) 退出码非 0 且无缓解
+    if exit_code not in (0, None):
+        text = str(reason or "").strip() or "同步进程退出码非 0"
+        text = f"{text}（退出码 {exit_code}）"
+        if any(k in text.lower() for k in _NETWORK_KEYWORDS):
+            text = f"网络/上游通道异常：{text}"
+        return _out("data_source_error", True, text)
+    # 8) 未做验证（通常数据未前进）
+    if verified == "skipped":
+        return _out("awaiting_mirror", False, "本次未做完整性验证（数据未前进）")
+    return _out("unknown", False, str(reason or "").strip() or None)
+
 
 
 # warehouse_totals TTL 缓存（0.10.27）：facts glob 每次扫数万 parquet 文件名，
@@ -1709,6 +1863,156 @@ def last_sync_summary() -> dict | None:
     """最近一次同步摘要（历史数组末尾=最新记录）。"""
     h = load_history()
     return h[-1] if h else None
+
+
+def research_db_stats() -> dict:
+    """研究库（SQLite 研究成果主库）真实指标：行数 / 大小 / 路径 / 回滚模式。
+
+    只读、静默降级（库缺失/未初始化 → 各计数 0 + available=False）。
+    注意：这里读的是**研究成果主库**（SqliteResearchStore，默认 DATA_DIR/research.db）；
+    引擎 mydb 是另一套存储（LevelDB 私有 KV），两者不可混为一谈（驾驶舱资产卡
+    此前把 mydb 描述成「11 张基础数据表/连接池」属凭空捏造，本函数提供真实数字）。
+    """
+    import config as _config
+    mode = (os.environ.get("RESEARCH_STORE", "sqlite") or "sqlite").strip().lower()
+    out = {"available": False, "mode": mode, "path": None, "bytes": None,
+           "metrics": 0, "series": 0, "lists": 0, "snapshots": 0}
+    try:
+        from storage.research_store import SqliteResearchStore
+        store = SqliteResearchStore()
+        path = Path(store._path)
+        out["path"] = str(path)
+        conn = store._connect()
+        for table in ("metrics", "series", "lists", "snapshots"):
+            try:
+                out[table] = int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+            except Exception:  # noqa: BLE001 - 单表异常不影响其余
+                continue
+        try:
+            out["bytes"] = path.stat().st_size
+        except OSError:
+            out["bytes"] = None
+        out["available"] = True
+    except Exception:  # noqa: BLE001 - 研究库不可用（mydb 回滚模式等）→ 降级
+        pass
+    return out
+
+
+def backup_stats() -> dict:
+    """备份真身：仓库 .db / 研究库 .db 分别计数 + 各自最新时间 + 合计占用。
+
+    0.10.38：此前资产卡只显示一个「备份 N 份」，实际有两套（warehouse/backups/
+    warehouse-*.db 与研究库 research-*.db），混在一起会误导；这里分开给。
+    """
+    import config as _config
+    out = {"warehouse": {"count": 0, "last_mtime": None, "bytes": 0},
+           "research": {"count": 0, "last_mtime": None, "bytes": 0},
+           "total_bytes": 0}
+
+    def _scan(directory: Path, pattern: str) -> dict:
+        count, last, size = 0, None, 0
+        try:
+            for p in directory.glob(pattern):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                count += 1
+                size += st.st_size
+                if last is None or st.st_mtime > last:
+                    last = st.st_mtime
+        except Exception:  # noqa: BLE001 - 目录不可读 → 计数 0
+            pass
+        return {"count": count, "last_mtime": last, "bytes": size}
+
+    out["warehouse"] = _scan(Path(_config.WAREHOUSE_DIR) / "backups", "warehouse-*.db")
+    # 研究库备份目录随布局（旧根 backups / 新 research/backups），统一经 store 解析
+    try:
+        from storage.research_store import resolve_backup_dir
+        research_dir = Path(resolve_backup_dir())
+    except Exception:  # noqa: BLE001
+        research_dir = Path(_config.DATA_DIR) / "backups"
+    out["research"] = _scan(research_dir, "research-*.db")
+    out["total_bytes"] = out["warehouse"]["bytes"] + out["research"]["bytes"]
+    return out
+
+
+def disk_usage_detail(force: bool = False) -> dict:
+    """数据卷磁盘明细（按存储层分列，供资产卡「体量」栏）。
+
+    纯读、静默降级：目录缺失给 0。行情 LevelDB 目录约 24 GB/700 文件，但目录内
+    文件数可达数万（含 .log/.sst）——递归 stat 有成本，故独立 300s TTL 缓存
+    （磁盘体量分钟级变化，不需要 15s 一拍跟着扫）。
+    """
+    global _disk_detail_cache
+    now = _monotonic()
+    ts, cached = _disk_detail_cache
+    if not force and ts and now - ts < _DISK_DETAIL_TTL:
+        return cached
+    import config as _config
+    data_dir = Path(_config.DATA_DIR)
+    groups = {
+        "market_data": [data_dir / "data", data_dir / "data1", data_dir / "data2"],  # 行情 LevelDB
+        "warehouse": [Path(_config.WAREHOUSE_DIR)],                                  # Parquet+DuckDB
+        "research_db": [data_dir / "research.db"],                                   # 研究主库（文件）
+        "mydb": [data_dir / "mydb"],                                                 # 引擎私有 KV
+    }
+    out: dict = {"groups": {}, "total_bytes": 0}
+    for name, paths in groups.items():
+        size = 0
+        for p in paths:
+            try:
+                if p.is_file():
+                    size += p.stat().st_size
+                elif p.is_dir():
+                    for f in p.rglob("*"):
+                        try:
+                            if f.is_file():
+                                size += f.stat().st_size
+                        except OSError:
+                            continue
+            except Exception:  # noqa: BLE001 - 单路径失败不影响其余
+                continue
+        out["groups"][name] = size
+        out["total_bytes"] += size
+    try:
+        out["volume"] = disk_usage()
+    except Exception:  # noqa: BLE001
+        out["volume"] = None
+    _disk_detail_cache = (now, out)
+    return out
+
+
+# 资产卡聚合 TTL 缓存（0.10.38）：驱动 15s 轮询的 snapshot，但含目录递归（磁盘明细）
+# 与研究库计数——不能每拍全量扫盘；60s 与 warehouse_totals 同节奏。
+_ASSETS_TTL = 60.0
+_assets_cache: tuple[float, dict] = (0.0, {})
+# 磁盘明细独立 300s 缓存（递归 stat 成本最高、磁盘体量分钟级变化）
+_DISK_DETAIL_TTL = 300.0
+_disk_detail_cache: tuple[float, dict] = (0.0, {})
+
+
+def assets_payload(force: bool = False) -> dict:
+    """驾驶舱资产卡聚合（0.10.38）：行情底座 / 分析数仓 / 私有存储 三栏的真实字段。
+
+    全部字段都有真实来源，取不到就是 None（前端显示「未监控」）——**不再编造**
+    （旧设计稿的「11 张基础数据表 / 连接池 2/10 / 无坏块」均无数据支撑，已剔除）。
+    行情底座数字（标的数/覆盖）不在此重复：status.code_stats / status.coverage 已是
+    真身，前端直接取 status 块。
+    """
+    global _assets_cache
+    now = _monotonic()
+    ts, cached = _assets_cache
+    if not force and ts and now - ts < _ASSETS_TTL:
+        return cached
+    result = {
+        "research": research_db_stats(),
+        "backups": backup_stats(),
+        "disk": disk_usage_detail(),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _assets_cache = (now, result)
+    return result
 
 
 def disk_usage() -> dict:

@@ -48,6 +48,23 @@
     </EmptyState>
 
     <template v-else>
+      <!-- ⓪ 告警横幅（0.10.38 置顶）：只在"有需处理项"时出现，带一键重试/看日志 -->
+      <AlertBanner
+        :items="banner"
+        @open-logs="openDrawer('logs')"
+        @retried="onRefresh"
+      />
+
+      <!-- 等待态提示（今日尚未到同步点；不占告警位） -->
+      <el-alert
+        v-if="awaiting"
+        type="info"
+        :closable="false"
+        show-icon
+        :title="awaiting.action_hint || '等待今日定时同步'"
+        class="top-alert"
+      />
+
       <!-- ① 四灯状态带（灯点击的抽屉联动批 3 接线；同步灯暂跳数据同步页） -->
       <StatusBand :lights="lights" :worst="worst" :agg-word="aggWord" @select="onLightSelect" />
 
@@ -66,11 +83,17 @@
         </ul>
       </section>
 
-      <!-- ③ 时间线（W1 批 2：七交易日聚合，数据随 snapshot 一并到达） -->
+      <!-- ③ 同步矩阵（W1 批 2 + 0.10.38：胶囊折叠 / 失败外推 / 无告警不占位） -->
       <TimelineCard :rows="store.timelineDays" />
 
-      <!-- ④ 数据资产（W1 v0.4：三块资产清单——行情库/仓库/私有库） -->
-      <AssetsCard :status="store.status" :warehouse="store.warehouse" :totals="store.whTotals" :latest="store.health?.latest || ''" />
+      <!-- ④ 数据资产（0.10.38 三栏真身：行情底座 / 分析数仓 / 私有存储） -->
+      <AssetsCard
+        :status="store.status"
+        :warehouse="store.warehouse"
+        :totals="store.whTotals"
+        :assets="store.assets"
+        :latest="store.health?.latest || ''"
+      />
     </template>
 
     <!-- ── 抽屉群（批 3）：四页降级为抽屉内容组件，destroy-on-close 关闭即停轮询 ── -->
@@ -107,6 +130,7 @@ import { useCockpit } from '../composables/use-cockpit'
 import { usePolling } from '../composables/use-polling'
 import StatusBand from '../components/cockpit/StatusBand.vue'
 import TimelineCard from '../components/cockpit/TimelineCard.vue'
+import AlertBanner from '../components/cockpit/AlertBanner.vue'
 import EmptyState from '../components/EmptyState.vue'
 import OpsAlerts from './OpsAlerts.vue'
 import OpsLogs from './OpsLogs.vue'
@@ -114,6 +138,7 @@ import OpsDiag from './OpsDiag.vue'
 import OpsMcp from './OpsMcp.vue'
 import OpsMydb from './OpsMydb.vue'
 import AssetsCard from '../components/cockpit/AssetsCard.vue'
+import { awaitingToday, pendingAlerts } from '../domain/timeline'
 import type { DrawerName } from '../types/ui'
 
 const store = useGlobalStore()
@@ -160,6 +185,10 @@ usePolling(onRefresh, { fast: 15_000 })
 
 // 非绿灯列表（异常区）
 const abnormal = computed(() => lights.value.filter((l) => l.tone !== 'ok' && l.tone !== 'off'))
+
+// 告警横幅：只收「需处理」的交易日（domain/timeline.ts 纯函数；空数组 → 横幅不渲染）
+const banner = computed(() => pendingAlerts(store.timelineDays))
+const awaiting = computed(() => awaitingToday(store.timelineDays))
 
 // 灯点击 / 异常区条目 → 对应抽屉；同步域仍是独立页（干预与表单密度高，W1 留痕 v0.1）
 function onLightSelect(key: string) {

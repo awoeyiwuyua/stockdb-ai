@@ -29,6 +29,8 @@ export default defineConfig({
   },
   test: {
     environment: 'happy-dom', // 组件挂载测试需要 DOM 环境（views-null-safety）
-    include: ['src/**/*.test.js', 'tests/**/*.test.js'],
+    // 0.10.38：补 .test.ts —— 此前 include 只列 .test.js，而 src/domain/lights.test.ts
+    // 早已是 TS 用例却被静默跳过（TypeScript 化遗留：文件改了、glob 没跟上）
+    include: ['src/**/*.test.{js,ts}', 'tests/**/*.test.{js,ts}'],
   },
 })

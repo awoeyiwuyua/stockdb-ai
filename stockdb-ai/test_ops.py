@@ -213,9 +213,17 @@ class TimelineTests(_OpsTestCase):
 
     def test_load_timeline_empty_dir_degrades(self):
         # 空目录：行数 ≤ days，全部子块空缺不抛异常
-        rows = app.load_timeline(3)
+        # HISTORY_FILE 是 import 期常量，patch 到临时目录才真"空"（0.10.38）
+        with mock.patch.object(app, "HISTORY_FILE", Path(self.tmp) / "sync_history.json"), \
+             mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            rows = app.load_timeline(3)
         self.assertLessEqual(len(rows), 3)
         self.assertTrue(all(r["sediment"] is None and r["sync"] == [] for r in rows))
+        # 新增日级字段在空数据下也必须存在且为安全默认
+        for r in rows:
+            self.assertFalse(r["needs_action"])
+            self.assertEqual(r["needs_action_count"], 0)
+            self.assertIn("awaiting", r)
 
 
 class WarehouseTotalsCacheTest(_OpsTestCase):
@@ -254,13 +262,21 @@ class WarehouseTotalsCacheTest(_OpsTestCase):
 
 
 class SnapshotPayloadTest(_OpsTestCase):
-    """0.10.27：/api/snapshot 单通道聚合——五块齐全 + timeline 走 app.* 动态引用。"""
+    """0.10.27：/api/snapshot 单通道聚合——六块齐全 + timeline 走 app.* 动态引用。
+    0.10.38：新增 assets 块（资产卡真身）。"""
 
-    def test_snapshot_aggregates_five_blocks(self):
+    def test_snapshot_aggregates_six_blocks(self):
         payload = web_handlers.snapshot_payload(7)
         self.assertEqual(set(payload.keys()),
                          {"generated_at", "overview", "status", "schedule",
-                          "warehouse", "timeline"})
+                          "warehouse", "timeline", "assets"})
+        # timeline 块：days 列表 + totals 结构（离线临时目录下静默降级为空）
+        self.assertIsInstance(payload["timeline"]["days"], list)
+        self.assertIn("sediment_days", payload["timeline"]["totals"])
+        # assets 块：三栏资产卡真身（研究库/双备份/磁盘分层）
+        self.assertIn("research", payload["assets"])
+        self.assertIn("backups", payload["assets"])
+        self.assertIn("disk", payload["assets"])
         # timeline 块：days 列表 + totals 结构（离线临时目录下静默降级为空）
         self.assertIsInstance(payload["timeline"]["days"], list)
         self.assertIn("sediment_days", payload["timeline"]["totals"])
@@ -1059,6 +1075,264 @@ class FetchReleaseTest(_OpsTestCase):
             self.assertEqual(m.call_count, 1)
             self.assertIsNone(app.fetch_upstream_release(force=True))
             self.assertEqual(m.call_count, 2)
+
+
+# =====================================================================
+# 4c) 0.10.38 驾驶舱改版后端增量：同步失败分类 / 时间线扩展 / 资产卡真身
+# =====================================================================
+class SyncFailureClassTest(unittest.TestCase):
+    """sync_failure_class：纯函数分类（NAS 真身形态驱动），防止把"等上游/部署打断"
+    误报成"需处理"（0.10.38 改版起因：09-07 被打断的手动重试被当成未决问题）。"""
+
+    def _cls(self, rec, later=False):
+        return app.sync_failure_class(rec, has_later_success=later)
+
+    def test_ok_when_pass_without_warn(self):
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 87.6,
+                       "data_latest": "20260911"})
+        self.assertEqual(r["class"], "ok")
+        self.assertFalse(r["needs_action"])
+
+    def test_awaiting_mirror_when_data_not_advanced(self):
+        """NAS 09-11 16:48 真身：exit 0 / verified pass / warn 数据未更新 → 等上游。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 7.4,
+                       "data_latest": "20260807",
+                       "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("镜像", r["detail"])
+
+    def test_not_effective_on_other_warn(self):
+        r = self._cls({"exit_code": 0, "verified": "pass", "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
+        self.assertTrue(r["needs_action"])
+
+    def test_self_healed_when_verify_failed_then_success(self):
+        """NAS 09-11 16:17 真身：1660s 后验证失败，但之后 17:50 成功 → 已自愈。"""
+        r = self._cls({"exit_code": 0, "verified": "fail", "duration_sec": 1660.7,
+                       "data_latest": None, "reason": "数据完整性验证未通过"}, later=True)
+        self.assertEqual(r["class"], "self_healed")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("后续重试已成功", r["detail"])
+
+    def test_verify_failed_needs_action_without_later_success(self):
+        r = self._cls({"exit_code": 0, "verified": "fail", "duration_sec": 1660.7,
+                       "data_latest": None, "reason": "数据完整性验证未通过"})
+        self.assertEqual(r["class"], "verify_failed")
+        self.assertTrue(r["needs_action"])
+
+    def test_run_interrupted_for_manual_short_failure(self):
+        """手动短失败且**非当日最后一条** → 被打断（不需处理）。"""
+        r = app.sync_failure_class(
+            {"trigger": "manual", "exit_code": 0, "verified": "fail",
+             "duration_sec": 6.4, "data_latest": None}, is_last_of_day=False)
+        self.assertEqual(r["class"], "run_interrupted")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("重启", r["detail"])
+
+    def test_run_interrupted_when_last_of_day_but_day_has_success(self):
+        """NAS 09-07 21:58 真身：当日最后一条的手动短失败，当日另有成功 → 打断。
+        （它没有"之后"的成功——21:54 在它之前，故必须靠 day_has_success 语义区分。）"""
+        r = app.sync_failure_class(
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None},
+            has_later_success=False, day_has_success=True, is_last_of_day=True)
+        self.assertEqual(r["class"], "run_interrupted")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("当日已有成功运行", r["detail"])
+
+    def test_manual_short_failure_last_of_day_without_prior_success_is_real(self):
+        """当日最后一条的手动短失败、且当日无其它成功 → 保守判为真问题（需处理）。"""
+        r = app.sync_failure_class(
+            {"trigger": "manual", "exit_code": 0, "verified": "fail",
+             "duration_sec": 6.4, "data_latest": None},
+            has_later_success=False, day_has_success=False, is_last_of_day=True)
+        self.assertEqual(r["class"], "verify_failed")
+        self.assertTrue(r["needs_action"])
+
+    def test_data_source_error_and_self_healed_by_exit_code(self):
+        base = {"trigger": "scheduled", "exit_code": 1, "verified": "skipped",
+                "duration_sec": 600, "data_latest": None, "reason": "网络超时"}
+        r = self._cls(base)
+        self.assertEqual(r["class"], "data_source_error")
+        self.assertTrue(r["needs_action"])
+        self.assertIn("网络/上游通道异常", r["detail"])
+        self.assertEqual(self._cls(base, later=True)["class"], "self_healed")
+
+    def test_skipped_maps_to_awaiting_mirror(self):
+        r = self._cls({"trigger": "scheduled", "exit_code": 0, "verified": "skipped",
+                       "duration_sec": 11.7, "data_latest": "20260904"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+
+    def test_non_dict_degrades(self):
+        self.assertEqual(self._cls(None)["class"], "unknown")
+
+
+class TimelineExtrasTest(_OpsTestCase):
+    """load_timeline 0.10.38 扩展：reason/warn 透出 + 分类 + 日级 needs_action/awaiting。"""
+
+    def setUp(self):
+        super().setUp()
+        # HISTORY_FILE 是 import 期常量，DATA_DIR patch 盖不住它 → 必须显式指向临时目录
+        # （否则读到仓库真实 data/ 的历史，用例互相串扰且与真机数据耦合）
+        self._hist = mock.patch.object(app, "HISTORY_FILE", Path(self.tmp) / "sync_history.json")
+        self._hist.start()
+        self.addCleanup(self._hist.stop)
+        self._wh = mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse")
+        self._wh.start()
+        self.addCleanup(self._wh.stop)
+
+    def _write_history(self, entries):
+        app.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        app.HISTORY_FILE.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    def _day(self, date8):
+        for d in app.load_timeline(7):
+            if d["date"] == date8:
+                return d
+        self.fail(f"时间线缺 {date8}")
+
+    def test_sync_entries_carry_reason_warn_and_class(self):
+        """透出 reason/warn（此前只在 sync_history.json 里）+ 逐条分类。"""
+        self._write_history([
+            {"ts": "2026-09-11 16:17:51", "trigger": "scheduled", "exit_code": 0,
+             "verified": "fail", "duration_sec": 1660.7, "data_latest": None,
+             "reason": "数据完整性验证未通过", "warn": None},
+            {"ts": "2026-09-11 17:50:38", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 87.6, "data_latest": "20260911"},
+        ])
+        day = self._day("20260911")
+        first = day["sync"][0]
+        self.assertEqual(first["reason"], "数据完整性验证未通过")
+        self.assertEqual(first["class"], "self_healed")     # 同日更晚成功
+        self.assertEqual(day["sync"][1]["class"], "ok")
+        self.assertFalse(day["needs_action"])
+        self.assertEqual(day["needs_action_count"], 0)
+
+    def test_needs_action_when_no_later_success(self):
+        self._write_history([
+            {"ts": "2026-09-08 15:54:22", "trigger": "scheduled", "exit_code": 0,
+             "verified": "fail", "duration_sec": 262.4, "data_latest": None,
+             "reason": "数据完整性验证未通过"},
+        ])
+        day = self._day("20260908")
+        self.assertTrue(day["needs_action"])
+        self.assertEqual(day["needs_action_count"], 1)
+        self.assertIn("验证未通过", day["action_hint"])
+
+    def test_interrupted_manual_run_does_not_flag_day(self):
+        """09-07 场景：pass → pass → 手动被打断 ⇒ 日级不标需处理（改版核心）。"""
+        self._write_history([
+            {"ts": "2026-09-07 15:50:34", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.7, "data_latest": "20260904"},
+            {"ts": "2026-09-07 21:54:20", "trigger": "manual", "exit_code": 0,
+             "verified": "pass", "duration_sec": 6.0, "data_latest": "20260904"},
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None},
+        ])
+        day = self._day("20260907")
+        classes = [e["class"] for e in day["sync"]]
+        self.assertEqual(classes[-1], "run_interrupted")
+        self.assertFalse(day["needs_action"])
+        self.assertIsNone(day["action_hint"])
+
+    def test_backward_compatible_fields_kept(self):
+        """旧字段不破（前端可渐进迁移）：ts/trigger/exit_code/verified/duration/data_latest。"""
+        self._write_history([
+            {"ts": "2026-09-09 15:50:33", "trigger": "scheduled", "exit_code": 0,
+             "verified": "pass", "duration_sec": 24.8, "data_latest": "20260908"},
+        ])
+        entry = self._day("20260909")["sync"][0]
+        for key in ("ts", "trigger", "exit_code", "verified", "duration_sec", "data_latest"):
+            self.assertIn(key, entry)
+
+
+class AssetsPayloadTest(_OpsTestCase):
+    """assets_payload：研究库/双备份/磁盘分层的真实字段 + TTL 缓存 + 降级。"""
+
+    def setUp(self):
+        super().setUp()
+        self._cache_reset()
+
+    def _cache_reset(self):
+        app._assets_cache = (0.0, {})
+        app._disk_detail_cache = (0.0, {})
+
+    def test_research_stats_real_counts(self):
+        """研究库计数来自真实 SQLite（写入可读回）。"""
+        from storage.research_store import SqliteResearchStore
+        store = SqliteResearchStore(Path(self.tmp) / "research.db")
+        self.addCleanup(store.close)
+        store.write_metrics("20260911", {"metrics": {"n_samples": 33}})
+        store.write_series("premium_mean", {"values": [0.01]})
+        store.write_snapshots("20260911", {"000001": {"open_price": 1.0}})
+        st = app.research_db_stats()
+        self.assertTrue(st["available"])
+        self.assertEqual(st["metrics"], 1)
+        self.assertEqual(st["series"], 1)
+        self.assertEqual(st["snapshots"], 1)
+        self.assertEqual(st["lists"], 0)
+        self.assertGreater(st["bytes"], 0)
+
+    def test_research_stats_degrades_without_store(self):
+        """研究库不可用 → available=False 且计数为 0（前端显示未监控，不编数字）。"""
+        with mock.patch.dict(os.environ, {"RESEARCH_STORE": "mydb"}):
+            st = app.research_db_stats()
+        self.assertIn("mode", st)
+        self.assertIsInstance(st["available"], bool)
+
+    def test_backup_stats_splits_two_families(self):
+        """仓库备份与研究库备份分开计数（此前混成一个数会误导）。"""
+        wh = Path(self.tmp) / "warehouse" / "backups"
+        wh.mkdir(parents=True)
+        (wh / "warehouse-20260911-175042-6358d8c0.db").write_bytes(b"x" * 10)
+        (wh / "warehouse-20260910-225326-e81b7e48.db").write_bytes(b"x" * 20)
+        rs = Path(self.tmp) / "backups"
+        rs.mkdir(parents=True)
+        (rs / "research-20260911-092604-b88d212d.db").write_bytes(b"x" * 5)
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"), \
+             mock.patch("storage.research_store.resolve_backup_dir", return_value=rs):
+            st = app.backup_stats()
+        self.assertEqual(st["warehouse"]["count"], 2)
+        self.assertEqual(st["warehouse"]["bytes"], 30)
+        self.assertEqual(st["research"]["count"], 1)
+        self.assertEqual(st["total_bytes"], 35)
+        self.assertIsNotNone(st["warehouse"]["last_mtime"])
+
+    def test_disk_detail_groups_and_volume(self):
+        (Path(self.tmp) / "data").mkdir()
+        (Path(self.tmp) / "data" / "a.ldb").write_bytes(b"x" * 100)
+        (Path(self.tmp) / "mydb").mkdir()
+        (Path(self.tmp) / "mydb" / "b.ldb").write_bytes(b"x" * 50)
+        (Path(self.tmp) / "warehouse").mkdir()
+        (Path(self.tmp) / "warehouse" / "w.duckdb").write_bytes(b"x" * 25)
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            d = app.disk_usage_detail(force=True)
+        self.assertEqual(d["groups"]["market_data"], 100)
+        self.assertEqual(d["groups"]["mydb"], 50)
+        self.assertEqual(d["groups"]["warehouse"], 25)
+        self.assertEqual(d["total_bytes"], 175)
+        self.assertIsNotNone(d["volume"])
+
+    def test_caches_avoid_rescan(self):
+        """TTL 内不重扫（15s 轮询不能每拍递归 stat）；force 绕过。"""
+        with mock.patch.object(app, "disk_usage_detail", wraps=app.disk_usage_detail) as m:
+            app.assets_payload(force=True)
+            first = m.call_count
+            app.assets_payload()
+            self.assertEqual(m.call_count, first, "60s TTL 内不应再次统计磁盘")
+            app.assets_payload(force=True)
+            self.assertEqual(m.call_count, first + 1)
+
+    def test_snapshot_payload_includes_assets(self):
+        """snapshot 单通道带上 assets 块（前端一次拿到三栏资产卡）。"""
+        payload = web_handlers.snapshot_payload(7)
+        self.assertIn("assets", payload)
+        self.assertIn("research", payload["assets"])
+        self.assertIn("backups", payload["assets"])
+        self.assertIn("disk", payload["assets"])
 
 
 # =====================================================================
