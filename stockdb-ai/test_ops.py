@@ -162,6 +162,229 @@ class _QueryResultLike:
 
 
 
+class _QueryResultLike:
+    """pybao QueryResult 形态替身：带 keys/all 属性，dict(v) 可转换。"""
+
+    def __init__(self, d):
+        self._d = d
+
+    def keys(self):
+        return self._d.keys()
+
+    def all(self):
+        return None
+
+    def __getitem__(self, k):
+        return self._d[k]
+
+    def __iter__(self):
+        return iter(self._d.items())
+
+
+class _BrokenIterQueryResult:
+    """**真实 NAS pybao 0.3.5 QueryResult 形态**（0.10.41 实机取证）：
+
+    - `.do()`  → 原生数据（dict 或 list）——唯一可靠通道；
+    - `.keys()` / `.all()` / `.len()` → 错误文案字符串
+      `'Missing required parameters'`（vals/keys 批量通道在 0.3.5 上失效）；
+    - `iter()` → 逐字符产出该错误文案（`'M','i','s'...`）——旧 `_rd_to_py` 与
+      `hk_klines` 的 `for v in rd.vals(...)` 就死在这里：港股写入进得去、读不出来。
+    """
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def do(self):
+        return self._payload
+
+    def keys(self):  # 故意返回错误文案（真实行为）
+        return "Missing required parameters"
+
+    def all(self):   # 同上
+        return "Missing required parameters"
+
+    def __iter__(self):
+        return iter("Missing required parameters")
+
+
+class BrokenQueryResultCompatTest(_OpsTestCase):
+    """0.10.41 回归：`_rd_to_py` 必须先试 `.do()`，否则 vals/keys 全变逐字符垃圾。"""
+
+    def test_rd_to_py_prefers_do_for_dict_payload(self):
+        from storage.providers.mydb_store import _rd_to_py
+        out = _rd_to_py(_BrokenIterQueryResult({"date": 20260911, "close": 222.0}))
+        self.assertEqual(out, {"date": 20260911, "close": 222.0})
+
+    def test_rd_to_py_prefers_do_for_list_payload(self):
+        """vals 通道返回 list——旧实现 dict(list) 直接抛/垃圾，必须原样透出。"""
+        from storage.providers.mydb_store import _rd_to_py
+        payload = [{"date": 20260828, "close": 1.0}, {"date": 20260829, "close": 2.0}]
+        self.assertEqual(_rd_to_py(_BrokenIterQueryResult(payload)), payload)
+
+    def test_rd_to_py_never_yields_char_dict(self):
+        """护栏：绝不产出 {'M': [], 'i': [], ...} 这类逐字符字典。"""
+        from storage.providers.mydb_store import _rd_to_py
+        out = _rd_to_py(_BrokenIterQueryResult([{"date": 20260911}]))
+        self.assertNotIsInstance(out, dict)
+        if isinstance(out, dict):  # 明确的失败信息，而非静默垃圾
+            self.fail(f"逐字符字典回归：{out}")
+
+    def test_mydb_tables_with_broken_iter(self):
+        """mydb_tables 不再返回 [' ', 'M', 'a', ...]（实机原样）。"""
+        from storage.providers import mydb_store as ms
+        with mock.patch.object(ms, "_mydb_rd") as rd:
+            rd.return_value.keys.return_value = _BrokenIterQueryResult(
+                ["hk日k:00700:20260911", "自定义:测试:k1"])
+            tables = ms.mydb_tables()
+        self.assertEqual(tables, ["hk日k", "自定义"])
+
+    def test_hk_klines_with_broken_iter(self):
+        """hk_klines 走 vals（broken 迭代）仍能取回数据（.do() 通道）。"""
+        rows_payload = [{"date": 20260828, "close": 1.0}, {"date": 20260911, "close": 2.0}]
+
+        class _FakeRd:
+            def vals(self, table, code, pattern):
+                return _BrokenIterQueryResult(rows_payload)
+
+            def get(self, table, code, date):
+                return None
+
+        with mock.patch.object(app, "_mydb_rd", return_value=_FakeRd()):
+            rows = app.hk_klines("00700")
+        self.assertEqual([r["date"] for r in rows], [20260828, 20260911])
+
+    def test_hk_klines_get_fallback_when_vals_empty(self):
+        """vals 通道为空时，给出 dates 则逐日 get 兜底（get 是实测唯一稳定读法）。"""
+        store = {"20260911": {"date": 20260911, "close": 9.9},
+                 "20260912": {"date": 20260912, "close": 10.1}}
+
+        class _FakeRd:
+            def vals(self, table, code, pattern):
+                return _BrokenIterQueryResult([])
+
+            def get(self, table, code, date):
+                return _BrokenIterQueryResult(store.get(date))
+
+        with mock.patch.object(app, "_mydb_rd", return_value=_FakeRd()):
+            rows = app.hk_klines("00700", dates=["20260910", "20260911", "20260912"])
+        self.assertEqual([r["date"] for r in rows], [20260911, 20260912])
+
+
+class MydbKeyFormCompatTest(_OpsTestCase):
+    """0.10.41 回归：mydb 键形态（NAS 实机取证，`get` 语义与直觉相反）。
+
+    同一台 0.3.5 引擎上：
+      - 复合键（`hk日k`）：**只有三段** `get(table, "00700", "20240828")` 命中；
+        两段拼接 `get(table, "00700:20240828")` 恒返回 `[]`，带表名的整串同样恒空；
+      - 单段键（`打板指标` / `自定义`）：两段 `get(table, "metrics")` 命中。
+    修复前 `mydb_read(table, "")` 658 键全空、MCP `query_mydb` 全 null。
+    """
+
+    class _TwoSegRd:
+        """镜像真实引擎：只认三段形态（两段拼接恒空）。"""
+
+        def __init__(self):
+            self.calls: list[tuple] = []
+            self.data = {("hk日k", "00700", "20240828"): {"date": 20240828, "close": 1.5},
+                         ("hk日k", "00700", "20260911"): {"date": 20260911, "close": 2.5}}
+
+        def get(self, *args):
+            self.calls.append(args)
+            if len(args) != 3:
+                return []           # 两段拼接形态：真实引擎恒空
+            return self.data.get(args, [])
+
+        def keys(self, table, pattern):
+            return [f"{table}:00700:20240828", f"{table}:00700:20260911"]
+
+    def test_mydb_read_single_key_two_segment(self):
+        """单键读：key="00700:20240828"（含代码段）必须命中。"""
+        rd = self._TwoSegRd()
+        with mock.patch.object(mydb_store_mod, "_mydb_rd", return_value=rd):
+            r = app.mydb_read("hk日k", "00700:20240828")
+        self.assertEqual(r["value"], {"date": 20240828, "close": 1.5})
+        # 一段命中即可，不做无谓的二次探测
+        self.assertEqual(rd.calls[0], ("hk日k", "00700", "20240828"))
+
+    def test_mydb_read_list_strips_table_prefix(self):
+        """全表列取：rd.keys 的键含表名前缀，剥段后逐键读出真值（非全 None）。"""
+        rd = self._TwoSegRd()
+        with mock.patch.object(mydb_store_mod, "_mydb_rd", return_value=rd):
+            r = app.mydb_read("hk日k", "")
+        self.assertEqual(len(r["keys"]), 2)
+        self.assertEqual(
+            r["values"]["hk日k:00700:20240828"], {"date": 20240828, "close": 1.5})
+        self.assertTrue(all(v is not None for v in r["values"].values()))
+
+    def test_mydb_read_single_segment_still_works(self):
+        """单段键契约不回退：自定义表 get(table, "daily_notes") 仍命中。"""
+
+        class _OneSegRd:
+            def get(self, *args):
+                if len(args) == 2 and args[1] == "daily_notes":
+                    return {"note": "ok"}
+                return []
+
+            def keys(self, table, pattern):
+                return ["自定义:daily_notes"]
+
+        with mock.patch.object(mydb_store_mod, "_mydb_rd", return_value=_OneSegRd()):
+            self.assertEqual(app.mydb_read("自定义", "daily_notes")["value"],
+                             {"note": "ok"})
+            listed = app.mydb_read("自定义", "")
+        self.assertEqual(listed["values"]["自定义:daily_notes"], {"note": "ok"})
+
+    def test_rd_get_any_raises_first_exception_when_all_candidates_fail(self):
+        """候选键全失败 → 上抛首个异常（自愈链依赖，不得静默吞掉）。"""
+        from storage.providers.mydb_store import _rd_get_any
+
+        class _DeadRd:
+            def get(self, *args):
+                raise RuntimeError("socket wedged")
+
+        with mock.patch.object(mydb_store_mod, "_mydb_rd", return_value=_DeadRd()):
+            with self.assertRaises(RuntimeError):
+                _rd_get_any("t", "", "k")
+
+    def test_query_mydb_list_reads_two_segment_keys(self):
+        """MCP 通道（同款修复）：query_mydb 列全表必须取到值（三段形态）。"""
+        from interfaces.mcp import pybao_tools
+
+        rd = self._TwoSegRd()
+        with mock.patch.object(pybao_tools, "get_mydb_rd", return_value=rd):
+            out = pybao_tools.query_mydb({"table": "hk日k"})
+        self.assertTrue(out["ok"])
+        values = out["result"]["values"]
+        self.assertEqual(values["hk日k:00700:20240828"], {"date": 20240828, "close": 1.5})
+        self.assertEqual(values["hk日k:00700:20260911"], {"date": 20260911, "close": 2.5})
+
+    def test_rd_keys_normalizes_lazy_queryresult(self):
+        """第三处同源缺陷：`rd_keys` 直接 `list(QueryResult)` → 逐字符垃圾键。
+
+        实机原样：`query_mydb({"table":"hk日k"})` 的 keys 变成 `[' ', ' ', 'M']`、
+        total=27（＝错误文案的字符数），values 全 null。
+        """
+        from interfaces.mcp import pybao_tools
+
+        class _LazyKeysRd:
+            def keys(self, table, pattern):
+                return _BrokenIterQueryResult(["hk日k:00700:20240828",
+                                               "hk日k:00700:20260911"])
+
+            def get(self, *args):
+                return []
+
+        with mock.patch.object(pybao_tools, "get_mydb_rd", return_value=_LazyKeysRd()):
+            keys = pybao_tools.rd_keys("hk日k", "*")
+            out = pybao_tools.query_mydb({"table": "hk日k"})
+        self.assertEqual(keys, ["hk日k:00700:20240828", "hk日k:00700:20260911"])
+        self.assertEqual(out["result"]["total"], 2)
+        self.assertEqual(out["result"]["keys"], keys)
+        self.assertFalse(out["result"]["truncated"])
+
+
+
+
 class TimelineTests(_OpsTestCase):
     """W1 批 2：驾驶舱时间线聚合（records 沉淀 / sync 历史 / backups / alerts）。
 
@@ -404,7 +627,12 @@ class _MydbRdTests(_OpsTestCase):
     """mydb 读写：QueryResult/JSON 串归一化、并发串行化、失败丢弃连接自愈。"""
 
     def test_read_queryresult_normalized(self):
-        """rd.get 返回 QueryResult 形态 → 读出原生 dict（不再序列化崩）。"""
+        """rd.get 返回 QueryResult 形态 → 读出原生 dict（不再序列化崩）。
+
+        0.10.41：`_QueryResultLike`（带 keys/all 的 mapping-like 替身）现在走
+        `dict(v)` 兜底分支 → 返回其内容，而不是 None——这是 `.do()` 缺失时的正确
+        退化（真实 NAS 的 QueryResult 有 `.do()`，走的是更靠前的分支）。
+        """
         rd = _FakeRd()
         rd.data[("t", "k")] = _QueryResultLike({"metrics": {"a": 1}, "n": 2})
         app._mydb_rd._rd = rd
@@ -504,6 +732,7 @@ class _MydbRdTests(_OpsTestCase):
 
     def test_failure_drops_connection_and_recovers(self):
         """rd 调用异常 → 丢弃缓存连接；下一次调用重新 init 后恢复正常。"""
+        self.addCleanup(app._mydb_rd_reset)
         good = _FakeRd()
         good.data[("t", "k")] = {"a": 1}
         bad = _FakeRd()
@@ -513,6 +742,7 @@ class _MydbRdTests(_OpsTestCase):
 
         bad.get = boom
         app._mydb_rd._rd = bad
+        # 0.10.41：候选键全失败时上抛首个异常（此前静默吞掉 → 自愈链断）
         with self.assertRaises(RuntimeError):
             app.mydb_read("t", "k")
         self.assertIsNone(app._mydb_rd._rd)  # 缓存已丢弃（自愈前提）
@@ -522,7 +752,6 @@ class _MydbRdTests(_OpsTestCase):
         with mock.patch.object(mydb_store_mod, "_mydb_import", return_value=fake_mod):
             r = app.mydb_read("t", "k")
         self.assertEqual(r["value"], {"a": 1})
-        self.addCleanup(app._mydb_rd_reset)
 
     def test_hk_klines_serialized_and_normalized(self):
         """hk_klines：vals 读取持锁 + QueryResult 归一化（0.8.10 纳入锁面）。"""

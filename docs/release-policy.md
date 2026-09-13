@@ -73,6 +73,8 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 | 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） |
 | 同名 tag 重传资产无法发现 | `tag_name`/`published_at` 不变，旧探针只看 tag → 只能等同步失败被动发现（09-07/09-08 两次） | 0.10.40（`/releases` 列表 + 资产指纹 `asset_fingerprint`；首见只建基线，变化即告警 `asset_changed`） |
 | 上游发新版但**无人被告知** | 探测判定把「面板版本」当引擎版本比（`(0,3,6)>(0,10,36)=False`）→ `stale` 恒 false；探针失败静默留空 | 0.10.37（A/B/D：`IMAGE_TAG` 注入 + 引擎版本同类比较 + 看门狗告警与显式降级）。**仍待做（C）**：`/releases/latest` 看不到 prerelease；同名 tag 重传的资产指纹未比对——0.3.5 两次同 tag 重传只能靠同步失败被动发现 |
+| **pybao 惰性 `QueryResult` 被当普通容器用** | `.do()` 才取原生数据；`.keys()/.all()/.len()` 返回错误文案 `'Missing required parameters'`，`iter()` 逐字符吐它 → 键列表变 `[' ', 'M', 'a'…]`、全表读全空、`for v in rd.vals(...)` 恒 0 行（**数据写进去了却读不出来**） | 0.10.41（三处收口：`mydb_store._rd_to_py` 补 `.do()` 分支、`pybao_tools.rd_keys` 经 `_to_py` 归一、`hk_klines` 走 `_rd_to_py`）。**凡 rd 返回值必先过归一函数**，禁止直接 `list()/dict()/for` 迭代 QueryResult |
+| mydb 键形态（段式 vs 拼接） | `get(table, "00700:20240828")` 与带表名整串在 0.3.5 上**恒返回 `[]`**；命中的是**三段** `get(table, code, date)`；单段键（`打板指标`/`自定义`）才用两段 | 0.10.41（候选序列 `_rd_get_any`/`mydb_key_candidates` 逐个试，首个非空即返回；剥表名前缀只在首段确属已登记前缀时做）。**实测为准，勿按直觉写键形** |
 
 ### 6.2 换域/换资产半小时流程
 

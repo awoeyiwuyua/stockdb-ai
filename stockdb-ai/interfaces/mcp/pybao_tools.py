@@ -53,28 +53,91 @@ _load_error: str | None = None  # 最近一次加载失败原因（诊断用）
 # 同进程容器部署时与 app 侧 storage/providers/mydb_store._rd_lock 共用同一把锁；
 # 独立进程（stdio/--http MCP）storage 包不可导入时回退本模块自带锁。
 try:  # noqa: E402 - 同进程容器：与 app 侧共享同一把 rd 锁
+    from storage.providers.mydb_store import _MYDB_TABLE_PREFIXES as _MYDB_TABLE_PREFIXES
     from storage.providers.mydb_store import _rd_lock as _RD_LOCK
 except Exception:  # noqa: BLE001 - 独立进程部署：storage 包不在 sys.path
     _RD_LOCK = threading.Lock()
+    # 回退副本（与 storage 侧保持一致）：仅用于"键首段是否表名前缀"的剥段判定
+    _MYDB_TABLE_PREFIXES = ("hk日k", "打板指标", "竞价快照", "打板序列", "清单", "自定义")
 _PYBAO_LOCK = _RD_LOCK  # 指标计算与 mydb 读写同锁互斥（防帧交错）
 
 
-def rd_get(table: str, key: str) -> object | None:
-    """加锁读 mydb 单键（pybao rd 非线程安全，全进程串行化）；rd 不可用 → None。"""
+def rd_get(table: str, *args) -> object | None:
+    """加锁读 mydb 单键（pybao rd 非线程安全，全进程串行化）；rd 不可用 → None。
+
+    0.10.41：改收可变参数——复合键的唯一命中形态是三段
+    `rd.get(table, code, date)`（两段拼接恒空），故须原样透传段数。
+    """
     rd = get_mydb_rd()
     if rd is None:
         return None
     with _RD_LOCK:
-        return rd.get(table, key)
+        return rd.get(table, *args)
 
 
 def rd_keys(table: str, pattern: str) -> list:
-    """加锁枚举 mydb 键（pybao rd 非线程安全，全进程串行化）；rd 不可用 → []。"""
+    """加锁枚举 mydb 键（pybao rd 非线程安全，全进程串行化）；rd 不可用 → []。
+
+    0.10.41（NAS 实机定位，第三处同源缺陷）：`keys()` 返回的是**惰性 QueryResult**，
+    直接 `list(...)` 会走坏掉的 `__iter__` → 逐字符产出错误文案
+    （实机 `query_mydb({"table":"hk日k"})` 的 keys 变成 `[' ', ' ', 'M']`、total=27）。
+    必须先 `_to_py`（内部 `.do()`）取回真实键列表——与 `mydb_tables`/`mydb_read` 同款。
+    """
     rd = get_mydb_rd()
     if rd is None:
         return []
     with _RD_LOCK:
-        return list(rd.keys(table, pattern) or [])
+        raw = _to_py(rd.keys(table, pattern))
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return []
+
+
+def mydb_key_candidates(full_key: str, known_tables: tuple[str, ...] = ()) -> list[tuple]:
+    """把键展开成 `rd.get` 的候选参数元组（0.10.41，首个命中即返回）。
+
+    实测（NAS 0.3.5 引擎）：
+      - `hk日k:00700:20240828` → `("00700", "20240828")` 三段命中；
+        `("00700:20240828",)` 两段拼接恒空。
+      - `打板指标:20260105:metrics` → `("20260105", "metrics")` 三段命中。
+      - `自定义:daily_notes` → `("daily_notes",)` 两段命中（单段键无第三段）。
+
+    **只在首段确属"已登记表名前缀"时才剥段**：客户端直接传的键
+    `"00700:20240828"` 首段是股票代码而非表名，误剥会丢代码段（用例
+    `test_query_mydb_lookup_key_keeps_composite` 抓到的）。`known_tables` 传
+    `_MYDB_TABLE_PREFIXES` 即启用剥段。
+    """
+    full = str(full_key)
+    sub = full
+    head, sep, _ = full.partition(":")
+    if sep and head in (known_tables or ()):
+        sub = full.split(":", 1)[1]
+    cands: list[tuple] = []
+    if ":" in sub:
+        seg0, _, rest = sub.partition(":")
+        if seg0 and rest:
+            cands.append((seg0, rest))
+        cands.append((sub,))
+    else:
+        cands.append((sub,))
+    if sub != full:
+        cands.append((full,))           # 兼容"键含表名整串"的旧行为
+    return cands
+
+
+def rd_get_candidates(table: str, cands: list[tuple]) -> object | None:
+    """逐个候选形态读，返回首个非空值；全空/异常 → None。
+
+    走 `rd_get`（而非直连 rd）以便测试与独立进程部署保持同一通道。
+    """
+    for cand in cands:
+        try:
+            val = _to_py(rd_get(table, *cand))
+        except Exception:  # noqa: BLE001 - 形态不符 → 换下一候选
+            val = None
+        if val:
+            return val
+    return None
 
 # 支持的技术指标白名单（39 项，与 pybao zb.get 支持集合一致；含 zhishu 指数）。
 # 未知指标离线即可报错，不依赖 pybao 是否可用。
@@ -889,7 +952,11 @@ def query_mydb(args: dict) -> dict:
 
     参数：
         table  自定义表名（非空、仅字母数字与 _:-、不得与上游保留表冲突）
-        key    可选；传了（非空）则只读该键，未传则列出表内全部键值
+        key    可选；传了（非空）则只读该键，未传则列出表内全部键值。
+               **必须给完整键**（复合键要连代码段）：`hk日k` 的键是
+               `00700:20240828` 这种两段形态；只给 `00700` 或通配
+               `00700:*` 都读不到（0.10.41 NAS 实机取证：引擎 get 只认
+               完整键，不支持前缀/通配；列全表请用不传 key 的列表模式）。
         limit  未传 key 时最多返回键数（默认 100，硬上限 500），超限 truncated=True
         cursor 可选字符串；仅未传 key 时生效——作为续取游标，先对键排序、
                再只保留 > cursor 的键（配合 result.next_key 翻页）
@@ -926,8 +993,10 @@ def query_mydb(args: dict) -> dict:
 
     try:
         if key:
-            # 0.9.11：经加锁辅助访问（pybao rd 单连接非线程安全，全进程串行化）
-            value = _to_py(rd_get(table, key))
+            # 0.9.11：经加锁辅助访问（pybao rd 单连接非线程安全，全进程串行化）。
+            # 0.10.41：客户端可能传 "00700:20240828" 复合键——经候选展开按三段读
+            #（拼接形态在引擎上恒空）；带表名的整串同样剥段后命中。
+            value = rd_get_candidates(table, mydb_key_candidates(key))
             return {
                 "ok": True,
                 "result": {
@@ -948,15 +1017,14 @@ def query_mydb(args: dict) -> dict:
         next_key = kept_keys[-1] if truncated else None
         values: dict[str, object] = {}
         for k in kept_keys:
-            # 键形如 "hk日k:00700:20250425"（含表名前缀）或 "custom:20250425"；
-            # 去掉首个冒号前的表名段，其余部分整体作为 get 的 key（如 "00700:20250425"）。
-            # 不能用 split(":")[-1]：会丢掉港股代码段导致读不到值。
+            # 键形如 "hk日k:00700:20250425"（含表名前缀）。0.10.41（NAS 实机取证）：
+            # `get(table, "00700:20250425")` 两段拼接形态**恒返回空**，命中的是
+            # 三段 `get(table, "00700", "20250425")`；单段键则用两段。
+            # 此前只发整串（含表名）→ 引擎恒空，`query_mydb({"table":"hk日k"})`
+            # 的 658 个键全是 null。
             full = str(k)
-            lookup_key = full.split(":", 1)[-1] if ":" in full else full
-            try:
-                values[full] = _to_py(rd_get(table, lookup_key))
-            except Exception:  # noqa: BLE001 - 单键失败不中断整体
-                values[full] = None
+            values[full] = rd_get_candidates(
+                table, mydb_key_candidates(full, _MYDB_TABLE_PREFIXES))
         return {
             "ok": True,
             "result": {

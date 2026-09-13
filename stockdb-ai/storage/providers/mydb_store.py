@@ -68,26 +68,41 @@ def _mydb_rd():
 
 
 def _rd_to_py(v):
-    """pybao 返回值归一化（0.8.10 修复）：dict 原样；JSON 字符串解析；QueryResult 转 dict。
+    """pybao 返回值归一化：QueryResult → 原生 list/dict；原生数据与 JSON 串原样透出。
 
-    与 mcp._auction_value_to_dict 语义对齐：任何形态一律转 dict，失败按缺失处理——
-    旧实现转换失败原样返回 QueryResult，json.dumps 直接崩（"Object of type
-    QueryResult is not JSON serializable"，/api/data/read 实证）。
+    0.8.10：旧实现转换失败原样返回 QueryResult，json.dumps 直接崩
+    （"Object of type QueryResult is not JSON serializable"，/api/data/read 实证）。
+    0.10.41（NAS 实机定位，两处同源缺陷）：
+      ① **必须先试 `.do()`**：QueryResult 是惰性响应对象，`dict(QueryResult)` 会走
+         `.keys()`，而 `.keys()` 在 vals/keys 结果上返回错误文案字符串
+         （实测 `'Missing required parameters'`）→ `{"M": {}, "i": {}, ...}` 逐字符垃圾。
+         后果：`mydb_tables()` 返回 `[" ", "M", "a", …]`、`mydb_read(table, "")` 同款垃圾、
+         `hk_klines()` 恒空（**港股写入进得去、读不出来**）。MCP 侧 `pybao_tools._to_py`
+         一直有这层 `.do()`，本函数缺失 → 两处行为分叉。
+      ② **原生数据必须原样透出**：键列表是 `list[str]`（如 `['t:20260814', …]`），
+         草案一度对字符串做 `json.loads` → 解析失败返回 None，把合法键全抹成 `[None, None]`。
+         故顺序＝QueryResult → JSON 串 → 其它原样返回。
     """
     if v is None:
         return None
-    if isinstance(v, dict):
-        return v
+    if isinstance(v, (list, tuple)):
+        return list(v)          # 键列表等原生序列：原样透出（绝不逐项 JSON 解析）
     if isinstance(v, str):
-        try:
-            parsed = json.loads(v)
+        try:                    # 单值 JSON 串 → 对象；非 JSON → 无效值（旧契约）
+            return json.loads(v)
         except ValueError:
             return None
-        return parsed if isinstance(parsed, dict) else None
-    if hasattr(v, "keys") and hasattr(v, "all"):
-        try:  # pybao QueryResult：dict(value) 即原生数据
-            return dict(v)
+    if isinstance(v, (dict, int, float, bool)):
+        return v
+    if hasattr(v, "do") and callable(v.do):
+        try:  # QueryResult：do() 才真正取回原生数据（dict 或 list）
+            return _rd_to_py(v.do())
         except Exception:  # noqa: BLE001 - 转换失败按缺失处理
+            return None
+    if hasattr(v, "keys") and hasattr(v, "all"):
+        try:  # 兼容旧形态替身（带 keys/all 的 mapping-like）
+            return dict(v)
+        except Exception:  # noqa: BLE001
             return None
     return None
 
@@ -159,6 +174,65 @@ def mydb_write(table: str, items: list[tuple], batch: bool = False) -> dict:
             raise
 
 
+def _rd_get_any(table: str, seg: str, key: str):
+    """按候选键形态逐个读，返回首个非空值；全部落空 → None，全异常 → 上抛首个异常。
+
+    0.10.41（NAS 实机取证，同一台 0.3.5 引擎）：
+      - **三段键**（`hk日k` 的 `00700` + `20240828`）：`get(table, code, date)` 命中；
+      - **两段键**（`打板指标` / `自定义` 的 `metrics` / `daily_notes`）：`get(table, key)` 命中；
+      - `get(table, "00700:20240828")` **两段拼接形态恒返回 `[]`**（实测），带表名的整串同样恒空。
+    修复前 `mydb_read(table, "")` 的 658 个键全空、MCP `query_mydb` 全 null——
+    正是"港股写入进得去、读不出来"。
+    候选顺序：含冒号的键先按「段1 + 段2」走三段，再退整串两段；单段键直接两段。
+    异常语义：某候选抛错（rd 楔死等）时继续试其余候选；**全部候选都失败时上抛首个
+    异常**，调用方据此重置连接自愈（0.8.10 契约，用例断言 RuntimeError）。
+    """
+    with _rd_lock:
+        rd = _mydb_rd()
+        key = str(key)
+        candidates: list[tuple] = []
+        if ":" in key:                                  # 复合键：三段优先（实测唯一命中形态）
+            seg0, _, rest = key.partition(":")
+            if seg0 and rest:
+                candidates.append((table, seg0, rest))
+            candidates.append((table, key))             # 两段兜底（保留旧契约）
+        else:
+            candidates.append((table, key))             # 单段键：表名之后就是键
+            if seg and seg != table:
+                candidates.append((table, f"{seg}:{key}"))
+        first_exc: Exception | None = None
+        for cand in candidates:
+            try:
+                val = _rd_to_py(rd.get(*cand))
+            except Exception as exc:  # noqa: BLE001 - 形态不符 → 换下一候选
+                if first_exc is None:
+                    first_exc = exc
+                continue
+            if val:
+                return val
+        if first_exc is not None:
+            raise first_exc
+        return None
+
+
+def rd_get_strip_table(table: str, full_key: str):
+    """读一条"带表名前缀"的完整键（`rd.keys` 输出的形态），自动剥前缀并多形态兜底。
+
+    `rd.keys(table, "*")` / `rd.keys(prefix, "*")` 返回的键**含表名段**，形如
+    `hk日k:00700:20240828`、`打板指标:20260105:metrics`；而 `rd.get` 要的是
+    **表名之后**的部分。把整串喂给 `rd.get(table, full)` 在 0.3.5 引擎上恒返回空
+    （0.10.41 NAS 实机取证：`mydb_read("hk日k", "")` 658 键全空、MCP `query_mydb` 同款）。
+    先试剥前缀形态，落空再回退整串，兼容两种键契约。
+    """
+    full = str(full_key)
+    sub = full.split(":", 1)[1] if ":" in full else full
+    if sub != full:
+        val = _rd_get_any(table, "", sub)
+        if val:
+            return val
+    return _rd_get_any(table, "", full)
+
+
 def mydb_read(table: str, key: str = "") -> dict:
     """读取 mydb 自定义表。key 为空时列出表内全部键值。
     0.8.10：持 _rd_lock；值统一 _rd_to_py 归一化；rd 异常 → 丢弃连接自愈。
@@ -167,34 +241,43 @@ def mydb_read(table: str, key: str = "") -> dict:
     排队 → 点击多时 webui 假死。面板展示对中间态不敏感，可接受。"""
     table = validate_custom_table(table)
     if key:
+        # 0.10.41：单键读也必须走两段形态（此前 `rd.get(table, key)`，key 为
+        # "00700:20240828" 时被当成单参 → 引擎恒返回空；NAS 实机取证）。
+        # 0.10.41：异常仍须丢弃缓存连接（自愈契约，_rd_lock 可重入）
         with _rd_lock:
             try:
-                rd = _mydb_rd()
-                val = _rd_to_py(rd.get(table, key))
-                return {"table": table, "key": key, "value": val}
+                val = _rd_get_any(table, "", key)
             except Exception:
                 _mydb_rd_reset()
                 raise
+        return {"table": table, "key": key, "value": val}
     with _rd_lock:
         try:
             rd = _mydb_rd()
-            keys = rd.keys(table, "*") or []
+            # 0.10.41：经 _rd_to_py（内部 .do()）取键列表——直接迭代 QueryResult 会得到
+            # 错误文案逐字符（实机 `mydb_read(table, "")` 返回 {"M": {}, "i": {}, ...}）
+            keys = _rd_to_py(rd.keys(table, "*"))
         except Exception:
             _mydb_rd_reset()
             raise
+    if not isinstance(keys, list):
+        keys = []
     values = {}
     for k in keys:
         # 0.9.11：复合键解析（split(":", 1) 保留代码段）——键形如
         # "hk日k:00700:20250425"，此前 split(":")[-1] 只取日期段，
         # 同一日期多只股票时读出错误记录/读不到（pybao_tools.query_mydb
         # 已修同款，app 侧同步）
+        #
+        # 0.10.41：键来自 rd.keys，含表名前缀，必须剥段后多形态读
+        # （此前 split(":", 1)[-1] 得到整串 → 引擎侧无此键，658 键全空，实机取证）
         full = str(k)
-        lookup_key = full.split(":", 1)[-1] if ":" in full else full
-        try:
-            with _rd_lock:  # 0.9.12：逐键独立持锁（细粒度，见函数注释）
-                values[full] = _rd_to_py(_mydb_rd().get(table, lookup_key))
-        except Exception:  # noqa: BLE001 - 单键失败按缺失
+        try:  # 0.9.12：逐键独立持锁（细粒度，见函数注释）
+            with _rd_lock:
+                values[full] = rd_get_strip_table(table, full)
+        except Exception:  # noqa: BLE001 - 单键失败按缺失，但连接须丢弃自愈
             values[full] = None
+            _mydb_rd_reset()
     return {"table": table, "keys": keys, "values": values}
 
 
@@ -222,9 +305,13 @@ def mydb_tables() -> list[str]:
         with _rd_lock:
             try:
                 rd = _mydb_rd()
-                keys = rd.keys(prefix, "*") or []
+                # 0.10.41：必须经 _rd_to_py（内部走 .do()）——直接迭代 QueryResult 会得到
+                # 错误文案的逐字符（NAS 实测 `mydb_tables()` 返回 [' ', 'M', 'a', ...]）
+                keys = _rd_to_py(rd.keys(prefix, "*"))
             except Exception:  # noqa: BLE001 - 单前缀失败不影响其余（不重置连接：前缀不存在可能报错）
                 continue
+        if not isinstance(keys, list):
+            continue
         for k in keys:
             table = str(k).split(":")[0] if ":" in str(k) else str(k)
             if table and not any(table.startswith(r) for r in _RESERVED_TABLES):
