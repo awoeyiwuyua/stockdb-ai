@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import collections
+import hashlib
 import http.client
 import json
 import math
@@ -2093,6 +2094,9 @@ MCP_CALLS_DEQUE_MAX = 500             # 内存调用 deque 上限（最新 500 �
 MCP_CALLS_LIST_DEFAULT = 100          # list_mcp_calls 默认条数
 
 GITHUB_RELEASE_URL = "https://api.github.com/repos/hello245m/free-stockdb/releases/latest"
+# 0.10.40：列表端点（含 prerelease + assets）。旧 /latest 保留常量给历史测试/兼容，
+# 探针统一走 RELEASES_URL。
+GITHUB_RELEASES_URL = "https://api.github.com/repos/hello245m/free-stockdb/releases?per_page=10"
 RELEASE_TTL_SECONDS = 3600            # 上游版本探针 TTL 缓存（成功与失败均缓存）
 
 
@@ -2238,7 +2242,9 @@ def upstream_status() -> dict:
       - 都拿不到时退回构建期注入的 IMAGE_TAG（Dockerfile ARG VERSION）；
       - 三者都拿不到 → kind="unknown"（无法比对，不等于"已最新"）。
 
-    kind：up_to_date / update_available / probe_failed / unknown
+    kind：up_to_date / update_available / asset_changed / probe_failed / unknown
+    asset_changed（0.10.40）：**同名 tag 重传资产**——版本号不变但资产内容变了
+    （上游两次这么干过），此时"版本没变"≠"不用动"，必须重新 pin SHA256 重建镜像。
     纯只读、不抛（探针/日志异常一律降级）。
     """
     try:
@@ -2253,13 +2259,25 @@ def upstream_status() -> dict:
         engine = None
     engine_tag = (engine or {}).get("base") or _env_version_tag()
     engine_display = (engine or {}).get("version") or engine_tag
+    # 资产指纹比对（0.10.40）：与版本号比较相互独立——同 tag 重传时版本号可能完全没变
+    try:
+        watch = upstream_asset_watch(upstream) if upstream else {"status": "none"}
+    except Exception:  # noqa: BLE001 - 指纹档案异常不影响版本判定
+        watch = {"status": "none"}
     base = {"engine_version": engine_display, "engine_tag": engine_tag,
-            "upstream": upstream}
+            "upstream": upstream, "asset_watch": watch}
     if upstream is None or not upstream.get("tag_name"):
         return {**base, "kind": "probe_failed",
                 "message": ("上游版本探测失败（GitHub 不可达或超出重试）："
                             "本次无法判断是否有新版")}
     up_tag = upstream["tag_name"]
+    if watch.get("status") == "changed":
+        return {**base, "kind": "asset_changed",
+                "message": (f"上游 **{up_tag} 同名资产已变更**（指纹 "
+                            f"{(watch.get('previous_fingerprint') or '')[:8]}→"
+                            f"{(watch.get('fingerprint') or '')[:8]}）：tag 未变但二进制/资产"
+                            f"被重传，需重新核对 SHA256 并重建镜像"
+                            f"（docs/release-policy.md §6.2 换资产流程）")}
     ut = _version_tuple(up_tag)
     ct = _version_tuple(engine_tag) if engine_tag else None
     if ut is None or ct is None:
@@ -2267,8 +2285,9 @@ def upstream_status() -> dict:
                 "message": (f"版本号无法解析（上游 {up_tag!r} / 当前引擎 "
                             f"{engine_tag!r}）——无法判断是否有新版")}
     if ut > ct:
+        pre = "（上游标记为 pre-release）" if upstream.get("prerelease") else ""
         return {**base, "kind": "update_available",
-                "message": (f"上游引擎已发布 {up_tag}（当前运行 "
+                "message": (f"上游引擎已发布 {up_tag}{pre}（当前运行 "
                             f"{engine_display or engine_tag}），建议升级镜像"
                             f"（重新 pin ARG VERSION + SHA256 后重建）")}
     return {**base, "kind": "up_to_date",
@@ -2283,12 +2302,14 @@ def upstream_release_alert(*, alerts=None, status: dict | None = None) -> str:
     （NAS 实证：0.3.5 同 tag 重传是靠同步全线失败才发现的）。
     本函数把三种情况接进告警中心（source="上游"，当日去重防刷屏）；
     条件恢复（回到 up_to_date）时撤回同源告警——与数据类告警同一自愈纪律。
+    0.10.40 增补：`asset_changed`（同名 tag 重传资产）同样告警——这是"版本没变但
+    必须重建镜像"的独立信号，历史两次都是靠同步全线失败才被动发现。
     返回 status["kind"]（测试用）。
     """
     target = alerts if alerts is not None else _get_alerts()
     st = status if status is not None else upstream_status()
     kind = st.get("kind")
-    if kind in ("update_available", "probe_failed", "unknown"):
+    if kind in ("update_available", "probe_failed", "unknown", "asset_changed"):
         target.add("warning", "上游", st["message"])
     else:
         target.resolve("上游", "上游")
@@ -2484,39 +2505,162 @@ def _mcp_tool_name(msg: dict) -> str:
 _RELEASE_CACHE = {"at": 0.0, "val": None}   # {at: unix 秒, val: dict|None}
 
 
+def _gh_headers() -> dict:
+    return {
+        # 浏览器形态 UA：GitHub API 对默认 urllib UA 偶发 403
+        "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def asset_fingerprint(assets) -> str:
+    """release 资产指纹（0.10.40）：对「资产名+digest+大小+更新时间」排序后取 sha256。
+
+    用途：**同名 tag 重传二进制**的主动发现。上游两次同 tag 重传 0.3.5（09-07 协议门禁、
+    09-08 重建二进制），tag_name 与 published_at 都可能不变，只有资产内容变了——
+    本项目历史上只能靠"同步全线失败"被动发现（见 docs/release-policy.md §6.1）。
+    取 digest（GitHub 对 uploaded 资产返回 `sha256:...`）为主；缺失时退化为
+    name+size+updated_at（老资产无 digest 时的可用信号，updated_at 在重传时会变）。
+    刻意**不含 download_count**（每次下载都变，会天天误报）。
+    """
+    rows = []
+    for a in assets or []:
+        if not isinstance(a, dict):
+            continue
+        rows.append("|".join((
+            str(a.get("name") or ""),
+            str(a.get("digest") or ""),
+            str(a.get("size") if a.get("size") is not None else ""),
+            str(a.get("updated_at") or ""),
+        )))
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+
+
+def _release_summary(raw: dict) -> dict:
+    """GitHub release JSON → 本项目载荷形态（含 prerelease 标记与资产指纹）。"""
+    assets = raw.get("assets") if isinstance(raw.get("assets"), list) else []
+    return {
+        "tag_name": str(raw.get("tag_name") or ""),
+        "html_url": str(raw.get("html_url") or ""),
+        "published_at": raw.get("published_at"),
+        "prerelease": bool(raw.get("prerelease")),
+        "draft": bool(raw.get("draft")),
+        "asset_count": len(assets),
+        "asset_fingerprint": asset_fingerprint(assets),
+    }
+
+
 def fetch_upstream_release(*, timeout: float = 10, ttl: float = RELEASE_TTL_SECONDS,
                            force: bool = False) -> dict | None:
-    """上游最新版本探针：GET GitHub releases/latest（浏览器形态 UA）。
+    """上游最新版本探针：GET GitHub releases **列表**（浏览器形态 UA）。
 
-    成功 → {tag_name, html_url, published_at}；失败/网络异常/解析失败 → None
+    成功 → {tag_name, html_url, published_at, prerelease, draft, asset_count,
+    asset_fingerprint[, newer_prerelease/stable]}；失败/网络异常/解析失败 → None
     （不抛）。结果 TTL 缓存（默认 3600s；成功与失败均缓存，避免失败时反复打
     GitHub）；force=True 绕过缓存（手动刷新用）。
+
+    0.10.40 端点 `/releases/latest` → `/releases`（列表）：
+      - `/latest` **排除 prerelease**：上游把新版标成 pre-release 时探针完全看不到（旧缺口）；
+      - 列表同时带回 assets，可对资产取指纹 ——「同名 tag 重传」唯一可用的信号。
+    选取规则：取第一条非 draft（pre-release 也算"最新"但标记出来；若最新正式版与
+    最新 pre-release 不是同一条，附带 newer_prerelease 与 stable 供上层提示）。
     """
     now = time.time()
     if not force and now - _RELEASE_CACHE["at"] < ttl:
         return _RELEASE_CACHE["val"]
     val = None
     try:
-        req = urllib.request.Request(
-            GITHUB_RELEASE_URL,
-            headers={
-                # 浏览器形态 UA：GitHub API 对默认 urllib UA 偶发 403
-                "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                               "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-        )
+        req = urllib.request.Request(GITHUB_RELEASES_URL, headers=_gh_headers())
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if isinstance(data, dict) and data.get("tag_name") is not None:
-            val = {"tag_name": str(data["tag_name"]),
-                   "html_url": str(data.get("html_url") or ""),
-                   "published_at": data.get("published_at")}
+        items = [x for x in data if isinstance(x, dict) and not x.get("draft")] \
+            if isinstance(data, list) else []
+        if items:
+            val = _release_summary(items[0])
+            stable = next((x for x in items if not x.get("prerelease")), None)
+            if stable is not None and stable is not items[0]:
+                val["newer_prerelease"] = True
+                val["stable"] = _release_summary(stable)
     except Exception:  # noqa: BLE001 - 探针失败返回 None，不抛
         val = None
     _RELEASE_CACHE.update(at=now, val=val)
     return val
+
+
+# ---- 上游资产指纹档案（0.10.40：同名 tag 重传检测） ----
+# 首次见到某 tag 只落基线、不告警（否则升级当天就误报）；此后指纹变化才报
+# 「资产已变更，需重新 pin 构建」。文件落 DATA_DIR（与 alerts.json 同卷，重建不丢）。
+UPSTREAM_WATCH_FILE = "upstream_watch.json"
+_UNSET = object()      # 哨兵：区分「省略参数=自己去探测」与「显式传 None=无数据」
+
+
+def _upstream_watch_path() -> Path:
+    # 模块引用（非 from-import）：测试 patch config.DATA_DIR 在本处生效
+    import config as _config
+    return Path(_config.DATA_DIR) / UPSTREAM_WATCH_FILE
+
+
+def upstream_asset_watch(release=_UNSET, *, save: bool = True) -> dict:
+    """比对上游资产指纹档案，检出「同名 tag 重传」。
+
+    返回 {status, tag, fingerprint, previous_fingerprint, changed_at, asset_count,
+    baseline_saved}：
+      baseline  首次记录该 tag 的指纹（不告警）
+      same      指纹未变
+      changed   同 tag 指纹变了 → **上游重传了资产**（需重新 pin SHA256 并重建镜像）
+      none      无 release 数据 / 无资产指纹可用
+
+    release 省略（默认）→ 自行调用探针；显式传 None/无指纹 dict → 直接返 none
+    （0.10.40：初版用 None 当"省略"哨兵，导致"无数据"分支根本走不到且会误打网络）。
+    """
+    file = _upstream_watch_path()
+    try:
+        doc = json.loads(file.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            doc = {}
+    except (OSError, ValueError):
+        doc = {}
+    rel = fetch_upstream_release() if release is _UNSET else release
+    if not isinstance(rel, dict) or not rel.get("tag_name") or not rel.get("asset_fingerprint"):
+        return {"status": "none", "tag": None, "fingerprint": None,
+                "previous_fingerprint": None, "changed_at": None, "asset_count": None,
+                "baseline_saved": False}
+    tag = str(rel["tag_name"])
+    fp = str(rel["asset_fingerprint"])
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    prev = doc.get(tag) if isinstance(doc.get(tag), dict) else None
+
+    def _persist() -> bool:
+        doc[tag] = {"fingerprint": fp, "first_seen": now_iso,
+                    "asset_count": rel.get("asset_count")}
+        try:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(file) + ".tmp"
+            Path(tmp).write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+            os.replace(tmp, file)
+            return True
+        except OSError as exc:
+            _warn(f"上游指纹档案落盘失败：{file}（{exc}）")
+            return False
+
+    if prev is None:
+        saved = _persist() if save else False
+        return {"status": "baseline", "tag": tag, "fingerprint": fp,
+                "previous_fingerprint": None, "changed_at": now_iso,
+                "asset_count": rel.get("asset_count"), "baseline_saved": saved}
+    old_fp = str(prev.get("fingerprint") or "")
+    if old_fp == fp:
+        return {"status": "same", "tag": tag, "fingerprint": fp,
+                "previous_fingerprint": old_fp,
+                "changed_at": prev.get("first_seen"),
+                "asset_count": rel.get("asset_count"), "baseline_saved": False}
+    saved = _persist() if save else False
+    return {"status": "changed", "tag": tag, "fingerprint": fp,
+            "previous_fingerprint": old_fp, "changed_at": now_iso,
+            "asset_count": rel.get("asset_count"), "baseline_saved": saved}
 
 
 def _version_tuple(s) -> tuple | None:
