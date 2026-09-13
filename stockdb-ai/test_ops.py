@@ -1102,11 +1102,36 @@ class SyncFailureClassTest(unittest.TestCase):
         self.assertFalse(r["needs_action"])
         self.assertIn("镜像", r["detail"])
 
-    def test_not_effective_on_other_warn(self):
+    def test_manifest_warn_scheduled_is_informational(self):
+        """定时 + 已验证通过 + 清单类 warn → not_effective 但**不需动作**（信息性）。"""
         r = self._cls({"exit_code": 0, "verified": "pass", "data_latest": "20260910",
                        "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
         self.assertEqual(r["class"], "not_effective")
+        self.assertFalse(r["needs_action"])
+
+    def test_manifest_warn_manual_needs_look(self):
+        """用户手动触发却"下载 0 文件"（且已验证通过）→ 需要人看一眼（清单可能真变了）。"""
+        r = self._cls({"trigger": "manual", "exit_code": 0, "verified": "pass",
+                       "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
         self.assertTrue(r["needs_action"])
+
+    def test_passed_retry_with_stale_warn_is_benign(self):
+        """NAS 09-07 真身：stale-retry 的 warn 文案与首跑相同（"下载 0 文件且数据未更新"）
+        但 verified=pass —— 必须判「等上游」而非需处理（否则当日打断判定永远走不到）。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 3.6,
+                       "data_latest": "20260904",
+                       "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+
+    def test_passed_retry_with_manifest_warn_needs_no_action(self):
+        """已验证通过的重试 + 清单类 warn → not_effective 但不需动作（信息性）。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
+        self.assertFalse(r["needs_action"])
 
     def test_self_healed_when_verify_failed_then_success(self):
         """NAS 09-11 16:17 真身：1660s 后验证失败，但之后 17:50 成功 → 已自愈。"""
@@ -1123,17 +1148,18 @@ class SyncFailureClassTest(unittest.TestCase):
         self.assertTrue(r["needs_action"])
 
     def test_run_interrupted_for_manual_short_failure(self):
-        """手动短失败且**非当日最后一条** → 被打断（不需处理）。"""
+        """手动短失败 + 当日有成功运行 → 被打断（不需处理）。"""
         r = app.sync_failure_class(
             {"trigger": "manual", "exit_code": 0, "verified": "fail",
-             "duration_sec": 6.4, "data_latest": None}, is_last_of_day=False)
+             "duration_sec": 6.4, "data_latest": None},
+            day_has_success=True)
         self.assertEqual(r["class"], "run_interrupted")
         self.assertFalse(r["needs_action"])
         self.assertIn("重启", r["detail"])
 
-    def test_run_interrupted_when_last_of_day_but_day_has_success(self):
-        """NAS 09-07 21:58 真身：当日最后一条的手动短失败，当日另有成功 → 打断。
-        （它没有"之后"的成功——21:54 在它之前，故必须靠 day_has_success 语义区分。）"""
+    def test_run_interrupted_when_last_of_day(self):
+        """NAS 09-07 21:58 真身：当日**最后一条**的手动短失败（22:00 部署重启打断），
+        当日另有成功运行 → 打断。它没有"之后"的成功（21:54 在它之前）。"""
         r = app.sync_failure_class(
             {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
              "verified": "fail", "duration_sec": 6.4, "data_latest": None},
@@ -1142,14 +1168,66 @@ class SyncFailureClassTest(unittest.TestCase):
         self.assertFalse(r["needs_action"])
         self.assertIn("当日已有成功运行", r["detail"])
 
-    def test_manual_short_failure_last_of_day_without_prior_success_is_real(self):
-        """当日最后一条的手动短失败、且当日无其它成功 → 保守判为真问题（需处理）。"""
+    def test_manual_short_failure_without_day_success_is_real(self):
+        """当日无任何成功运行 → 手动短失败保守判为真问题（需处理）。"""
         r = app.sync_failure_class(
             {"trigger": "manual", "exit_code": 0, "verified": "fail",
              "duration_sec": 6.4, "data_latest": None},
-            has_later_success=False, day_has_success=False, is_last_of_day=True)
+            has_later_success=False, day_has_success=False)
         self.assertEqual(r["class"], "verify_failed")
         self.assertTrue(r["needs_action"])
+
+    def test_nas_0907_full_day_sequence(self):
+        """生产真身回归（10 条，字段照抄 NAS /api/timeline）：
+        前两次认证失败（后来自愈）+ 5 次 pass-retry（带"数据未更新"warn，判等上游）
+        + 手动 skipped + 手动 pass + 手动 fail（22:00 部署重启打断）
+        ⇒ 全天 needs_action=False，且 21:58 必须判「被打断」。
+        0.10.38 实机复验抓到的两个顺序 bug 都靠这条锁住：warn 分支吞掉 reason 性质、
+        以及"非最后一条"约束导致最后一条 fail 走不到打断判定。"""
+        entries = [
+            {"ts": "2026-09-07 15:50:34", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.7, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 16:21:04", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 12.1, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 16:51:26", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 3.6, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 17:21:56", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 3.7, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 19:15:41", "trigger": "manual", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.2, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 21:54:20", "trigger": "manual", "exit_code": 0,
+             "verified": "pass", "duration_sec": 6.0, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None,
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据完整性验证未通过"},
+        ]
+        last_success = "2026-09-07 21:54:20"
+        out = []
+        for e in entries:
+            rec = dict(e)
+            rec["has_later_success"] = str(rec["ts"]) < last_success
+            out.append(app.sync_failure_class(
+                rec, has_later_success=rec.pop("has_later_success"), day_has_success=True,
+                is_last_of_day=str(e["ts"]).endswith("21:58:37")))
+        classes = [r["class"] for r in out]
+        # 真身逐条预期：认证失败（a/b/e，之后有成功）→ 已自愈；4 次 pass-retry
+        # 带"数据未更新"warn → 等上游；最后一条 fail（22:00 被打断）→ 打断
+        self.assertEqual(classes, [
+            "self_healed", "self_healed", "awaiting_mirror", "awaiting_mirror",
+            "self_healed", "awaiting_mirror", "run_interrupted",
+        ])
+        self.assertFalse(any(r["needs_action"] for r in out))
+        self.assertTrue(all("data_source_error" != r["class"] for r in out))
 
     def test_data_source_error_and_self_healed_by_exit_code(self):
         base = {"trigger": "scheduled", "exit_code": 1, "verified": "skipped",

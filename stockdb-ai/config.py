@@ -53,7 +53,7 @@ STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"
 # 版本号（发布物标识，见 docs/release-policy.md）
 # 单源：webui（interfaces/web/handlers.py）与 MCP（interfaces/mcp/stockdb_mcp_server.py
 # 的 SERVER_VERSION，0.10.36 起）都读这里，禁止在他处硬编码版本串。
-WEBUI_VERSION: str = "0.10.37"
+WEBUI_VERSION: str = "0.10.38"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致

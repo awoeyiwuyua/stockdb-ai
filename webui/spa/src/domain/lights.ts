@@ -132,13 +132,29 @@ export function aggregateWord(lights: Light[]): string {
   return '全部正常'
 }
 
+// 后端告警时间戳解析：格式为「YYYY-MM-DD HH:MM:SS」（本地时间，无时区标记）。
+// 注意：`new Date('2026-09-06 15:00:00')` 在浏览器里按**本地时区**解释，但同一份
+// 代码跑在 UTC（容器/CI）与 +08（用户机）会得到不同 epoch——0.10.38 的 Docker
+// 构建（容器 TZ=UTC）把 lights.test.ts 里的时区假设打爆后发现的。这里统一按本地
+// 解释（与后端写入时一致），非法值返回 NaN 由调用方剔除。
+export function parseLocalTs(ts: unknown): number {
+  if (typeof ts !== 'string' || !ts) return NaN
+  const m = ts.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})/)
+  if (!m) return new Date(ts).getTime()
+  return new Date(
+    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+    Number(m[4]), Number(m[5]), Number(m[6]),
+  ).getTime()
+}
+
 // 24h 内 warehouse error 告警（schema 落后守护会重复投递，取时窗）——入参告警列表
 export function hasWhError24h(recent: AlertItem[], now = Date.now()): boolean {
   const dayAgo = now - 24 * 3600 * 1000
-  return recent.some(
-    (a) => a?.source === 'warehouse' && a?.level === 'error' &&
-           new Date(a.ts ?? '').getTime() > dayAgo,
-  )
+  return recent.some((a) => {
+    if (a?.source !== 'warehouse' || a?.level !== 'error') return false
+    const at = parseLocalTs(a.ts)
+    return Number.isFinite(at) && at > dayAgo
+  })
 }
 
 // 供类型复用（types/ui 只放纯类型，无逻辑）

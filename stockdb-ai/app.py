@@ -349,6 +349,28 @@ SYNC_CLASS_LABELS = {
 }
 _NETWORK_KEYWORDS = ("超时", "timeout", "timed out", "网络", "连接", "502", "403", "404")
 _INTERRUPTED_MAX_SEC = 30.0
+_WAIT_REASON_KEYWORDS = ("数据源失败", "镜像", "未发布")
+_FATAL_REASON_KEYWORDS = ("认证失败", "auth failed", "权限", "拒绝")
+
+
+def _reason_nature(reason) -> str:
+    """失败原因性质：interrupt（打断/无数据）/ fatal（真错误）/ wait / unknown / none。
+
+    NAS 09-07 真身：同一句 warn 之下藏着三种 reason——「数据完整性验证未通过」（打断）、
+    「数据源失败：认证失败」（当时真故障，后续成功即自愈）、以及无 reason 的等上游。
+    warn 只是"没生效"的通用注解，判定必须看 reason 的性质。
+    """
+    text = str(reason or "").strip()
+    if not text:
+        return "none"
+    low = text.lower()
+    if "数据完整性验证未通过" in text:
+        return "interrupt"
+    if any(k in text or k in low for k in _FATAL_REASON_KEYWORDS):
+        return "fatal"
+    if any(k in text for k in _WAIT_REASON_KEYWORDS):
+        return "wait"
+    return "unknown"
 
 
 def sync_failure_class(record: dict, *, has_later_success: bool = False,
@@ -365,14 +387,13 @@ def sync_failure_class(record: dict, *, has_later_success: bool = False,
 
     判定顺序（NAS 真身数据驱动，最容易被误报的先判）：
       1) ok                exit=0 且 verified=pass 且无 warn
-      2) awaiting_mirror   warn 含「数据未更新」→ 上游镜像未发布（等，非故障）
-      3) not_effective     其它 warn（清单变更等；真待查）
-      4) run_interrupted   手动、时长 ≤30s、无 data_latest、且**非当日最后一条**
+      2) awaiting_mirror   warn 含「数据未更新」**且未通过验证** → 镜像尚未发布（等，非故障）
+                           （verified=pass 的"未生效"重试不算——见规则 3 注释）
+      3) not_effective     其它 warn：已验证通过的重试→不需动作；未通过→真待查
+      4) run_interrupted   手动、时长 ≤30s、无 data_latest、且当日另有成功运行
                            （NAS 09-07 21:58：22:00 容器重启打断的手动重试）
       5) self_healed       verified=fail 或 exit≠0，但**之后**有成功运行
                            （NAS 09-11 16:17 超时 1660s → 17:50 成功）
-      5b) run_interrupted  当日最后一条的手动短失败，但当日**确有**更早的成功运行
-                           （数据由该次保证；NAS 09-07 原样）
       6) verify_failed     verified=fail 且无上述缓解 → 数据未前进（真问题）
       7) data_source_error exit≠0 且无上述缓解（网络/上游通道异常）
       8) awaiting_mirror   verified=skipped（未做验证，通常是数据未前进）
@@ -398,47 +419,49 @@ def sync_failure_class(record: dict, *, has_later_success: bool = False,
         return {"class": cls, "label": SYNC_CLASS_LABELS[cls],
                 "needs_action": needs_action, "detail": detail}
 
-    # 1) 真成功（无 warn）
-    if exit_code == 0 and verified == "pass" and not warn:
+    # 1) 真成功（无 warn、无失败 reason）
+    if exit_code == 0 and verified == "pass" and not warn and not reason:
         return _out("ok", False, None)
-    # 2) 镜像未发布：等上游，不是故障
-    if "数据未更新" in warn:
-        return _out("awaiting_mirror", False,
-                    "镜像尚未发布当日数据（自动滞后重试继续跟进）")
-    # 3) 其它 warn（清单变更等）
-    if warn:
-        return _out("not_effective", True, warn)
-    # 4) 手动重试被打断（部署/重启）——非当日最后一条即证据
-    if short_manual and not is_last_of_day:
-        return _out("run_interrupted", False,
-                    f"手动运行 {duration:.1f}s 后失败（容器重启/部署打断），非当日最后一次运行")
-    # 5) 失败但之后有成功 → 已自愈
-    if has_later_success and (verified == "fail" or exit_code not in (0, None)):
-        if verified == "fail":
-            kind = str(reason or "").strip() or "数据完整性验证未通过"
-        else:
-            kind = str(reason or "").strip() or f"退出码 {exit_code}"
+    # 2) 之后有成功运行 → 已自愈（最强缓解，优先于任何失败判定）。
+    #    触发条件含 reason 非空：NAS 09-07 真身前两条是 exit=0/verified=skipped 但
+    #    reason=「数据源失败：认证失败」——它们确实是当时的真故障，而 16:51 的
+    #    stale-retry 已成功 → 属于"已自愈"，不该留在待处理里。
+    if has_later_success and (verified == "fail" or exit_code not in (0, None)
+                              or _reason_nature(reason) in ("fatal", "interrupt")):
+        kind = str(reason or "").strip() or ("数据完整性验证未通过"
+                                             if verified == "fail" else f"退出码 {exit_code}")
         return _out("self_healed", False, f"{kind}，后续重试已成功")
-    # 5b) 当日最后一条的手动短失败，但当日确有更早的成功运行
-    if short_manual and is_last_of_day and day_has_success:
+    # 3) 打断：手动短失败 + 当日有成功；或验证未通过 + 当日有成功
+    #    （NAS 09-07 21:58：22:00 部署重启打断的手动重试，当日 21:54 已有成功）
+    if day_has_success and (short_manual or _reason_nature(reason) == "interrupt"):
         return _out("run_interrupted", False,
-                    f"手动运行 {duration:.1f}s 后失败（容器重启/部署打断）；"
+                    f"运行 {duration:.1f}s 后失败（容器重启/部署打断）；"
                     f"当日已有成功运行，数据不受影响")
-    # 6) 验证未通过且无缓解 → 真问题
+    # 4) 验证未通过且无缓解 → 真问题
     if verified == "fail":
         return _out("verify_failed", True,
                     reason or "数据完整性验证未通过（数据未前进）")
-    # 7) 退出码非 0 且无缓解
-    if exit_code not in (0, None):
+    # 5) 退出码非 0 / fatal reason（认证失败等）且无缓解 → 真错误
+    if exit_code not in (0, None) or _reason_nature(reason) == "fatal":
         text = str(reason or "").strip() or "同步进程退出码非 0"
-        text = f"{text}（退出码 {exit_code}）"
+        if exit_code not in (0, None):
+            text = f"{text}（退出码 {exit_code}）"
         if any(k in text.lower() for k in _NETWORK_KEYWORDS):
             text = f"网络/上游通道异常：{text}"
         return _out("data_source_error", True, text)
-    # 8) 未做验证（通常数据未前进）
+    # 6) exit=0 且已验证通过：等上游 / 清单类 warn
+    #    （NAS 09-07 16:51~18:53 真身：verified=pass + warn「下载 0 文件且数据未更新」）
+    if exit_code == 0 and verified == "pass":
+        if "数据未更新" in warn:
+            return _out("awaiting_mirror", False,
+                        "镜像尚未发布当日数据（自动滞后重试继续跟进）")
+        if warn:
+            return _out("not_effective", manual, warn)  # 手动触发却未生效 → 待人确认
+        return _out("ok", False, None)
+    # 7) 未做验证（通常数据未前进）
     if verified == "skipped":
         return _out("awaiting_mirror", False, "本次未做完整性验证（数据未前进）")
-    return _out("unknown", False, str(reason or "").strip() or None)
+    return _out("unknown", False, str(reason or warn or "").strip() or None)
 
 
 
