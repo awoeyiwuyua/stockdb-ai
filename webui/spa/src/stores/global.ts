@@ -8,6 +8,7 @@ import { getSnapshot } from '../api/snapshot'
 import type {
   Snapshot, OverviewPayload, HealthStatus, AlertItem, VersionPayload,
   StatusPayload, ScheduleInfo, WarehouseStatus, TimelineDay, WarehouseTotals,
+  AssetsPayload,
 } from '../types/api'
 
 export const useGlobalStore = defineStore('global', {
@@ -22,6 +23,9 @@ export const useGlobalStore = defineStore('global', {
     health: (s): HealthStatus | null => s.snapshot?.overview?.health ?? null,
     alertCount: (s): number => s.snapshot?.overview?.alerts?.count ?? 0,
     alertsRecent: (s): AlertItem[] => s.snapshot?.overview?.alerts?.recent ?? [],
+    // 0.10.38 静音（只降提醒强度；事实与计数照常）
+    alertMuted: (s): boolean => Boolean(s.snapshot?.overview?.alerts?.muted),
+    alertMuteUntil: (s): number | null => s.snapshot?.overview?.alerts?.mute_until ?? null,
     mcp: (s): Record<string, unknown> | null => s.snapshot?.overview?.mcp ?? null,
     version: (s): VersionPayload | null => s.snapshot?.overview?.version ?? null,
     // 数据滞后天数（health.lag_days，未知视为 null）
@@ -32,6 +36,8 @@ export const useGlobalStore = defineStore('global', {
     warehouse: (s): WarehouseStatus | null => s.snapshot?.warehouse ?? null,
     timelineDays: (s): TimelineDay[] => s.snapshot?.timeline?.days ?? [],
     whTotals: (s): WarehouseTotals | null => s.snapshot?.timeline?.totals ?? null,
+    // 资产卡真身（0.10.38：研究库/双备份/磁盘分层；旧后端无此块 → null，前端显示未监控）
+    assets: (s): AssetsPayload | null => s.snapshot?.assets ?? null,
     // 面板自身版本（status.webui.version；资产卡/页脚展示用）
     serverVersion: (s): string | null => s.snapshot?.status?.webui?.version ?? null,
   },

@@ -129,6 +129,15 @@ COPY --from=spa-build /build/dist /opt/webui/static/
 COPY webui/static/legacy/ /opt/webui/static/legacy/
 ENV WEBUI_STATIC_DIR=/opt/webui/static
 
+# 0.10.37（A）：把上游引擎版本注入镜像环境（必须在 FROM stage 内，故放此处）。
+# 此前从未注入 → 容器内 image_tag=None，/api/version 只能退化成拿「面板版本
+# （WEBUI_VERSION）」与上游引擎 tag 比较（(0,3,6) vs (0,10,36)）→ 上游发新版永远
+# 判为"不落后"。修复后 image.tag 有值，且与运行中引擎版本（改读启动日志，见
+# storage/providers/free_stockdb.engine_version_info）互为佐证。
+# 本地 build 与 CI build 都走同一 ARG VERSION。
+ARG VERSION
+ENV IMAGE_TAG=${VERSION}
+
 # 0.10.30：引擎就在本容器，显式钉死 127.0.0.1——webui 与 MCP 模块共用此地址。
 # 此前未声明，MCP 取址回落到独立运行默认值 100.66.1.5（NAS Tailscale），隧道
 # 一断则 get_kline/get_stock_list/打板采集/仓库沉淀全部 <urlopen error timed out>。

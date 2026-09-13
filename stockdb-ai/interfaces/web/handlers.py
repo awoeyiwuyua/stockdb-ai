@@ -27,6 +27,11 @@ import app  # noqa: E402 - 模块引用（而非 from-import）：DATA_DIR/fetch
 import config  # noqa: E402 - WEBUI_TOKEN 动态读（测试 patch config.WEBUI_TOKEN 生效）
 from interfaces.web.auth import TOKEN_HEADER, authorized  # noqa: E402 - token 门禁
 
+from ops.alerts import (  # noqa: E402 - 0.10.38 静音状态（handler 直接调用，不经 app）
+    alert_mute_state,
+    clear_alert_mute,
+    set_alert_mute,
+)
 from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），此时 app 已完整
     STATIC_DIR,
     WEBUI_UI,
@@ -650,9 +655,51 @@ class Handler(BaseHTTPRequestHandler):
                                    ensure_ascii=False))
 
     def _alerts_summary(self):
-        """GET /api/alerts/summary：告警条数（顶栏红点徽标数据源）。"""
-        self._send(200, json.dumps({"count": _get_alerts().count()},
-                                   ensure_ascii=False))
+        """GET /api/alerts/summary：告警条数与静音状态（顶栏红点/横幅的数据源）。
+
+        0.10.38：count **不受静音影响**（静音只改提醒强度，不改事实）；
+        muted/until 供顶栏与横幅显示"已静音至 HH:MM"。
+        """
+        state = alert_mute_state()
+        self._send(200, json.dumps(
+            {"count": _get_alerts().count(),
+             "muted": state["muted"], "until": state["until"],
+             "remaining_sec": state["remaining_sec"]},
+            ensure_ascii=False))
+
+    def _alerts_mute(self):
+        """GET/POST /api/alerts/mute：静音状态查询（GET）/ 设置与解除（POST）。
+
+        POST 体：{"preset": "1h"|"4h"|"today", "reason": "可选"} 或
+                {"minutes": 30, "reason": "可选"}；{"clear": true} 解除静音。
+        """
+        if self.command == "GET":
+            self._send(200, json.dumps(alert_mute_state(), ensure_ascii=False))
+            return
+        body = self._read_json()
+        try:
+            if body.get("clear") is True or str(body.get("action") or "") == "clear":
+                state = clear_alert_mute()
+                self._send(200, json.dumps(
+                    {"msg": "已解除静音", **state}, ensure_ascii=False))
+                return
+            minutes = body.get("minutes")
+            preset = str(body.get("preset") or "").strip()
+            if minutes is None and not preset:
+                self._send(400, json.dumps(
+                    {"error": "需提供 preset（1h/4h/today）或 minutes（1~1440）"},
+                    ensure_ascii=False))
+                return
+            state = set_alert_mute(preset, reason=body.get("reason"),
+                                   minutes=minutes)
+            until_txt = datetime.fromtimestamp(state["until"]).strftime("%m-%d %H:%M")
+            self._send(200, json.dumps(
+                {"msg": f"已静音至 {until_txt}", **state}, ensure_ascii=False))
+        except ValueError as exc:
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, json.dumps({"error": f"静音操作失败: {exc}"},
+                                       ensure_ascii=False))
 
     def _alerts_clear(self):
         """POST /api/alerts/clear：清空全部告警（写入 '[]' 保持文件存在）。"""
@@ -690,6 +737,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001 - 上游探针自身已降级，双保险
             upstream = None
         upstream_ok = bool(upstream and upstream.get("tag_name"))
+        # 0.10.37 D：核对诊断里的版本标注与真实判定一致（发新版/探针失败/不可判定
+        # 都在 note 里显式说明，不再只写「最新 release：<tag>」让巡检误判为已最新）。
+        # 0.10.38：**降级不计入 ok**——GitHub 不可达（本机网络受限，NAS 实测间歇超时）
+        # 是"探测器跑不起来"，不是系统不健康；此前写成 ok=False 会把 diag 整体打红
+        # （all_ok=false），属典型假警报。改为 ok=True + degraded=True + note 说明。
+        try:
+            up_status = app.upstream_status()
+        except Exception:  # noqa: BLE001
+            up_status = {"kind": "unknown", "message": "上游状态评估异常"}
+        up_degraded = not upstream_ok
+        up_note = ("网络受限：本次探测未完成（不影响本机数据与同步），"
+                   "无法判断是否有新版" if up_degraded
+                   else f"最新 release：{upstream['tag_name']}｜{up_status.get('message', '')}")
 
         cs = None
         try:
@@ -708,9 +768,8 @@ class Handler(BaseHTTPRequestHandler):
             disk_ok, disk_note = False, str(exc)
 
         checks = [
-            {"name": "upstream_github", "label": "上游 GitHub", "ok": upstream_ok,
-             "note": (f"最新 release：{upstream['tag_name']}" if upstream_ok
-                      else "不可达（网络受限时降级提示，不影响本机数据）")},
+            {"name": "upstream_github", "label": "上游 GitHub", "ok": True,
+             "degraded": up_degraded, "note": up_note},
             {"name": "stockdb_service", "label": "stockdb 服务", "ok": stockdb_ok,
              "note": ((f"{cs.get('status')}：{cs.get('note', '')}；" if cs else "状态获取失败；")
                       + (f"上游闸口：熔断开（{_stockdb_breaker['fails']} 次失败，降级中）"
@@ -728,6 +787,7 @@ class Handler(BaseHTTPRequestHandler):
             "webui_version": WEBUI_VERSION,
             "ui_mode": WEBUI_UI,
             "image_tag": os.environ.get("IMAGE_TAG") or os.environ.get("STOCKDB_VERSION"),
+            "engine_version": (up_status.get("engine_version")),
             "started": datetime.fromtimestamp(_webui_started).strftime("%Y-%m-%d %H:%M:%S"),
             "uptime_seconds": int(time.time() - _webui_started),
             "data_dir": str(app.DATA_DIR),
@@ -803,12 +863,18 @@ def overview_payload() -> dict:
             return default
 
     alerts = _safe(_get_alerts, None)
+    mute = _safe(alert_mute_state, {"muted": False, "until": None, "remaining_sec": 0})
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "health": _safe(health_status, None),
         "alerts": {
             "count": alerts.count() if alerts is not None else 0,
             "recent": alerts.list(8) if alerts is not None else [],
+            # 0.10.38：静音状态随 overview 下发（横幅/顶栏据此显示"已静音至 HH:MM"）；
+            # count 不受静音影响——静音只改提醒强度，不改事实
+            "muted": bool(mute.get("muted")),
+            "mute_until": mute.get("until"),
+            "mute_preset": mute.get("preset"),
         },
         "mcp": _safe(mcp_stats, None),
         "version": _safe(version_payload, None),
@@ -837,6 +903,8 @@ def snapshot_payload(days: int = 7) -> dict:
         "warehouse": _safe(warehouse_status, None),
         "timeline": {"days": _safe(lambda: app.load_timeline(days), []),
                      "totals": _safe(app.warehouse_totals, None)},
+        # 0.10.38 资产卡真身（研究库/双备份/磁盘分层；60s TTL，取不到即为 None）
+        "assets": _safe(app.assets_payload, None),
     }
 
 
@@ -863,23 +931,45 @@ def _ui_index() -> str:
         return f.read_text(encoding="utf-8") if f else _spa_index()
     return _spa_index()
 def version_payload() -> dict:
-    """版本信息载荷（_version 与 /api/overview 共用）。"""
+    """版本信息载荷（_version 与 /api/overview 共用）。
+
+    0.10.37（B）判定修正：stale = **上游最新 tag > 运行中引擎版本**（同类版本线）。
+    此前 cur_src 取 IMAGE_TAG/WEBUI_VERSION 兜底，等于拿「面板版本」比「上游引擎 tag」
+    （(0,3,6) vs (0,10,36)）→ 上游发布新版永远判为不落后、`stale` 恒 false（NAS 实证）。
+    engine 版本经 storage.providers.free_stockdb.engine_version_info 读引擎启动日志；
+    读不到时退回 IMAGE_TAG（构建期 ARG VERSION 注入），两者都无 → 无法比对
+    （`stale=false` + `msg` 说明），由 /api/diag 与看门狗告警兜底（D）。
+    """
     upstream = app.fetch_upstream_release()
-    image_tag = os.environ.get("IMAGE_TAG") or os.environ.get("STOCKDB_VERSION") or None
+    image_tag = app._env_version_tag()  # 空串→None（0.10.37：类型不污染下游判定）
+    try:
+        from storage.providers.free_stockdb import engine_version_info
+        engine = engine_version_info()
+    except Exception:  # noqa: BLE001 - 版本探测失败不影响版本载荷
+        engine = None
+    engine_ver = (engine or {}).get("base")
+    engine_display = (engine or {}).get("version")
+    cur_src = engine_ver or image_tag          # 同类版本线优先：引擎实测版本
     stale = False
     msg = ""
     if upstream is not None and upstream.get("tag_name"):
         up_tag = upstream["tag_name"]
-        cur_src = image_tag if image_tag else WEBUI_VERSION
         ut = _version_tuple(up_tag)
-        ct = _version_tuple(cur_src)
+        ct = _version_tuple(cur_src) if cur_src else None
         if ut and ct and ut > ct:
             stale = True
-            msg = (f"上游已发布 {up_tag}（当前{'镜像' if image_tag else '面板'} "
-                   f"{cur_src}），建议升级")
+            msg = (f"上游引擎已发布 {up_tag}（当前运行 "
+                   f"{engine_display or image_tag or cur_src}），建议升级镜像（"
+                   f"docker/Dockerfile 的 ARG VERSION + SHA256 重新 pin 后重建）")
+    elif upstream is None:
+        # D：探针失败不再静默——显式标注降级原因，前端/巡检据此判断
+        msg = "上游版本探测失败（GitHub 不可达或超出重试），本次无法判断是否有新版"
     return {
         "webui": {"version": WEBUI_VERSION},
         "image": {"tag": image_tag},
+        "engine": {"version": engine_display, "base": engine_ver,
+                   "source": (engine or {}).get("source"),
+                   "detail": (engine or {}).get("detail")},
         "upstream": upstream,
         "stale": stale,
         "msg": msg,

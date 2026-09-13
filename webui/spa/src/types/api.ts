@@ -80,8 +80,14 @@ export interface SyncHistoryRow {
   verified?: string | null
   duration_sec?: number | null
   data_latest?: string | null
-  warn?: boolean // exit=0 但出现错误的"未生效"标记
+  warn?: string | null // 后端原文（0.10.38 起为字符串：exit=0 但"未生效"的说明）
   downloads?: number | null
+  // 0.10.38 分类字段（后端 sync_failure_class 输出；旧后端缺省 → 前端按 tone() 兜底）
+  reason?: string | null
+  class?: string | null
+  label?: string | null
+  needs_action?: boolean
+  detail?: string | null
   [k: string]: unknown
 }
 
@@ -105,7 +111,14 @@ export interface VersionPayload {
 export interface OverviewPayload {
   generated_at?: string
   health?: HealthStatus | null
-  alerts?: { count: number; recent: AlertItem[] } | null
+  alerts?: {
+    count: number
+    recent: AlertItem[]
+    // 0.10.38 静音状态：只影响提醒强度，count 恒定（事实不隐藏）
+    muted?: boolean
+    mute_until?: number | null
+    mute_preset?: string | null
+  } | null
   mcp?: Record<string, unknown> | null
   version?: VersionPayload | null
 }
@@ -119,6 +132,11 @@ export interface TimelineDay {
   sync: SyncHistoryRow[]
   backups?: { count: number; last: string } | null
   alerts: { count: number; err: number; warn: number }
+  // 0.10.38 日级汇总（后端恒写；旧后端缺省 → 前端按行内分类兜底）
+  needs_action?: boolean
+  needs_action_count?: number
+  awaiting?: boolean
+  action_hint?: string | null
 }
 
 export interface WarehouseTotals {
@@ -126,6 +144,45 @@ export interface WarehouseTotals {
   weeks: number
   months: number
   backups: { count: number; last_mtime: number }
+}
+
+// ---------- 资产卡真身（snapshot.assets，0.10.38） ----------
+// 原则：每个字段都有真实来源；后端取不到时给 null/0，前端显示「未监控」而不是编数字。
+
+export interface ResearchDbStats {
+  available?: boolean
+  mode?: string // sqlite | mydb（RESEARCH_STORE 回滚）
+  path?: string | null
+  bytes?: number | null
+  metrics?: number
+  series?: number
+  lists?: number
+  snapshots?: number
+}
+
+export interface BackupFamily {
+  count?: number
+  last_mtime?: number | null
+  bytes?: number
+}
+
+export interface BackupStats {
+  warehouse?: BackupFamily
+  research?: BackupFamily
+  total_bytes?: number
+}
+
+export interface DiskDetail {
+  groups?: Record<string, number> // market_data / warehouse / research_db / mydb
+  total_bytes?: number
+  volume?: DiskUsage | null
+}
+
+export interface AssetsPayload {
+  research?: ResearchDbStats | null
+  backups?: BackupStats | null
+  disk?: DiskDetail | null
+  generated_at?: string
 }
 
 // ---------- 聚合快照（GET /api/snapshot，0.10.27 四件套之一） ----------
@@ -137,4 +194,5 @@ export interface Snapshot {
   schedule: ScheduleInfo | null
   warehouse: WarehouseStatus | null
   timeline: { days: TimelineDay[]; totals: WarehouseTotals | null }
+  assets?: AssetsPayload | null
 }

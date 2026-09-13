@@ -106,6 +106,7 @@ class _OpsTestCase(unittest.TestCase):
         app._mcp_loaded = False
         app._mcp_file_lines = 0
         app._RELEASE_CACHE.update(at=0.0, val=None)
+        free_stockdb_mod._engine_cache.update(at=0.0, mtime=None, size=None, val=None)
         app._wh_totals_cache = (0.0, {})  # 0.10.27：仓库总量 TTL 缓存复位（防用例间串扰）
         app._mydb_rd._rd = None  # 0.8.10：rd 连接缓存复位（防用例间串扰）
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -212,9 +213,17 @@ class TimelineTests(_OpsTestCase):
 
     def test_load_timeline_empty_dir_degrades(self):
         # 空目录：行数 ≤ days，全部子块空缺不抛异常
-        rows = app.load_timeline(3)
+        # HISTORY_FILE 是 import 期常量，patch 到临时目录才真"空"（0.10.38）
+        with mock.patch.object(app, "HISTORY_FILE", Path(self.tmp) / "sync_history.json"), \
+             mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            rows = app.load_timeline(3)
         self.assertLessEqual(len(rows), 3)
         self.assertTrue(all(r["sediment"] is None and r["sync"] == [] for r in rows))
+        # 新增日级字段在空数据下也必须存在且为安全默认
+        for r in rows:
+            self.assertFalse(r["needs_action"])
+            self.assertEqual(r["needs_action_count"], 0)
+            self.assertIn("awaiting", r)
 
 
 class WarehouseTotalsCacheTest(_OpsTestCase):
@@ -253,13 +262,21 @@ class WarehouseTotalsCacheTest(_OpsTestCase):
 
 
 class SnapshotPayloadTest(_OpsTestCase):
-    """0.10.27：/api/snapshot 单通道聚合——五块齐全 + timeline 走 app.* 动态引用。"""
+    """0.10.27：/api/snapshot 单通道聚合——六块齐全 + timeline 走 app.* 动态引用。
+    0.10.38：新增 assets 块（资产卡真身）。"""
 
-    def test_snapshot_aggregates_five_blocks(self):
+    def test_snapshot_aggregates_six_blocks(self):
         payload = web_handlers.snapshot_payload(7)
         self.assertEqual(set(payload.keys()),
                          {"generated_at", "overview", "status", "schedule",
-                          "warehouse", "timeline"})
+                          "warehouse", "timeline", "assets"})
+        # timeline 块：days 列表 + totals 结构（离线临时目录下静默降级为空）
+        self.assertIsInstance(payload["timeline"]["days"], list)
+        self.assertIn("sediment_days", payload["timeline"]["totals"])
+        # assets 块：三栏资产卡真身（研究库/双备份/磁盘分层）
+        self.assertIn("research", payload["assets"])
+        self.assertIn("backups", payload["assets"])
+        self.assertIn("disk", payload["assets"])
         # timeline 块：days 列表 + totals 结构（离线临时目录下静默降级为空）
         self.assertIsInstance(payload["timeline"]["days"], list)
         self.assertIn("sediment_days", payload["timeline"]["totals"])
@@ -643,6 +660,48 @@ class AlertsTest(_OpsTestCase):
         self.assertEqual(len(a.list(-3)), 5)
         self.assertEqual(len(a.list("abc")), 5)
 
+    def test_resolve_removes_matching_and_keeps_others(self):
+        """0.10.36 自愈：resolve(source, 前缀) 移除匹配条目并落盘；不匹配的保留。"""
+        a = self._alerts()
+        a.add("warning", "数据", "行情数据已滞后 35 天（最新 20260807）")
+        a.add("warning", "数据", "行情数据不可用（探针失败）")
+        a.add("error", "同步", "同步失败")
+        a.add("warning", "打板", "竞价偏差")
+        removed = a.resolve("数据", "行情数据不可用")
+        self.assertEqual(removed, 1)
+        messages = [e["message"] for e in a.list()]
+        self.assertNotIn("行情数据不可用（探针失败）", messages)
+        self.assertIn("行情数据已滞后 35 天（最新 20260807）", messages)  # 源同前缀不同
+        self.assertIn("同步失败", messages)                              # 源不同
+        self.assertEqual(a.resolve("数据", "行情数据不可用"), 0)          # 幂等：已撤无匹配
+        # 落盘生效：新实例读回一致
+        a2 = app.Alerts.init(a.path)
+        self.assertEqual([e["message"] for e in a2.list()], messages)
+
+    def test_resolve_prefix_matches_lag_variants(self):
+        """滞后文案随天数变化 → 前缀匹配撤得掉（精确匹配会漏撤）。"""
+        a = self._alerts()
+        a.add("warning", "数据", "行情数据已滞后 2 天（最新 20260901）")
+        self.assertEqual(a.resolve("数据", "行情数据已滞后"), 1)
+        self.assertEqual(a.count(), 0)
+
+    def test_resolve_no_match_no_write(self):
+        """无匹配 → 返回 0、内容不变（看门狗 60s 一轮，避免无谓落盘）。"""
+        a = self._alerts()
+        a.add("info", "系统", "保留")
+        before = os.path.getmtime(a.path)
+        self.assertEqual(a.resolve("数据", "行情数据"), 0)
+        self.assertEqual(a.count(), 1)
+        self.assertEqual(os.path.getmtime(a.path), before)
+
+    def test_resolve_rejects_empty_args(self):
+        """空 source / 空前缀 → 中文 ValueError（防误撤全部告警）。"""
+        a = self._alerts()
+        with self.assertRaises(ValueError):
+            a.resolve("", "行情")
+        with self.assertRaises(ValueError):
+            a.resolve("数据", "")
+
     def test_notify_alert_lazy_singleton(self):
         """notify_alert 惰性单例：首次调用创建、绑定 DATA_DIR、复用同一实例。"""
         ops_alerts._alerts_singleton = None
@@ -751,6 +810,43 @@ class FreshnessAlertTest(_OpsTestCase):
             app.data_freshness_alert(datetime.date.today().isoformat(),
                                      True, alerts=fa)        # 滞后 0 → 不调用
             m_add.assert_not_called()
+
+    # ---- 0.10.36 自愈：条件恢复撤警 ----
+
+    def test_freshness_probe_recovery_resolves_alert(self):
+        """探针失败告警 → 探针恢复（数据新鲜）即撤回，不残留红点。"""
+        app.data_freshness_alert(None, True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 1)
+        app.data_freshness_alert(self._days_ago(0), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_lag_recovery_resolves_alert(self):
+        """滞后告警 → 数据追平（滞后 0 ≤ 阈值）即撤回（跨文案前缀匹配）。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        self.assertIn("已滞后 9 天", self.alerts.list()[0]["message"])
+        app.data_freshness_alert(self._days_ago(1), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_stale_period_keeps_alert(self):
+        """仍滞后（>阈值且交易日）→ 不撤警；滞后天数变化也不撤（前缀只用于撤回）。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        app.data_freshness_alert(self._days_ago(6), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 2)  # 文案不同 → 当日去重不合并
+
+    def test_freshness_non_trading_day_also_resolves(self):
+        """非交易日（滞后 5 天本不告警）同样执行撤警：周一看盘前旧警已清。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 1)
+        app.data_freshness_alert(self._days_ago(5), False, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_resolve_does_not_touch_other_sources(self):
+        """撤警只动「数据」源的两条前缀，其他源告警不受影响。"""
+        self.alerts.add("error", "同步", "同步失败")
+        self.alerts.add("warning", "数据", "行情数据不可用（探针失败）")
+        app.data_freshness_alert(self._days_ago(0), True, alerts=self.alerts)
+        left = [e["message"] for e in self.alerts.list()]
+        self.assertEqual(left, ["同步失败"])
 
 
 # =====================================================================
@@ -982,6 +1078,637 @@ class FetchReleaseTest(_OpsTestCase):
 
 
 # =====================================================================
+# 4c) 0.10.38 驾驶舱改版后端增量：同步失败分类 / 时间线扩展 / 资产卡真身
+# =====================================================================
+class SyncFailureClassTest(unittest.TestCase):
+    """sync_failure_class：纯函数分类（NAS 真身形态驱动），防止把"等上游/部署打断"
+    误报成"需处理"（0.10.38 改版起因：09-07 被打断的手动重试被当成未决问题）。"""
+
+    def _cls(self, rec, later=False):
+        return app.sync_failure_class(rec, has_later_success=later)
+
+    def test_ok_when_pass_without_warn(self):
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 87.6,
+                       "data_latest": "20260911"})
+        self.assertEqual(r["class"], "ok")
+        self.assertFalse(r["needs_action"])
+
+    def test_awaiting_mirror_when_data_not_advanced(self):
+        """NAS 09-11 16:48 真身：exit 0 / verified pass / warn 数据未更新 → 等上游。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 7.4,
+                       "data_latest": "20260807",
+                       "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("镜像", r["detail"])
+
+    def test_manifest_warn_scheduled_is_informational(self):
+        """定时 + 已验证通过 + 清单类 warn → not_effective 但**不需动作**（信息性）。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
+        self.assertFalse(r["needs_action"])
+
+    def test_manifest_warn_manual_needs_look(self):
+        """用户手动触发却"下载 0 文件"（且已验证通过）→ 需要人看一眼（清单可能真变了）。"""
+        r = self._cls({"trigger": "manual", "exit_code": 0, "verified": "pass",
+                       "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
+        self.assertTrue(r["needs_action"])
+
+    def test_passed_retry_with_stale_warn_is_benign(self):
+        """NAS 09-07 真身：stale-retry 的 warn 文案与首跑相同（"下载 0 文件且数据未更新"）
+        但 verified=pass —— 必须判「等上游」而非需处理（否则当日打断判定永远走不到）。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 3.6,
+                       "data_latest": "20260904",
+                       "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+
+    def test_passed_retry_with_manifest_warn_needs_no_action(self):
+        """已验证通过的重试 + 清单类 warn → not_effective 但不需动作（信息性）。"""
+        r = self._cls({"exit_code": 0, "verified": "pass", "data_latest": "20260910",
+                       "warn": "同步未生效：下载 0 文件（镜像清单可能已变更）"})
+        self.assertEqual(r["class"], "not_effective")
+        self.assertFalse(r["needs_action"])
+
+    def test_self_healed_when_verify_failed_then_success(self):
+        """NAS 09-11 16:17 真身：1660s 后验证失败，但之后 17:50 成功 → 已自愈。"""
+        r = self._cls({"exit_code": 0, "verified": "fail", "duration_sec": 1660.7,
+                       "data_latest": None, "reason": "数据完整性验证未通过"}, later=True)
+        self.assertEqual(r["class"], "self_healed")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("后续重试已成功", r["detail"])
+
+    def test_verify_failed_needs_action_without_later_success(self):
+        r = self._cls({"exit_code": 0, "verified": "fail", "duration_sec": 1660.7,
+                       "data_latest": None, "reason": "数据完整性验证未通过"})
+        self.assertEqual(r["class"], "verify_failed")
+        self.assertTrue(r["needs_action"])
+
+    def test_run_interrupted_for_manual_short_failure(self):
+        """手动短失败 + 当日有成功运行 → 被打断（不需处理）。"""
+        r = app.sync_failure_class(
+            {"trigger": "manual", "exit_code": 0, "verified": "fail",
+             "duration_sec": 6.4, "data_latest": None},
+            day_has_success=True)
+        self.assertEqual(r["class"], "run_interrupted")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("重启", r["detail"])
+
+    def test_run_interrupted_when_last_of_day(self):
+        """NAS 09-07 21:58 真身：当日**最后一条**的手动短失败（22:00 部署重启打断），
+        当日另有成功运行 → 打断。它没有"之后"的成功（21:54 在它之前）。"""
+        r = app.sync_failure_class(
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None},
+            has_later_success=False, day_has_success=True, is_last_of_day=True)
+        self.assertEqual(r["class"], "run_interrupted")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("当日已有成功运行", r["detail"])
+
+    def test_manual_short_failure_without_day_success_is_real(self):
+        """当日无任何成功运行 → 手动短失败保守判为真问题（需处理）。"""
+        r = app.sync_failure_class(
+            {"trigger": "manual", "exit_code": 0, "verified": "fail",
+             "duration_sec": 6.4, "data_latest": None},
+            has_later_success=False, day_has_success=False)
+        self.assertEqual(r["class"], "verify_failed")
+        self.assertTrue(r["needs_action"])
+
+    def test_nas_0907_full_day_sequence(self):
+        """生产真身回归（10 条，字段照抄 NAS /api/timeline）：
+        前两次认证失败（后来自愈）+ 5 次 pass-retry（带"数据未更新"warn，判等上游）
+        + 手动 skipped + 手动 pass + 手动 fail（22:00 部署重启打断）
+        ⇒ 全天 needs_action=False，且 21:58 必须判「被打断」。
+        0.10.38 实机复验抓到的两个顺序 bug 都靠这条锁住：warn 分支吞掉 reason 性质、
+        以及"非最后一条"约束导致最后一条 fail 走不到打断判定。"""
+        entries = [
+            {"ts": "2026-09-07 15:50:34", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.7, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 16:21:04", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 12.1, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 16:51:26", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 3.6, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 17:21:56", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 3.7, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 19:15:41", "trigger": "manual", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.2, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-07 21:54:20", "trigger": "manual", "exit_code": 0,
+             "verified": "pass", "duration_sec": 6.0, "data_latest": "20260904",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None,
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）",
+             "reason": "数据完整性验证未通过"},
+        ]
+        last_success = "2026-09-07 21:54:20"
+        out = []
+        for e in entries:
+            rec = dict(e)
+            rec["has_later_success"] = str(rec["ts"]) < last_success
+            out.append(app.sync_failure_class(
+                rec, has_later_success=rec.pop("has_later_success"), day_has_success=True,
+                is_last_of_day=str(e["ts"]).endswith("21:58:37")))
+        classes = [r["class"] for r in out]
+        # 真身逐条预期：认证失败（a/b/e，之后有成功）→ 已自愈；4 次 pass-retry
+        # 带"数据未更新"warn → 等上游；最后一条 fail（22:00 被打断）→ 打断
+        self.assertEqual(classes, [
+            "self_healed", "self_healed", "awaiting_mirror", "awaiting_mirror",
+            "self_healed", "awaiting_mirror", "run_interrupted",
+        ])
+        self.assertFalse(any(r["needs_action"] for r in out))
+        self.assertTrue(all("data_source_error" != r["class"] for r in out))
+
+    def test_data_source_error_and_self_healed_by_exit_code(self):
+        base = {"trigger": "scheduled", "exit_code": 1, "verified": "skipped",
+                "duration_sec": 600, "data_latest": None, "reason": "网络超时"}
+        r = self._cls(base)
+        self.assertEqual(r["class"], "data_source_error")
+        self.assertTrue(r["needs_action"])
+        self.assertIn("网络/上游通道异常", r["detail"])
+        self.assertEqual(self._cls(base, later=True)["class"], "self_healed")
+
+    def test_skipped_maps_to_awaiting_mirror(self):
+        r = self._cls({"trigger": "scheduled", "exit_code": 0, "verified": "skipped",
+                       "duration_sec": 11.7, "data_latest": "20260904"})
+        self.assertEqual(r["class"], "awaiting_mirror")
+        self.assertFalse(r["needs_action"])
+
+    def test_non_dict_degrades(self):
+        self.assertEqual(self._cls(None)["class"], "unknown")
+
+
+class AlertMuteTest(_OpsTestCase):
+    """0.10.38 告警静音：只改提醒强度，不改事实（count 恒定、到期自动解除）。"""
+
+    def setUp(self):
+        super().setUp()
+        # 静音文件路径走 config.DATA_DIR（已 patch 到临时目录），但缓存要逐用例复位
+        ops_alerts._mute_cache = {"at": 0.0, "sig": None, "val": None}
+
+    def _mute_file(self):
+        return Path(self.tmp) / ops_alerts.MUTE_FILE
+
+    def test_default_not_muted(self):
+        st = ops_alerts.alert_mute_state()
+        self.assertFalse(st["muted"])
+        self.assertIsNone(st["until"])
+
+    def test_set_preset_mutes_with_expiry(self):
+        st = ops_alerts.set_alert_mute("1h", reason="例行维护")
+        self.assertTrue(st["muted"])
+        self.assertEqual(st["preset"], "1h")
+        self.assertEqual(st["reason"], "例行维护")
+        self.assertAlmostEqual(st["remaining_sec"], 3600, delta=5)
+        self.assertTrue(self._mute_file().exists())
+        self.assertTrue(ops_alerts.alert_mute_state()["muted"])   # 读回一致
+
+    def test_today_preset_expires_at_end_of_day(self):
+        now = datetime.datetime(2026, 9, 13, 10, 0, 0)
+        st = ops_alerts.set_alert_mute("today", now=now)
+        expect = now.replace(hour=23, minute=59, second=59).timestamp()
+        self.assertAlmostEqual(st["until"], expect, delta=1)
+        self.assertAlmostEqual(st["remaining_sec"], 13 * 3600 + 59 * 60 + 59, delta=2)
+
+    def test_custom_minutes_and_validation(self):
+        st = ops_alerts.set_alert_mute("", minutes=30)
+        self.assertTrue(st["muted"])
+        self.assertEqual(st["preset"], "30m")
+        for bad in (0, 1441, -5):
+            with self.assertRaises(ValueError):
+                ops_alerts.set_alert_mute("", minutes=bad)
+        with self.assertRaises(ValueError):
+            ops_alerts.set_alert_mute("bogus")
+        self.assertFalse(ops_alerts.set_alert_mute("1h").get("error", False))
+
+    def test_expired_state_auto_clears(self):
+        """到期 → 状态转 False 且清掉文件（避免陈旧状态一直挂着）。"""
+        future = datetime.datetime.now() + datetime.timedelta(hours=3)
+        ops_alerts.set_alert_mute("1h")
+        self.assertTrue(self._mute_file().exists())
+        st = ops_alerts.alert_mute_state(now=future)
+        self.assertFalse(st["muted"])
+        self.assertFalse(self._mute_file().exists())
+
+    def test_clear_is_idempotent(self):
+        ops_alerts.set_alert_mute("4h")
+        self.assertTrue(ops_alerts.clear_alert_mute()["muted"] is False)
+        self.assertFalse(ops_alerts.clear_alert_mute()["muted"])   # 再清不抛
+
+    def test_corrupt_file_degrades_to_not_muted(self):
+        self._mute_file().parent.mkdir(parents=True, exist_ok=True)
+        self._mute_file().write_text("{ not json", encoding="utf-8")
+        ops_alerts._mute_cache = {"at": 0.0, "sig": None, "val": None}
+        self.assertFalse(ops_alerts.alert_mute_state()["muted"])
+
+    def test_count_unaffected_by_mute(self):
+        """核心语义：静音不改事实——计数照常（横幅/统计不被静音骗）。"""
+        app._get_alerts().add("warning", "数据", "行情数据已滞后 3 天")
+        before = app._get_alerts().count()
+        ops_alerts.set_alert_mute("1h")
+        self.assertEqual(ops_alerts.pending_alert_count(), before)
+        self.assertEqual(app._get_alerts().count(), before)
+
+    def test_overview_payload_carries_mute_state(self):
+        """overview.alerts 带 muted/mute_until（前端横幅据此显示静音态）。"""
+        ops_alerts.set_alert_mute("1h")
+        payload = web_handlers.overview_payload()
+        self.assertTrue(payload["alerts"]["muted"])
+        self.assertIsInstance(payload["alerts"]["mute_until"], float)
+        self.assertEqual(payload["alerts"]["mute_preset"], "1h")
+
+    def test_summary_endpoint_reports_count_and_mute(self):
+        """GET /api/alerts/summary：count 与静音态同时给出。"""
+        app._get_alerts().add("warning", "数据", "测试告警")
+        ops_alerts.set_alert_mute("4h")
+        status, _, body = _do_get("/api/alerts/summary")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode())
+        self.assertEqual(payload["count"], 1)
+        self.assertTrue(payload["muted"])
+
+    def test_mute_endpoint_post_and_clear(self):
+        """POST /api/alerts/mute：设置 → 查询 → 解除；非法参数 400。"""
+        status, _, body = _do_post("/api/alerts/mute", {"preset": "1h"})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body.decode())["muted"])
+        status, _, body = _do_get("/api/alerts/mute")
+        self.assertTrue(json.loads(body.decode())["muted"])
+        status, _, body = _do_post("/api/alerts/mute", {"clear": True})
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body.decode())["muted"])
+        status, _, body = _do_post("/api/alerts/mute", {"preset": "bogus"})
+        self.assertEqual(status, 400)
+        self.assertIn("未知静音预设", json.loads(body.decode())["error"])
+        status, _, body = _do_post("/api/alerts/mute", {})
+        self.assertEqual(status, 400)
+
+
+class TimelineExtrasTest(_OpsTestCase):
+    """load_timeline 0.10.38 扩展：reason/warn 透出 + 分类 + 日级 needs_action/awaiting。"""
+
+    def setUp(self):
+        super().setUp()
+        # HISTORY_FILE 是 import 期常量，DATA_DIR patch 盖不住它 → 必须显式指向临时目录
+        # （否则读到仓库真实 data/ 的历史，用例互相串扰且与真机数据耦合）
+        self._hist = mock.patch.object(app, "HISTORY_FILE", Path(self.tmp) / "sync_history.json")
+        self._hist.start()
+        self.addCleanup(self._hist.stop)
+        self._wh = mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse")
+        self._wh.start()
+        self.addCleanup(self._wh.stop)
+
+    def _write_history(self, entries):
+        app.HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        app.HISTORY_FILE.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    def _day(self, date8):
+        for d in app.load_timeline(7):
+            if d["date"] == date8:
+                return d
+        self.fail(f"时间线缺 {date8}")
+
+    def test_sync_entries_carry_reason_warn_and_class(self):
+        """透出 reason/warn（此前只在 sync_history.json 里）+ 逐条分类。"""
+        self._write_history([
+            {"ts": "2026-09-11 16:17:51", "trigger": "scheduled", "exit_code": 0,
+             "verified": "fail", "duration_sec": 1660.7, "data_latest": None,
+             "reason": "数据完整性验证未通过", "warn": None},
+            {"ts": "2026-09-11 17:50:38", "trigger": "scheduled-stale-retry", "exit_code": 0,
+             "verified": "pass", "duration_sec": 87.6, "data_latest": "20260911"},
+        ])
+        day = self._day("20260911")
+        first = day["sync"][0]
+        self.assertEqual(first["reason"], "数据完整性验证未通过")
+        self.assertEqual(first["class"], "self_healed")     # 同日更晚成功
+        self.assertEqual(day["sync"][1]["class"], "ok")
+        self.assertFalse(day["needs_action"])
+        self.assertEqual(day["needs_action_count"], 0)
+
+    def test_needs_action_when_no_later_success(self):
+        self._write_history([
+            {"ts": "2026-09-08 15:54:22", "trigger": "scheduled", "exit_code": 0,
+             "verified": "fail", "duration_sec": 262.4, "data_latest": None,
+             "reason": "数据完整性验证未通过"},
+        ])
+        day = self._day("20260908")
+        self.assertTrue(day["needs_action"])
+        self.assertEqual(day["needs_action_count"], 1)
+        self.assertIn("验证未通过", day["action_hint"])
+
+    def test_interrupted_manual_run_does_not_flag_day(self):
+        """09-07 场景：pass → pass → 手动被打断 ⇒ 日级不标需处理（改版核心）。"""
+        self._write_history([
+            {"ts": "2026-09-07 15:50:34", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 11.7, "data_latest": "20260904"},
+            {"ts": "2026-09-07 21:54:20", "trigger": "manual", "exit_code": 0,
+             "verified": "pass", "duration_sec": 6.0, "data_latest": "20260904"},
+            {"ts": "2026-09-07 21:58:37", "trigger": "manual", "exit_code": 0,
+             "verified": "fail", "duration_sec": 6.4, "data_latest": None},
+        ])
+        day = self._day("20260907")
+        classes = [e["class"] for e in day["sync"]]
+        self.assertEqual(classes[-1], "run_interrupted")
+        self.assertFalse(day["needs_action"])
+        self.assertIsNone(day["action_hint"])
+
+    def test_backward_compatible_fields_kept(self):
+        """旧字段不破（前端可渐进迁移）：ts/trigger/exit_code/verified/duration/data_latest。"""
+        self._write_history([
+            {"ts": "2026-09-09 15:50:33", "trigger": "scheduled", "exit_code": 0,
+             "verified": "pass", "duration_sec": 24.8, "data_latest": "20260908"},
+        ])
+        entry = self._day("20260909")["sync"][0]
+        for key in ("ts", "trigger", "exit_code", "verified", "duration_sec", "data_latest"):
+            self.assertIn(key, entry)
+
+
+class AssetsPayloadTest(_OpsTestCase):
+    """assets_payload：研究库/双备份/磁盘分层的真实字段 + TTL 缓存 + 降级。"""
+
+    def setUp(self):
+        super().setUp()
+        self._cache_reset()
+
+    def _cache_reset(self):
+        app._assets_cache = (0.0, {})
+        app._disk_detail_cache = (0.0, {})
+
+    def test_research_stats_real_counts(self):
+        """研究库计数来自真实 SQLite（写入可读回）。"""
+        from storage.research_store import SqliteResearchStore
+        store = SqliteResearchStore(Path(self.tmp) / "research.db")
+        self.addCleanup(store.close)
+        store.write_metrics("20260911", {"metrics": {"n_samples": 33}})
+        store.write_series("premium_mean", {"values": [0.01]})
+        store.write_snapshots("20260911", {"000001": {"open_price": 1.0}})
+        st = app.research_db_stats()
+        self.assertTrue(st["available"])
+        self.assertEqual(st["metrics"], 1)
+        self.assertEqual(st["series"], 1)
+        self.assertEqual(st["snapshots"], 1)
+        self.assertEqual(st["lists"], 0)
+        self.assertGreater(st["bytes"], 0)
+
+    def test_research_stats_degrades_without_store(self):
+        """研究库不可用 → available=False 且计数为 0（前端显示未监控，不编数字）。"""
+        with mock.patch.dict(os.environ, {"RESEARCH_STORE": "mydb"}):
+            st = app.research_db_stats()
+        self.assertIn("mode", st)
+        self.assertIsInstance(st["available"], bool)
+
+    def test_backup_stats_splits_two_families(self):
+        """仓库备份与研究库备份分开计数（此前混成一个数会误导）。"""
+        wh = Path(self.tmp) / "warehouse" / "backups"
+        wh.mkdir(parents=True)
+        (wh / "warehouse-20260911-175042-6358d8c0.db").write_bytes(b"x" * 10)
+        (wh / "warehouse-20260910-225326-e81b7e48.db").write_bytes(b"x" * 20)
+        rs = Path(self.tmp) / "backups"
+        rs.mkdir(parents=True)
+        (rs / "research-20260911-092604-b88d212d.db").write_bytes(b"x" * 5)
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"), \
+             mock.patch("storage.research_store.resolve_backup_dir", return_value=rs):
+            st = app.backup_stats()
+        self.assertEqual(st["warehouse"]["count"], 2)
+        self.assertEqual(st["warehouse"]["bytes"], 30)
+        self.assertEqual(st["research"]["count"], 1)
+        self.assertEqual(st["total_bytes"], 35)
+        self.assertIsNotNone(st["warehouse"]["last_mtime"])
+
+    def test_disk_detail_groups_and_volume(self):
+        (Path(self.tmp) / "data").mkdir()
+        (Path(self.tmp) / "data" / "a.ldb").write_bytes(b"x" * 100)
+        (Path(self.tmp) / "mydb").mkdir()
+        (Path(self.tmp) / "mydb" / "b.ldb").write_bytes(b"x" * 50)
+        (Path(self.tmp) / "warehouse").mkdir()
+        (Path(self.tmp) / "warehouse" / "w.duckdb").write_bytes(b"x" * 25)
+        with mock.patch.object(config, "WAREHOUSE_DIR", Path(self.tmp) / "warehouse"):
+            d = app.disk_usage_detail(force=True)
+        self.assertEqual(d["groups"]["market_data"], 100)
+        self.assertEqual(d["groups"]["mydb"], 50)
+        self.assertEqual(d["groups"]["warehouse"], 25)
+        self.assertEqual(d["total_bytes"], 175)
+        self.assertIsNotNone(d["volume"])
+
+    def test_caches_avoid_rescan(self):
+        """TTL 内不重扫（15s 轮询不能每拍递归 stat）；force 绕过。"""
+        with mock.patch.object(app, "disk_usage_detail", wraps=app.disk_usage_detail) as m:
+            app.assets_payload(force=True)
+            first = m.call_count
+            app.assets_payload()
+            self.assertEqual(m.call_count, first, "60s TTL 内不应再次统计磁盘")
+            app.assets_payload(force=True)
+            self.assertEqual(m.call_count, first + 1)
+
+    def test_snapshot_payload_includes_assets(self):
+        """snapshot 单通道带上 assets 块（前端一次拿到三栏资产卡）。"""
+        payload = web_handlers.snapshot_payload(7)
+        self.assertIn("assets", payload)
+        self.assertIn("research", payload["assets"])
+        self.assertIn("backups", payload["assets"])
+        self.assertIn("disk", payload["assets"])
+
+
+# =====================================================================
+# 4b) 0.10.37：运行中引擎版本探测 + 上游版本判定/告警
+#     A：Dockerfile 注入 IMAGE_TAG；B：stale 判定改「上游 tag > 引擎版本」；
+#     D：探针失败/发现新版/版本号不可判定 → 告警中心（不再静默）。
+# =====================================================================
+class EngineVersionProbeTest(_OpsTestCase):
+    """storage.providers.free_stockdb.engine_version_info：启动日志 + 二进制双来源。"""
+
+    def setUp(self):
+        super().setUp()
+        self.log = Path(self.tmp) / "log.txt"
+        self.binary = Path(self.tmp) / "stockdb"
+        p = mock.patch.object(config, "STOCKDB_LOG_FILE", self.log)
+        q = mock.patch.object(free_stockdb_mod, "_ENGINE_BINARY", str(self.binary))
+        p.start()
+        q.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(q.stop)
+
+    def test_parses_startup_line(self):
+        """`stockdb-server 0.3.5-stockdb` → version 原样、base 去后缀（比较用）。"""
+        self.log.write_text("stockdb-server 0.3.5-stockdb\nStarted: 2026-09-13 10:52:17\n",
+                            encoding="utf-8")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertEqual(info["base"], "0.3.5")
+        self.assertEqual(info["version"], "0.3.5-stockdb")
+        self.assertEqual(info["source"], "log")
+        self.assertEqual(info["log"], str(self.log))
+
+    def test_last_startup_line_wins_after_restart(self):
+        """引擎重启换版本 → 取最后一条（不取首条）。"""
+        self.log.write_text("stockdb-server 0.3.2-stockdb\n"
+                            "stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info(force=True)["base"], "0.3.5")
+
+    def test_binary_fallback_when_log_has_no_banner(self):
+        """NAS 实况：日志只落 ERROR 级（无横幅）→ 退回二进制版本字面量。"""
+        self.log.write_text("[ERROR] open leveldb failed: Corruption: 10 missing files\n",
+                            encoding="utf-8")
+        self.binary.write_bytes(
+            b"\x7fELFjunk stockdb-server\x00" + b"0.3.5\x00" + b"0.3.5-stockdb\x00"
+            + b"1.12.12\x00" + b"120.53.53\x00" + b"127.0.0.1\x00" + b"0.0.0\x00")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertEqual(info["source"], "binary")
+        self.assertEqual(info["version"], "0.3.5-stockdb")  # 带产品后缀者优先
+        self.assertEqual(info["base"], "0.3.5")
+
+    def test_binary_scan_ignores_ip_like_tokens(self):
+        """IP/依赖版本噪声不误取：只认 X.Y.Z（后接 -后缀者优先）。"""
+        self.binary.write_bytes(b"120.53.53\x00127.0.0\x001.12.12\x000.3.5\x00")
+        info = free_stockdb_mod.engine_version_info(force=True)
+        self.assertNotIn(info["version"], ("127.0.0", "120.53.53"))
+        self.assertEqual(info["base"], "0.3.5")
+
+    def test_missing_sources_return_none(self):
+        """日志与二进制都不可用 → None（调用方按"无法比对"降级，不抛）。"""
+        self.assertIsNone(free_stockdb_mod.engine_version_info(force=True))
+
+    def test_file_change_invalidates_cache(self):
+        """TTL 内日志 mtime/size 变化 → 立刻重读（引擎换版不被缓存掩盖）。"""
+        self.log.write_text("stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info(force=True)["base"], "0.3.5")
+        time.sleep(0.01)
+        self.log.write_text("stockdb-server 0.3.6-stockdb\n", encoding="utf-8")
+        self.assertEqual(free_stockdb_mod.engine_version_info()["base"], "0.3.6")
+
+
+class UpstreamVersionStatusTest(_OpsTestCase):
+    """app.upstream_status / upstream_release_alert：同类版本线判定 + 告警接线。"""
+
+    def setUp(self):
+        super().setUp()
+        self.log = Path(self.tmp) / "log.txt"
+        p = mock.patch.object(config, "STOCKDB_LOG_FILE", self.log)
+        p.start()
+        self.addCleanup(p.stop)
+        self.alerts = app.Alerts.init(os.path.join(self.tmp, "upstream.json"))
+        self.log.write_text("stockdb-server 0.3.5-stockdb\n", encoding="utf-8")
+
+    def _release(self, tag):
+        return {"tag_name": tag, "html_url": "https://x", "published_at": "2026-07-19T00:00:00Z"}
+
+    def test_update_available_when_upstream_newer(self):
+        """上游 0.3.6 > 引擎 0.3.5 → update_available（旧逻辑在此恒 false）。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "update_available")
+        self.assertEqual(st["engine_version"], "0.3.5-stockdb")
+        self.assertIn("测试版本0.3.6", st["message"])
+        self.assertIn("建议升级镜像", st["message"])
+
+    def test_up_to_date_when_equal_or_older(self):
+        """上游 == 引擎 / 上游更旧 → up_to_date（不误报）。"""
+        for tag in ("测试版本0.3.5", "测试版本0.3.4"):
+            with mock.patch.object(app, "fetch_upstream_release",
+                                   return_value=self._release(tag)):
+                self.assertEqual(app.upstream_status()["kind"], "up_to_date")
+
+    def test_probe_failed_kind(self):
+        """探针 None → probe_failed（显式降级，不再静默留空）。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "probe_failed")
+        self.assertIn("探测失败", st["message"])
+
+    def test_unknown_when_engine_tag_missing(self):
+        """引擎版本与 IMAGE_TAG 都拿不到 → unknown（无法比对 ≠ 已最新）。"""
+        self.log.unlink()  # 启动日志不可用（无引擎版本来源）
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "", "STOCKDB_VERSION": ""}, clear=False):
+            st = app.upstream_status()
+        self.assertIsNone(st["engine_tag"])
+        self.assertEqual(st["kind"], "unknown")
+        self.assertIn("无法判断", st["message"])
+
+    def test_image_tag_fallback_when_log_missing(self):
+        """日志读不到时退回 IMAGE_TAG（A 注入的构建期版本）仍可判定。"""
+        self.log.unlink()
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "0.3.5"}, clear=False):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "update_available")
+        self.assertEqual(st["engine_tag"], "0.3.5")
+
+    def test_alert_warns_on_update_and_probe_failure(self):
+        """D：发现新版 / 探针失败 → 告警中心出现「上游」源 warning。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.9")):
+            self.assertEqual(app.upstream_release_alert(alerts=self.alerts),
+                             "update_available")
+        top = self.alerts.list()[0]
+        self.assertEqual((top["level"], top["source"]), ("warning", "上游"))
+        self.assertIn("0.3.9", top["message"])
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "probe_failed", "message": "上游版本探测失败（GitHub 不可达或超出重试）：本次无法判断是否有新版"})
+        self.assertEqual(len(self.alerts.list()), 2)
+        self.assertTrue(any("探测失败" in e["message"] for e in self.alerts.list()))
+
+    def test_alert_resolves_when_back_to_latest(self):
+        """条件恢复（已是最新）→ 撤回同源告警（自愈纪律一致）。"""
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "update_available", "message": "上游引擎已发布 0.3.9（当前运行 0.3.5-stockdb）"})
+        self.assertEqual(self.alerts.count(), 1)
+        app.upstream_release_alert(
+            alerts=self.alerts,
+            status={"kind": "up_to_date", "message": "引擎已是最新（上游最新 0.3.5）"})
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_alert_dedup_same_day(self):
+        """同一判定每 60s 巡更一次 → 当日去重不刷屏。"""
+        st = {"kind": "update_available", "message": "上游引擎已发布 0.3.9（当前运行 0.3.5-stockdb）"}
+        for _ in range(5):
+            app.upstream_release_alert(alerts=self.alerts, status=st)
+        self.assertEqual(self.alerts.count(), 1)
+
+    def test_version_payload_uses_engine_version(self):
+        """接口载荷：stale 由引擎版本判定；seam 字段（engine/image/msg）齐全。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.6")), \
+             mock.patch.dict(os.environ, {"IMAGE_TAG": "0.3.5"}, clear=False):
+            payload = web_handlers.version_payload()
+        self.assertTrue(payload["stale"])
+        self.assertIn("建议升级镜像", payload["msg"])
+        self.assertEqual(payload["engine"]["base"], "0.3.5")
+        self.assertEqual(payload["image"]["tag"], "0.3.5")
+        self.assertEqual(payload["upstream"]["tag_name"], "测试版本0.3.6")
+
+    def test_version_payload_not_stale_when_panel_newer(self):
+        """回归护栏：面板版本 0.10.x 远高于上游 0.x —— 旧逻辑会恒 false，
+        新逻辑必须依据引擎版本（此处 0.3.5 vs 上游 0.3.4 → 不落后）。"""
+        with mock.patch.object(app, "fetch_upstream_release",
+                               return_value=self._release("测试版本0.3.4")):
+            payload = web_handlers.version_payload()
+        self.assertFalse(payload["stale"])
+        self.assertEqual(payload["msg"], "")
+
+    def test_version_payload_marks_probe_failure(self):
+        """D：探针失败 → msg 显式标注降级（前端/巡检可判断"没探测到"≠"已最新"）。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            payload = web_handlers.version_payload()
+        self.assertFalse(payload["stale"])
+        self.assertIn("探测失败", payload["msg"])
+
+
+# =====================================================================
 # Phase 5 M0：前端静态服务 / SPA 回退 / legacy 逃生通道 / overview 聚合
 # 直连 app.Handler.do_GET（FakeConn 提供 rfile/wfile），断言真实路由行为。
 # =====================================================================
@@ -1014,6 +1741,40 @@ def _do_get(path: str):
     handler.path = path
     handler.do_GET()
     raw = conn.wfile.getvalue()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    headers = {}
+    for line in head.split(b"\r\n")[1:]:
+        k, _, v = line.partition(b": ")
+        headers[k.decode().lower()] = v.decode()
+    return status, headers, body
+
+
+def _do_post(path: str, payload: dict, method: str | None = None):
+    """直连 POST 处理器（0.10.38：静音端点用例需要），返回 (status, headers, body)。
+
+    不调 do_POST（那会走完整 HTTP 解析：构造期 handle() 已消费 rfile/wfile，
+    实测踩到 'I/O operation on closed file'），改为直接调路由方法——与 routes.py
+    的映射同源，断言的是"路由 + 载荷"契约本身。
+    """
+    from interfaces.web.routes import POST_ROUTES
+    raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    conn = _FakeConn()
+    handler = _WebHandler.__new__(_WebHandler)     # 跳过 __init__ 的协议初始化
+    handler.command = method or "POST"
+    handler.requestline = f"{handler.command} {path} HTTP/1.1"   # _send 内置日志要用
+    handler.request_version = "HTTP/1.1"
+    handler.client_address = ("127.0.0.1", 1)
+    handler.headers = {"Content-Length": str(len(raw_body)),
+                       "Content-Type": "application/json"}
+    handler.path = path
+    handler.rfile = io.BytesIO(raw_body)
+    handler.wfile = io.BytesIO()
+    name = POST_ROUTES.get(path)
+    if name is None:
+        return 404, {}, b'{"error": "not found"}'
+    getattr(handler, name)()
+    raw = handler.wfile.getvalue()
     head, _, body = raw.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
     headers = {}
@@ -1091,14 +1852,30 @@ class _DiagTests(_OpsTestCase):
         self.assertEqual(payload["env"]["webui_version"], app.WEBUI_VERSION)
 
     def test_diag_upstream_degraded(self):
-        """上游不可达 → upstream_github ok=False 且整体仍 200（单块降级）。"""
+        """上游不可达 → 该检查标记 degraded 但 **ok=True**（网络受限不是系统不健康，
+        0.10.38：此前 ok=False 会把 diag 整体打红，属假警报）。
+        注：不断言 all_ok——本地/CI 环境下 stockdb_service 等其他检查会因无容器而 false，
+        本用例只锁"上游网络受限不再把该项判红"这一条。"""
         with mock.patch.object(app, "fetch_upstream_release", return_value=None):
             status, _, body = _do_get("/api/diag")
         self.assertEqual(status, 200)
         payload = json.loads(body.decode())
         up = next(c for c in payload["checks"] if c["name"] == "upstream_github")
-        self.assertFalse(up["ok"])
-        self.assertIn("降级", up["note"])
+        self.assertTrue(up["ok"])
+        self.assertTrue(up["degraded"])
+        self.assertIn("网络受限", up["note"])
+
+    def test_diag_upstream_ok_when_reachable(self):
+        """上游可达 → degraded=False、note 带判定说明。"""
+        rel = {"tag_name": "测试版本0.3.5", "html_url": "https://x",
+               "published_at": "2026-07-19T00:00:00Z"}
+        with mock.patch.object(app, "fetch_upstream_release", return_value=rel):
+            status, _, body = _do_get("/api/diag")
+        payload = json.loads(body.decode())
+        up = next(c for c in payload["checks"] if c["name"] == "upstream_github")
+        self.assertTrue(up["ok"])
+        self.assertFalse(up["degraded"])
+        self.assertIn("测试版本0.3.5", up["note"])
 
     def test_diag_pybao_check(self):
         """pybao 检查 = 三个模块 find_spec 全命中（无 pybao 时为 False 也合法）。"""
@@ -1403,6 +2180,40 @@ class _AuctionBackfillTests(_OpsTestCase):
     def _metrics(self, d8):
         # round-trip：走 research store 接口替身（0.9.5 M5）
         return self._fake_research.read_metrics(d8)
+
+    def test_backfill_writes_daily_payload(self):
+        """0.10.39 回归：回填必须同时写 daily 子载荷。
+
+        NAS 0.10.38 实机抓到的事故：回填只写 metrics，把 live 收口写的 daily 覆盖掉，
+        MCP 预计算快车道（`_precomputed_row` 读 daily）随即失效 → `get_board_open_effect_history`
+        从 0.02s 退化为 40s 全市场重算（cache_hit=False / precomputed_days=0）。
+        """
+        app.auction_run_backfill(days=3)
+        for d8 in ("20260812", "20260813", "20260814"):
+            payload = self._metrics(d8)
+            daily = payload.get("daily")
+            self.assertIsInstance(daily, dict, f"{d8} 缺 daily 子载荷（快车道会失效）")
+            # 与 live 收口同构的关键字段（MCP _precomputed_row / 前端直读依赖）
+            for key in ("matched_count", "positive_count", "flat_count", "negative_count",
+                        "success_rate", "average_open_return_pct", "distribution",
+                        "metrics", "trade_date"):
+                self.assertIn(key, daily, f"{d8}.daily 缺 {key}")
+            self.assertEqual(daily["trade_date"], f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}")
+            # 计数自洽：匹配数 = 正 + 平 + 负
+            self.assertEqual(daily["matched_count"],
+                             daily["positive_count"] + daily["flat_count"] + daily["negative_count"])
+            # 覆盖块：候选 = 样本 + 缺价（守恒）
+            cov = daily.get("coverage") or {}
+            self.assertEqual(cov.get("codes_requested"),
+                             cov.get("fetched", 0) + (cov.get("missing_open") or 0))
+
+    def test_backfill_daily_metrics_do_not_leak_internal_keys(self):
+        """内部记账键（_candidates）不得进落盘 payload（只用于覆盖块计算）。"""
+        app.auction_run_backfill(days=3)
+        for d8 in ("20260812", "20260813", "20260814"):
+            payload = self._metrics(d8)
+            self.assertNotIn("_candidates", payload["metrics"])
+            self.assertNotIn("_candidates", payload)
 
     def test_backfill_idempotent(self):
         app.auction_run_backfill(days=3)
@@ -1743,6 +2554,37 @@ class StaleSelfHealTest(_OpsTestCase):
             self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
             self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
         self.assertEqual(self.alerts.count(), 1)  # 去重：仍只有一条
+
+    # ---- 0.10.36 自愈：条件恢复撤警 ----
+
+    def test_evening_alert_resolves_when_caught_up(self):
+        """晚间告警后数据追平 → 下一次评估撤回（同一晚 21:0x 追平场景）。"""
+        now = datetime.datetime(2026, 8, 28, 21, 5)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
+        self.assertEqual(self.alerts.count(), 1)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260828"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 28, 21, 20), alerts=self.alerts))
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_evening_alert_resolves_before_window_and_non_trading_day(self):
+        """21:00 前 / 非交易日评估也撤旧警（周一开盘前残留的晚间兜底告警被清）。"""
+        self.alerts.add("warning", "数据", "晚间兜底：20260828 数据截至 21:00 仍未到位（最新 20260827）")
+        self.alerts.add("error", "同步", "同步失败")
+        with mock.patch.object(app, "is_trading_day", return_value=True):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 28, 16, 0), alerts=self.alerts))
+        self.assertEqual([e["message"] for e in self.alerts.list()], ["同步失败"])
+        self.alerts.add("warning", "数据", "晚间兜底：20260828 数据截至 21:00 仍未到位（最新 20260827）")
+        with mock.patch.object(app, "is_trading_day", return_value=False):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 29, 21, 5), alerts=self.alerts))
+        self.assertEqual([e["message"] for e in self.alerts.list()], ["同步失败"])
 
 
 class CatchupSedimentTest(unittest.TestCase):

@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -92,3 +94,101 @@ def fetch(path: str, timeout: float = 10.0, breaker: bool = False,
         raise
     finally:
         _gate.release()
+
+
+# ==================== 运行中引擎版本探测（0.10.37 B） ====================
+# 为什么需要两来源：引擎**没有**版本接口（/api/version 等一律 400），版本只在启动
+# 横幅 `stockdb-server 0.3.5-stockdb` 露出，而该横幅走 stdout（docker logs）——
+# STOCKDB_LOG_FILE 只落 ERROR 级（NAS 实测：日志里全是 leveldb 错误行，无横幅）。
+# 于是：① 先扫启动日志（本地/原生模式常有横幅）；② 再扫引擎二进制里的版本字面量
+# （发行包二进制内含 `0.3.5-stockdb`；按 mtime/size 缓存，读 3MB 一次可忽略）。
+# 该值 = 实际在跑的二进制版本，是与上游 release tag 比较的**同类**版本线
+# （对比此前拿面板 WEBUI_VERSION 去比上游引擎 tag —— 两条互不相干的版本线）。
+_ENGINE_VERSION_RE = re.compile(r"stockdb-server\s+([0-9][0-9A-Za-z.\-]*)")
+_BINARY_VERSION_RE = re.compile(rb"(\d+\.\d+\.\d+(?:-[A-Za-z][A-Za-z0-9]*)?)")
+
+
+def _standalone_version(token: str) -> bool:
+    """版本字面量独立性判定（防 IP 误取）。
+
+    `120.53.53` 这类 IP 能从错位处匹配出 `20.53.53`（内部还有「数字紧邻数字」
+    的形态）→ 拒绝；`0.3.5` / `0.3.5-stockdb` / `1.12.12` 通过。
+    规则：token 内部不得出现两个连续数字（点分数字段必然被点分隔）。
+    """
+    return not any(token[i].isdigit() and token[i - 1].isdigit()
+                   for i in range(1, len(token)))
+_ENGINE_BINARY = "/opt/stockdb/stockdb"
+_engine_cache: dict = {"at": 0.0, "sig_log": None, "sig_bin": None, "val": None}
+_ENGINE_CACHE_TTL = 60.0
+
+
+def _parse_log_version(path: str) -> dict | None:
+    """启动日志最后一条 `stockdb-server <ver>` → info（无则 None）。"""
+    last_line = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if _ENGINE_VERSION_RE.search(line):
+                    last_line = line.strip()
+    except OSError:
+        return None
+    if not last_line:
+        return None
+    raw = _ENGINE_VERSION_RE.search(last_line).group(1)
+    return {"version": raw, "base": raw.split("-", 1)[0],
+            "source": "log", "detail": last_line[:160]}
+
+
+def _parse_binary_version(path: str) -> dict | None:
+    """引擎二进制内的版本字面量 → info（无则 None）。
+
+    取「最长且出现次数最多」的候选：发行包二进制含 `0.3.5` 与 `0.3.5-stockdb`
+    （后者更长、语义更全）；纯数字噪声（1.12.12 等依赖版本）通常只出现一次。
+    """
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    counts: dict[str, int] = {}
+    for m in _BINARY_VERSION_RE.finditer(data):
+        token = m.group(1).decode("ascii", "replace")
+        if not _standalone_version(token):
+            continue
+        counts[token] = counts.get(token, 0) + 1
+    if not counts:
+        return None
+    token = max(counts, key=lambda t: (("-" in t), len(t), counts[t]))
+    return {"version": token, "base": token.split("-", 1)[0],
+            "source": "binary", "detail": f"{path} 内版本字面量（出现 {counts[token]} 次）"}
+
+
+def engine_version_info(*, ttl: float = _ENGINE_CACHE_TTL, force: bool = False) -> dict | None:
+    """运行中引擎版本：启动日志优先，其次引擎二进制字面量。
+
+    返回 {"version": "0.3.5-stockdb", "base": "0.3.5", "source": "log|binary",
+    "detail": 依据, "log": 日志路径}；两来源都拿不到 → None（不抛）。
+    缓存 60s；日志或二进制的 mtime/size 变化即失效（换引擎后立刻反映）。
+    """
+    log_path = str(config.STOCKDB_LOG_FILE)
+    try:
+        st = os.stat(log_path)
+        sig_log = (st.st_mtime, st.st_size)
+    except OSError:
+        sig_log = None
+    try:
+        st = os.stat(_ENGINE_BINARY)
+        sig_bin = (st.st_mtime, st.st_size)
+    except OSError:
+        sig_bin = None
+    now = time.time()
+    if (not force and _engine_cache["val"] is not None
+            and now - _engine_cache["at"] < ttl
+            and _engine_cache["sig_log"] == sig_log
+            and _engine_cache["sig_bin"] == sig_bin):
+        return _engine_cache["val"]
+    val = _parse_log_version(log_path) or _parse_binary_version(_ENGINE_BINARY)
+    if val is not None:
+        val["log"] = log_path
+    _engine_cache.update(at=now, sig_log=sig_log, sig_bin=sig_bin, val=val)
+    return val

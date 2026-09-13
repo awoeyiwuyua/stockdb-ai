@@ -100,16 +100,31 @@ describe('聚合', () => {
 })
 
 describe('hasWhError24h', () => {
+  // 时区无关构造：告警 ts 是「本地时间」字符串，故用本地字段拼相对时刻，
+  // 不写死绝对时间（0.10.38：容器 TZ=UTC 时绝对时间假设会把 fresh/old 判反）
+  const localTs = (offsetHours: number) => {
+    const d = new Date(Date.now() + offsetHours * 3600 * 1000)
+    const p = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+           `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  }
+
   it('24h 内 warehouse error → true；更早 / 非 warehouse / 非 error → false', () => {
-    const now = new Date('2026-09-06T16:00:00+08:00').getTime()
-    const fresh = { ts: '2026-09-06 15:00:00', source: 'warehouse', level: 'error' }
-    const old = { ts: '2026-09-05 10:00:00', source: 'warehouse', level: 'error' }
-    const other = { ts: '2026-09-06 15:00:00', source: 'sync', level: 'error' }
-    const warn = { ts: '2026-09-06 15:00:00', source: 'warehouse', level: 'warning' }
+    const now = Date.now()
+    const fresh = { ts: localTs(-3), source: 'warehouse', level: 'error' }
+    const old = { ts: localTs(-30), source: 'warehouse', level: 'error' }
+    const other = { ts: localTs(-3), source: 'sync', level: 'error' }
+    const warn = { ts: localTs(-3), source: 'warehouse', level: 'warning' }
     expect(hasWhError24h([fresh], now)).toBe(true)
     expect(hasWhError24h([old], now)).toBe(false)
     expect(hasWhError24h([other], now)).toBe(false)
     expect(hasWhError24h([warn], now)).toBe(false)
     expect(hasWhError24h([], now)).toBe(false)
+  })
+
+  it('非法/缺失 ts 不误判（NaN 剔除）', () => {
+    const bad = { ts: 'not-a-date', source: 'warehouse', level: 'error' }
+    const missing = { source: 'warehouse', level: 'error' }
+    expect(hasWhError24h([bad, missing], Date.now())).toBe(false)
   })
 })

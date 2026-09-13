@@ -71,6 +71,7 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 | 引擎 HTTP 协议升级（JSON→MsgPack） | webui/MCP 全链路 JSON 解析失配：health/coverage/code_stats 变 None | 0.10.29（free_stockdb.fetch 按 Content-Type 嗅探 → msgpack_lite 解包 → json 回序列化；引擎 0.3.5 起，无请求侧开关） |
 | 引擎 SDK 区间语义变更（09-08 重传二进制） | 全市场快照退化成 ~50~100 只 → 仓库沉淀零星行、打板清单漏检（**单只 `get_kline` 正常，掩盖链路**） | 0.10.33（批量 SDK 改用同日区间 `start==end`，旧语义顺延一日作回落；换引擎二进制后回归全市场快照链路，非单只调用） |
 | 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） |
+| 上游发新版但**无人被告知** | 探测判定把「面板版本」当引擎版本比（`(0,3,6)>(0,10,36)=False`）→ `stale` 恒 false；探针失败静默留空 | 0.10.37（A/B/D：`IMAGE_TAG` 注入 + 引擎版本同类比较 + 看门狗告警与显式降级）。**仍待做（C）**：`/releases/latest` 看不到 prerelease；同名 tag 重传的资产指纹未比对——0.3.5 两次同 tag 重传只能靠同步失败被动发现 |
 
 ### 6.2 换域/换资产半小时流程
 

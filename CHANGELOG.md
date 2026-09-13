@@ -1,8 +1,197 @@
 # CHANGELOG
 
+## [0.10.39] — 2026-09-13（修复：回填必须写 daily 子载荷 + diag 网络降级不打红）
+
+> 0.10.38 收口时的整体复验抓到的两个缺陷（其中一个把 0.10.36 修好的快车道又打回 40s）。
+
+- **回填覆盖 daily → 打板快车道整段失效**：`auction_run_backfill` 只写 `metrics`，而 live
+  收口会写 `daily`（MCP `_precomputed_row` 依赖它）→ 今天跑 60 天回填后 **0/60 天有 daily**，
+  `get_board_open_effect_history` 从 **0.02s 退化为 39s 全市场重算**
+  （`cache_hit=False` / `precomputed_days=0`）。修法：回填第二遍按 live 同构写 `daily`
+  （matched/正平负/成功率/均值/分位/分布 + coverage；内部记账键 `_candidates` 不入 payload），
+  并重跑 60 天回填恢复（**60/60 有 daily**，快车道回到 **0.03s**）。
+  回归用例：`test_backfill_writes_daily_payload`、`test_backfill_daily_metrics_do_not_leak_internal_keys`。
+- **`/api/diag` 把「网络受限」判成系统故障**：`upstream_github` 探针失败（GitHub 从 NAS
+  间歇超时）原写 `ok=False` → `all_ok=false` 整体打红，属假警报。改为 `ok=True` +
+  `degraded=True` + note「网络受限：本次探测未完成（不影响本机数据与同步）」。上游真发新版
+  或探测恢复时，仍由看门狗告警/撤警负责（实测：探针失败告警出现后，下一拍探针成功即自动撤销至 0 条）。
+  用例：`test_diag_upstream_degraded`（改判据）、`test_diag_upstream_ok_when_reachable`（新增）。
+- **部署工具链第二次踩坑**：清单式部署漏了 `services/` 目录，导致本批的回填修复**根本没上
+  NAS**（白跑一轮回填才发现）。部署清单已改为**后端整棵树按目录同步**
+  （interfaces/services/core/storage/ops），杜绝「新增目录忘加清单」。
+- 测试：Python 全量 **481 全绿**。**实机最终整体复验 13/13 全绿**（0.10.39）：版本三处一致、
+  `diag all_ok=true`、数据未动（20260911）、MCP 研究库可读、快车道 0.04s、engine 版本可读、
+  无残留上游告警、09-07 分类正确且 `needs_action=false`、资产卡真身字段、补录/静音端点在线、
+  前端 8 个新关键词全在镜像产物内、timeline 逐条带 reason/class。
+
+## [0.10.38] — 2026-09-13（驾驶舱改版：后端契约 / 横幅与折叠 / 三栏资产卡 / 补录与静音）
+
+> 用户给出驾驶舱改版设计稿并认可「先补后端契约」的落地顺序。改版起因是数据真身暴露的
+> 两类问题：**叙事误报**（09-07 被部署重启打断的手动重试被当成「需处理」）与**编造字段**
+> （设计稿里 mydb 卡的「11 张基础数据表 / 连接池 2-10 / 无坏块」在 NAS 上没有任何数据支撑，
+> 真身是 80 KB 的 LevelDB 私有库）。
+
+**一、后端契约（前端才有东西可渲染）**
+- `app.sync_failure_class()`：同步记录分类纯函数（ok / self_healed / awaiting_mirror /
+  run_interrupted / verify_failed / data_source_error / not_effective / unknown +
+  needs_action + 中文 detail），上下文参数区分易误报场景：`has_later_success`
+  （该条之后有成功 → 已自愈）、`day_has_success`（当日另有成功）、`is_last_of_day`。
+- `app._reason_nature()`：reason 三分类（interrupt 打断 / fatal 真错误如认证失败 / wait 等上游）。
+  判定顺序按 NAS 真身校正过两轮（见下「实机抓到的 bug」）。
+- `load_timeline`：透出 `reason`/`warn`（此前只存在 sync_history.json 里、没透出）+
+  逐条 class/label/needs_action/detail + 日级 `needs_action`/`needs_action_count`/`action_hint`
+  + `awaiting`（今日未到同步点 → 不报「数据未更新」假警报）。
+- `app.assets_payload()`（60s TTL）：`research_db_stats`（研究库四表真实行数/体积/回滚模式）
+  + `backup_stats`（仓库与研究库**两套**备份分别计数）+ `disk_usage_detail`（行情/数仓/
+  研究库/mydb 分层体量，独立 300s TTL）。**剔除无数据支撑的字段**（无坏块/连接池/11 张表
+  全部删掉，取不到即 null → 前端显示「未监控」）。
+- `snapshot_payload` 新增 `assets` 块；`/api/diag` env 增 `engine_version`。
+
+**二、前端（横幅置顶 / 胶囊折叠 / 三栏资产卡）**
+- `domain/timeline.ts` + `timeline.test.ts`（14 例）：折叠/外推/横幅判定的纯函数与离线护栏。
+- `AlertBanner.vue`（新）：只收 needs_action 的日子；空则整体不渲染（删掉「全部正常」占位）。
+- `TimelineCard.vue`：失败**外推**成红色胶囊（带中文分类标签与悬停详情）、成功折成
+  `+N 次成功 · 末次 HH:MM`；展开态显示 reason/warn/分类；删除每行「告警 0」占位。
+- `AssetsCard.vue`：改**三栏**（行情底座 / 分析数仓 / 私有存储），全部真实字段，
+  缺字段显示「未监控」；对账状态取 `last_result.reconcile` 真值。
+- `vite.config.js`：vitest include 补 `.test.ts` —— 此前只匹配 `.test.js`，
+  `src/domain/lights.test.ts` 自 TS 化以来**一直被静默跳过**（11 例从未在 CI 跑过）。
+
+**三、两个新动作（语义定稿）**
+- **立即补录 = 下拉三选项**（语义不同，各自带后果确认）：① 重跑行情同步（空转无害）；
+  ② 仓库补沉淀（按水印缺口补日K，不重写已有分区）；③ 打板指标回填 60 天
+  （**会用 K 线口径覆盖同期已采集值**——文案里明说，用户可见代价）。
+- **告警静音**：`ops.alerts.set_alert_mute/clear_alert_mute/alert_mute_state` +
+  `GET/POST /api/alerts/mute`（预设 1h / 4h / today，或 minutes 1~1440）。
+  语义 = **只影响提醒强度，不改事实**：`count` 恒定、timeline 与横幅照常反映真实状态、
+  到期自动解除（过期即清文件）；`/api/alerts/summary` 与 `overview.alerts` 同时给
+  count 与 muted/mute_until，前端横幅显示「已静音至 HH:MM」与语义提示。
+
+**四、实机抓到的 bug（都已修 + 锁进单测）**
+1. 分类器被 warn 吞掉 reason 性质：09-07 那 10 条**每条**都带 warn「下载 0 文件且数据未更新」，
+   其中 3 条 reason 是「认证失败」（当时真故障）、1 条是「数据完整性验证未通过」（部署打断）——
+   先判 warn 会把真相全盖成「等上游」。改为 reason 性质与 verified 优先。
+2. 打断判定要求「非当日最后一条」：09-07 21:58 恰是最后一条（22:00 部署重启打断）→
+   永远走不到该分支；改为「当日有成功运行」即成立。
+3. `lights.test.ts` 时区依赖：用例用带空格的本地时间戳做绝对时区假设，容器 `TZ=UTC`
+   下偏移 8 小时判反（Docker 构建必挂）→ 改时区无关构造 + 新增 `parseLocalTs()`。
+4. 部署清单漏 `stockdb-ai/interfaces/web/routes.py`（文件清单式部署的典型坑）：
+   静音端点在镜像里根本不存在（复验 404 抓到）→ 部署清单改为**按目录同步**。
+5. 版本号漏 bump（镜像 0.10.38 而 `WEBUI_VERSION` 还是 0.10.37）→ 补齐。
+6. **回填覆盖掉 daily 子载荷**（0.10.39 修）：`auction_run_backfill` 只写 `metrics`，
+   而 live 收口会写 `daily`（MCP 预计算快车道 `_precomputed_row` 依赖它）→ 今天跑 60 天回填后
+   快车道整段失效（`cache_hit=False` / `precomputed_days=0` / **40s 全市场重算**，0/60 天有 daily）。
+   修法：回填第二遍按 live 同构写 `daily`（计数/成功率/分位/分布 + coverage，含内部键
+   `_candidates` 不外泄），并重跑 60 天回填恢复（**60/60 天有 daily**）。回归用例：
+   `test_backfill_writes_daily_payload` / `test_backfill_daily_metrics_do_not_leak_internal_keys`。
+7. **`/api/diag` 把"网络受限"判成系统故障**：`upstream_github` 探针失败（GitHub 从 NAS
+   间歇超时）原写 `ok=False` → `all_ok=false` 整体打红，属假警报。改为 `ok=True` +
+   `degraded=True` + note「网络受限：本次探测未完成（不影响本机数据与同步）」，`all_ok` 不再被
+   网络条件污染（上游真发新版或探测恢复时，仍由看门狗告警/撤警负责）。
+
+
+**五、实机复验（NAS，两批共 19 项全绿）**
+- 契约批 10/10：assets 真身（研究库 metrics=60/series=2/lists=12/snapshots=892/1.0 MB、
+  双备份 12+14 份、磁盘分层 23.9G+89.6M+1.0M+0.1M）；09-07 逐条分类
+  `self_healed×3 / awaiting_mirror×6 / run_interrupted×1`、`needs_action=False`（不再误报）；
+  09-11 首条 `self_healed` + reason 透出；SPA 新产物在镜像内；`diag all_ok=true`、`0.10.38`。
+- 动作批 9/9：静音闭环（设 1h → overview/summary 同步反映 → 解除 → 非法预设 400）；
+  补录三入口与覆盖说明在产物内；仓库/打板端点可达。
+
+**测试**：Python 全量 **478 全绿**（+11 静音用例）；前端 Vitest **94 全绿**（含首次纳入的
+lights 12 例与新增 timeline 14 例）；`vue-tsc` 0 错；`vite build` 通过。
+
+**六、最终整体复验（0.10.38 收口，12/12 全绿）**
+一次性回归"老修复未退化 + 新改版生效"：
+- A 版本与健康：三处版本一致 0.10.38、`diag all_ok=true`、数据仍 `20260911`（多次重建部署未影响数据）
+- B 0.10.36 老修复：MCP `get_mydb_data` 可读（竞价快照 33 条）、打板快车道 **0.03s**
+  （`cache_hit=true` / `precomputed_days=5`，此前 40s）
+- C 0.10.37 老修复：`engine` 版本来源可读（0.3.5-stockdb / binary）、无「上游」误报告警
+  （实测：探针失败告警出现后，看门狗下一拍探针成功即**自动撤销**至 0 条——自愈闭环）
+- D 0.10.38 改版：09-07 分类逐条正确且 `needs_action=false`、资产卡真身字段齐全、
+  补录三端点可达、静音端点在线且无残留、前端 8 个新关键词全在镜像产物内
+
 本项目面板版本号 = `WEBUI_VERSION`（`stockdb-ai/config.py`，0.9.1 起收敛至 config），
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
+
+## [0.10.37] — 2026-09-13（修复：上游新版探测——A/B/D）
+
+> 用户问「上游 stockdb 发新版，webui 能探测到吗」。逐层核对结论：**探得到、但永远不告警**。
+> 现有判定拿 `IMAGE_TAG`（**Dockerfile 从未注入** → 容器内恒 None，回落到 `WEBUI_VERSION`）
+> 与上游引擎 tag 比大小 → `(0,3,6) > (0,10,36) = False`，**上游发 0.3.6/0.4.0 一律判"不落后"**，
+> 只有上游号超过面板号（0.11.0+）才会亮；`/api/version` 的 `msg` 恒空、探针失败静默留空。
+> 本版修 A（版本来源）、B（同类版本线判定）、D（告警与显式降级）；C（同名 tag 重传资产
+> 指纹）留待下一批——0.3.5 同 tag 重传两次都是靠同步全线失败才发现的。
+
+- **A｜镜像 tag 注入**：`docker/Dockerfile` 新增 `ENV IMAGE_TAG=${VERSION}`（引擎版本，
+  本地 build 与 CI build 同源）；`/api/version` 的 `image.tag` 不再恒 null。
+  同时新增 `app._env_version_tag()`：空串→None（`A or B` 链带出 `""` 会污染下游类型判断）
+- **B｜判定改同类版本线**：新增 `storage.providers.free_stockdb.engine_version_info()`——
+  读引擎启动日志（`STOCKDB_LOG_FILE`）最后一条 `stockdb-server 0.3.5-stockdb` 取**运行中
+  引擎版本**（引擎未暴露版本接口，日志是唯一可靠来源；缓存 60s，文件 mtime/size 变化即失效）。
+  `stale` 判定改为 **上游最新 tag > 引擎实测版本**，`/api/version` 新增 `engine` 块
+  （version/base/source），`msg` 改为「上游引擎已发布 X（当前运行 Y），建议升级镜像
+  （重新 pin ARG VERSION + SHA256 后重建）」——与 `docs/release-policy.md` §6.2 的换版流程对齐
+- **D｜不再静默**：新增 `app.upstream_status()`（单一判定源，四态：`up_to_date` /
+  `update_available` / `probe_failed` / `unknown`）与 `app.upstream_release_alert()`
+  （接入看门狗 60s 巡更，source="上游"，当日去重；条件恢复即撤警——沿用 0.10.36 自愈纪律）。
+  探针失败 / 版本号无法解析也在 `/api/version.msg` 显式标注降级；`/api/diag` 的
+  `upstream_github` note 由「最新 release：<tag>」改为「<tag>｜<判定说明>」
+  （此前巡检看到 tag 会误判为已最新），env 块新增 `engine_version`
+- 测试：`test_ops` 新增 15 例（`EngineVersionProbeTest` 4：启动行解析/重启取最后一条/
+  缺失与无启动行降级/缓存随文件变化失效；`UpstreamVersionStatusTest` 11：四态判定、
+  面板版本不再误判的回归护栏、IMAGE_TAG 兜底、unknown 分支、告警投递/撤警/当日去重、
+  载荷 stale+engine+image+msg 四字段）→ **Python 全量 440 全绿**
+- 实机复验（fnOS 0.10.37，10/10 通过）：`image.tag` 0.3.5（原 null）、`engine.version` 0.3.5-stockdb
+  （`source=binary`，注明依据）、真实探针 `up_to_date`、注入上游 0.3.6 → `update_available` 且文案给出
+  重新 pin 的升级路径、探针失败 → `probe_failed` + `msg` 显式降级、`/api/diag` note 带判定说明 +
+  `env.engine_version`、看门狗链路 `up_to_date` 时不误报且残留告警被撤（0 条）。部署坑：`ENV` 不能写在
+  首个 `FROM` 之前（`no build stage`）；部署脚本须 ASCII-only（PowerShell 写文件加 BOM 并压行，已致一次静默失败）
+- 已知边界（未修，留 C 批）：`/releases/latest` 看不到 prerelease；**同 tag 重传二进制**
+  （0.3.5 已发生两次）tag_name/published_at 均不变，需靠资产 digest 指纹比对（C）；
+  探针 TTL 1h（发版后最多 1 小时被发现）
+
+## [0.10.36] — 2026-09-13（修复：研究库跨线程断链 / MCP 版本漂移 / 告警不自愈）
+
+> 起因：用户要求 SSH 巡检飞牛 NAS 实例。体检**实测**三处缺陷（台账见 `docs/deployments.md`
+> 0.10.36 行）：`get_mydb_data` 成功率 **0%**、`get_board_open_effect_history` 每次 **40s**
+> （预计算快车道失效，退化为全市场重算）、MCP 把 0.10.35 实例报成 **0.10.7**、
+> 数据 17:50 追平后 16:23 的「滞后 35 天」告警仍挂面板。
+
+- **研究库 SQLite 跨线程断链（P0）**：`storage/research_store.py` 建连缺
+  `check_same_thread=False`，而 store 是**进程级单例**（连接建在「第一个触达它的线程」上），
+  webui/MCP 走 `ThreadingHTTPServer`（每请求一线程）→ 后续请求一律
+  `SQLite objects created in a thread can only be used in that same thread`。
+  **写路径因持锁 + 同连接复用反而正常**（指标已正确落盘至 09-11），坏的只是读：
+  `get_mydb_data` 对所有研究成果命名空间表 100% INTERNAL_ERROR；`get_board_open_effect_history`
+  的 research_store 通道失败后回落全市场重算（40s/次、`precomputed_days: 0`）。
+  修复：`check_same_thread=False`（写在本类 RLock 内串行、py3.14 threadsafety=3
+  连接级串行化，读天然并发；连接创建/关闭仍由 `_lock` 保护）
+- **MCP 版本漂移**：`stockdb_mcp_server.py` 的 `SERVER_VERSION` 原为硬编码 `"0.10.7"`
+  （原注释即「0.9.10 起手工对齐」），已漂移 28 个版本 → `initialize.serverInfo.version`
+  与 `get_data_status.server_version` 都报错版本（AI 客户端据此判断能力边界）。
+  修复：改为读 `config.WEBUI_VERSION`（单源），config 缺失时降级 `"0.0.0-unknown"`
+- **告警不自愈**：`ops/alerts.py` 新增 `Alerts.resolve(source, message_prefix)`——
+  条件式投影告警在条件恢复时撤回（**前缀匹配**：滞后告警文案含天数，精确匹配会漏撤；
+  撤回不落历史条目，条件再次恶化会重新投递）。接线：
+  `data_freshness_alert` 探针恢复/滞后回落（含非交易日）撤回「行情数据不可用」「行情数据已滞后」；
+  `evening_stale_alert` 数据追平 / 未到 21:00 / 非交易日撤回「晚间兜底：」
+- **连带性能修复**（同一根因）：研究库跨线程失败使 `get_board_open_effect_history`
+  每次退化为全市场重算（40s），并连带拖慢 `get_data_status` 等读路径（旧容器实测
+  平均 18s、`get_market_snapshot` 45s；新容器 `get_data_status` 实测 0.025s / 0ms / 0ms）
+- 测试：`test_research_store` 新增 2 例（跨线程读 + 8 线程并发读；**已验证在旧代码上必 FAIL**，
+  报错文案与 NAS 实机逐字一致）；`test_ops` 新增 10 例（resolve 4 + 新鲜度自愈 4 + 晚间自愈 2）；
+  `test_stockdb_mcp_server` 新增 3 例（版本单源 + initialize 响应 + get_data_status 响应）。
+  **Python 全量 425 全绿**（CI 同款 12 模块集）
+- 实机复验（fnOS 0.10.36，部署后 14 次 MCP 调用**零失败**）：`get_mydb_data` 由 0% 成功率
+  变为 8/8 成功（`elapsed_ms` 0~1ms、`竞价快照:20260911` 读回 33 条）；`get_board_open_effect_history`
+  由每次 **40s** 变为 **0.01~0.02s**（`cache_hit: true`、`load_path: mydb`、`precomputed_days: 5`、
+  `fallback_reason: null`）；三处版本号一致 0.10.36；看门狗首轮巡更（启动 +32s）自动撤回
+  两条 09-11 残留告警（`alerts.json` → `[]`）
+- **实机数据补齐（同日执行）**：`打板序列` 原仅 16 个观测（该实例从未跑过 60 天回填），分位/强弱标签恒 null。执行 `POST /api/auction/run {"task":"backfill","days":60}`（80s，backfilled_days=60）：序列补到 60 值、metrics 由 18 天扩到 60 天（20260622~20260911），**序列与逐日指标 0 处不一致**；分位链路实测可用（rank=0.383/neutral、0.067/weak）。核对结论：09-11（真竞价采集）premium_mean 逐位未变（仅 `value_source` 标签转 kline）；09-09 由 13 只修正为 66 只（该日 09:26 采集不完整——60 天里唯一明显偏少天，回填以全市场日K 权威口径修正）。**注意**：回填后历史逐日 `rank_60d` 仍为 null 属设计内（无未来函数：当时确无 60 个此前观测），分位自下一交易日 09:26 采集起产出
+- 影响面：只动读路径与告警展示，**不动数据面**（研究库/仓库/行情文件无 schema 变更）；
+  部署后首轮快车道命中即证明生效（`precomputed_days > 0`、`cache_hit: true`）
 
 ## [0.10.35] — 2026-09-10（修复：打板采集取错字段 + 晚间重跑，致 37 条「竞价/开盘偏差」误报）
 

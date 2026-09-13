@@ -58,9 +58,11 @@
 ## 3. 开发工作流
 
 1. 数据更新：上游 `数据更新.exe` 保持引擎数据最新（`000001` 最新交易日为探针）
-2. 代码改动：本仓库分支 → 单测（`stockdb-ai/` 下 `uv run python -m unittest
-   test_quote_sources test_auction_metrics test_auction_list test_ops test_warehouse
-   interfaces.mcp.test_stockdb_mcp_server`，308 全绿）
+2. 代码改动：本仓库分支 → 单测（`stockdb-ai/` 下，与 CI 同款 12 模块集：
+   `uv run python -m unittest interfaces.mcp.test_stockdb_mcp_server test_ops
+   test_quote_sources test_auction_metrics test_auction_list test_records
+   test_layer_boundaries test_warehouse test_research test_research_store
+   test_tool_groups_trace test_msgpack`，425 全绿）
 3. 回填/采集：`auction_run_backfill(days=60)`（app.py）直连引擎写 mydb
 4. 验收：异源签字口径见 `docs/design/auction-collector.md` 与 `docs/acceptance/`
 5. 发布：CHANGELOG → 分支 → PR → 合并 → tag `vX.Y.Z`；docker 镜像仅成熟后手动触发

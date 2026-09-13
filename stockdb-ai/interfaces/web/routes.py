@@ -27,6 +27,7 @@ GET_ROUTES: dict[str, str] = {
     "/api/diag": "_diag",
     "/api/alerts": "_alerts",
     "/api/alerts/summary": "_alerts_summary",
+    "/api/alerts/mute": "_alerts_mute",
     "/api/mcp/stats": "_mcp_stats",
     "/api/mcp/calls": "_mcp_calls",
     "/api/version": "_version",
@@ -39,6 +40,7 @@ POST_ROUTES: dict[str, str] = {
     "/api/data/write": "_data_write",
     "/api/hk/sync": "_hk_sync",
     "/api/alerts/clear": "_alerts_clear",
+    "/api/alerts/mute": "_alerts_mute",
     "/api/auction/run": "_auction_run",
     "/api/warehouse/run": "_warehouse_run",
     "/api/research/migrate": "_research_migrate",  # 0.9.12：引擎 mydb 旧研究成果导入 SQLite

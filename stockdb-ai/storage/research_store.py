@@ -130,7 +130,16 @@ class SqliteResearchStore(ResearchStore):
         with self._lock:
             if self._conn is None:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(self._path), timeout=5.0)
+                # 0.10.36：check_same_thread=False——store 是进程级单例，连接建在
+                # 「第一个触达它的线程」上；webui/MCP 走 ThreadingHTTPServer（每请求
+                # 一线程），跨线程读必然发生。旧行为：调度线程建连后，HTTP 线程读取
+                # 一律 "SQLite objects created in a thread can only be used in that
+                # same thread" → get_mydb_data 成功率 0%、get_board_open_effect_history
+                # 预计算快车道失效（退化为全市场重算 40s）。NAS 0.10.35 实机实证。
+                # 安全性：写在本类 RLock 内串行（py3.14 threadsafety=3，连接级串行化），
+                # 读为 SQLite 并发读；连接创建/关闭仍由 self._lock 保护。
+                conn = sqlite3.connect(str(self._path), timeout=5.0,
+                                       check_same_thread=False)
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA busy_timeout=5000")
                 conn.executescript(_SCHEMA)
