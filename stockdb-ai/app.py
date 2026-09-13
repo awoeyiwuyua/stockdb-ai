@@ -64,6 +64,7 @@ except ImportError:  # noqa: BLE001 - pybao_tools 缺失时优雅降级
 # ---- 0.9.1 四层架构：配置单一入口（config.py）----
 # 运行配置全部收敛于 config 模块（引擎地址/端口/数据目录/调度触发点/版本号/并发闸门），
 # 本文件不再直接读环境变量定义这些配置（0.9.2 各层迁移后从 config 引用）。
+from core import calendar_market  # noqa: E402 - 交易日历真身（0.10.43，见下方兼容导出）
 from config import (  # noqa: E402 - 配置为纯 stdlib，无循环依赖
     AUCTION_CLOSE_TIME,
     AUCTION_COLLECT_TIME,
@@ -518,47 +519,37 @@ def _default_schedule() -> dict:
             "auction_fired": {}}  # 0.10.35：打板采集/收口日级触发守卫（持久化）
 
 
-# ==================== A 股交易日历（休市日表，数据截至 2026 年） ====================
-# 来源：exchange_calendars 的 XSHG 日历（https://github.com/gerrymanoim/exchange_calendars）
-# 取值规则：每个年份「周一~周五但非交易日」的日期（官方调休安排：春节/国庆/元旦/清明/五一/端午/中秋，
-# 以及部分周六周日调休补班的 0 个或 1 个非交易日，均已折算进工作日的缺失）。
-# 提取脚本：stockdb-ai/scripts/extract_xshg_holidays.py（仅维护期使用，不随 webui 运行）。
-# 注意：XSHG 日历发布滞后（2027 官方安排通常 2026 年底公布），未收录年份按"工作日=交易日"处理，
-# 数据截至年份后请在日志提示更新。
-XSHG_HOLIDAYS: dict[str, set[str]] = {
-    "2024": {"01-01", "02-09", "02-12", "02-13", "02-14", "02-15", "02-16",
-             "04-04", "04-05", "05-01", "05-02", "05-03", "06-10", "09-16", "09-17",
-             "10-01", "10-02", "10-03", "10-04", "10-07"},
-    "2025": {"01-01", "01-28", "01-29", "01-30", "01-31", "02-03", "02-04",
-             "04-04", "05-01", "05-02", "05-05", "06-02",
-             "10-01", "10-02", "10-03", "10-06", "10-07", "10-08"},
-    "2026": {"01-01", "01-02", "02-16", "02-17", "02-18", "02-19", "02-20", "02-23",
-             "04-06", "05-01", "05-04", "05-05", "06-19", "09-25",
-             "10-01", "10-02", "10-05", "10-06", "10-07"},
-}
-XSHG_HOLIDAYS_THROUGH = "2026-12-31"  # 休市表覆盖到的最后日期（用于到期提示）
+# ==================== 交易日历（多市场：A 股 XSHG / 港股 XHKG） ====================
+# 表与判定真身：core/calendar_market.py（内嵌休市表，运行期零依赖，纯标准库）。
+# 来源：exchange_calendars 的 XSHG/XHKG 日历（https://github.com/gerrymanoim/exchange_calendars）；
+# 提取脚本：stockdb-ai/scripts/extract_calendar_holidays.py（仅维护期使用，需装 exchange_calendars）。
+# 0.10.43：此处原有一份 XSHG_HOLIDAYS 内嵌拷贝（与 core/calendar_xshg.py 重复，
+# 存在漂移风险）已删除，统一委托 calendar_market.SH —— 判定逻辑与历史逐位一致。
+# 多市场请用 calendar_market.SH / .HK / .get_calendar(market)，勿再新增内嵌表。
+XSHG_HOLIDAYS = calendar_market.XSHG_HOLIDAYS                  # 兼容导出（test/docs 引用）
+XSHG_HOLIDAYS_THROUGH = calendar_market.XSHG_HOLIDAYS_THROUGH
 
 
-_calendar_warned: set[int] = set()  # 休市表未收录年份的日志限频（每年只警告一次）
+_calendar_warned: set[tuple[str, int]] = set()  # 未收录年份的日志限频（每市场每年一次）
 
 
 def is_trading_day(d=None) -> bool:
-    """A 股交易日判定：工作日 且 非休市表内日期。
+    """A 股交易日判定：工作日 且 非休市表内日期（委托 calendar_market.SH）。
 
+    入参：None（今天）/ date / 8 位 "YYYYMMDD"（三态与历史一致，测试与调用方两种都用）。
     未收录年份（休市表覆盖后）按"工作日=交易日"处理，并在日志提示更新（每年限频一次，
     避免 4s 轮询触发日志风暴）。供定时同步跳过周末/法定节假日触发用。
+    港股判定用 calendar_market.HK（含台风临时休市：日历不收录，按"数据即事实"处理）。
     """
-    from datetime import datetime as _dt
-    d = d or _dt.now().date()
+    d = calendar_market.coerce_date(d) if d is not None else datetime.now().date()
     if d.weekday() >= 5:  # 周六/周日
         return False
-    holidays = XSHG_HOLIDAYS.get(str(d.year))
-    if holidays is None:
-        if d.year not in _calendar_warned:
-            _calendar_warned.add(d.year)
+    if calendar_market.SH.holidays_of(d.year) is None:
+        key = ("sh", d.year)
+        if key not in _calendar_warned:
+            _calendar_warned.add(key)
             log(f"⚠️ A股休市表未收录 {d.year} 年（数据截至 {XSHG_HOLIDAYS_THROUGH}），请更新 XSHG_HOLIDAYS")
-        return True  # 未知年份：工作日即视为交易日
-    return d.strftime("%m-%d") not in holidays
+    return calendar_market.SH.is_trading_day(d)
 
 
 def _normalize_times(times) -> list[str]:
