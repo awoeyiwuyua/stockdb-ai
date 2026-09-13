@@ -131,8 +131,15 @@ _WAREHOUSE_HINT = (
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "stockdb-native"
-# 与 WEBUI_VERSION 同步（stockdb-ai/config.py；0.9.10 起手工对齐）
-SERVER_VERSION = "0.10.7"
+# 0.10.36：版本单源——改为读 config.WEBUI_VERSION（此前硬编码 "0.10.7"，自 0.9.10
+# 起靠手工对齐，已漂移 28 个版本：NAS 0.10.35 实机仍把 initialize.serverInfo.version
+# 与 get_data_status.server_version 报成 0.10.7，误导 AI 客户端）。
+# 容错：config 缺失/异常时回退占位串（MCP 不因版本号读取失败而不启动）。
+try:  # noqa: E402 - sys.path 已在上方补齐 _BASE_DIR（仓库根 = config.py 所在）
+    import config as _config
+    SERVER_VERSION = _config.WEBUI_VERSION
+except Exception:  # noqa: BLE001 - 裁剪部署无 config 时降级
+    SERVER_VERSION = "0.0.0-unknown"
 
 DEFAULT_HOST = "100.66.1.5"
 DEFAULT_PORT = 7899

@@ -4,6 +4,46 @@
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。
 
+## [0.10.36] — 2026-09-13（修复：研究库跨线程断链 / MCP 版本漂移 / 告警不自愈）
+
+> 起因：用户要求 SSH 巡检飞牛 NAS 实例。体检**实测**三处缺陷（台账见 `docs/deployments.md`
+> 0.10.36 行）：`get_mydb_data` 成功率 **0%**、`get_board_open_effect_history` 每次 **40s**
+> （预计算快车道失效，退化为全市场重算）、MCP 把 0.10.35 实例报成 **0.10.7**、
+> 数据 17:50 追平后 16:23 的「滞后 35 天」告警仍挂面板。
+
+- **研究库 SQLite 跨线程断链（P0）**：`storage/research_store.py` 建连缺
+  `check_same_thread=False`，而 store 是**进程级单例**（连接建在「第一个触达它的线程」上），
+  webui/MCP 走 `ThreadingHTTPServer`（每请求一线程）→ 后续请求一律
+  `SQLite objects created in a thread can only be used in that same thread`。
+  **写路径因持锁 + 同连接复用反而正常**（指标已正确落盘至 09-11），坏的只是读：
+  `get_mydb_data` 对所有研究成果命名空间表 100% INTERNAL_ERROR；`get_board_open_effect_history`
+  的 research_store 通道失败后回落全市场重算（40s/次、`precomputed_days: 0`）。
+  修复：`check_same_thread=False`（写在本类 RLock 内串行、py3.14 threadsafety=3
+  连接级串行化，读天然并发；连接创建/关闭仍由 `_lock` 保护）
+- **MCP 版本漂移**：`stockdb_mcp_server.py` 的 `SERVER_VERSION` 原为硬编码 `"0.10.7"`
+  （原注释即「0.9.10 起手工对齐」），已漂移 28 个版本 → `initialize.serverInfo.version`
+  与 `get_data_status.server_version` 都报错版本（AI 客户端据此判断能力边界）。
+  修复：改为读 `config.WEBUI_VERSION`（单源），config 缺失时降级 `"0.0.0-unknown"`
+- **告警不自愈**：`ops/alerts.py` 新增 `Alerts.resolve(source, message_prefix)`——
+  条件式投影告警在条件恢复时撤回（**前缀匹配**：滞后告警文案含天数，精确匹配会漏撤；
+  撤回不落历史条目，条件再次恶化会重新投递）。接线：
+  `data_freshness_alert` 探针恢复/滞后回落（含非交易日）撤回「行情数据不可用」「行情数据已滞后」；
+  `evening_stale_alert` 数据追平 / 未到 21:00 / 非交易日撤回「晚间兜底：」
+- **连带性能修复**（同一根因）：研究库跨线程失败使 `get_board_open_effect_history`
+  每次退化为全市场重算（40s），并连带拖慢 `get_data_status` 等读路径（旧容器实测
+  平均 18s、`get_market_snapshot` 45s；新容器 `get_data_status` 实测 0.025s / 0ms / 0ms）
+- 测试：`test_research_store` 新增 2 例（跨线程读 + 8 线程并发读；**已验证在旧代码上必 FAIL**，
+  报错文案与 NAS 实机逐字一致）；`test_ops` 新增 10 例（resolve 4 + 新鲜度自愈 4 + 晚间自愈 2）；
+  `test_stockdb_mcp_server` 新增 3 例（版本单源 + initialize 响应 + get_data_status 响应）。
+  **Python 全量 425 全绿**（CI 同款 12 模块集）
+- 实机复验（fnOS 0.10.36，部署后 14 次 MCP 调用**零失败**）：`get_mydb_data` 由 0% 成功率
+  变为 8/8 成功（`elapsed_ms` 0~1ms、`竞价快照:20260911` 读回 33 条）；`get_board_open_effect_history`
+  由每次 **40s** 变为 **0.01~0.02s**（`cache_hit: true`、`load_path: mydb`、`precomputed_days: 5`、
+  `fallback_reason: null`）；三处版本号一致 0.10.36；看门狗首轮巡更（启动 +32s）自动撤回
+  两条 09-11 残留告警（`alerts.json` → `[]`）
+- 影响面：只动读路径与告警展示，**不动数据面**（研究库/仓库/行情文件无 schema 变更）；
+  部署后首轮快车道命中即证明生效（`precomputed_days > 0`、`cache_hit: true`）
+
 ## [0.10.35] — 2026-09-10（修复：打板采集取错字段 + 晚间重跑，致 37 条「竞价/开盘偏差」误报）
 
 > 用户报「通知中心很多报错」。实机核查：54 条告警里 37 条为 09-10 21:56 一次

@@ -53,6 +53,33 @@ class StockdbMcpServerTests(unittest.TestCase):
             ["2023", "2024", "2025", "2026"],
         )
 
+    # === 0.10.36 版本单源：SERVER_VERSION 恒等于 config.WEBUI_VERSION ===
+
+    def test_server_version_single_source(self):
+        """禁止再硬编码版本串：MCP 报出的版本必须等于 config.WEBUI_VERSION。
+
+        旧行为（NAS 0.10.35 实证）：SERVER_VERSION 硬编码 "0.10.7"，initialize 与
+        get_data_status 把 0.10.35 的实例报成 0.10.7 —— AI 客户端据此判断能力边界。
+        """
+        import config
+        self.assertEqual(server.SERVER_VERSION, config.WEBUI_VERSION)
+
+    def test_initialize_reports_configured_version(self):
+        """initialize 响应体（客户端握手唯一入口）携带单源版本。"""
+        import config
+        resp = server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                "params": {"protocolVersion": server.PROTOCOL_VERSION}})
+        info = resp["result"]["serverInfo"]
+        self.assertEqual(info["version"], config.WEBUI_VERSION)
+        self.assertEqual(info["name"], server.SERVER_NAME)
+
+    def test_get_data_status_reports_configured_version(self):
+        """get_data_status.server_version 同源（面板/诊断对比用）。"""
+        import config
+        with mock.patch.object(server, "_latest_trade_date", return_value="20260911"):
+            payload = server.get_data_status()
+        self.assertEqual(payload["server_version"], config.WEBUI_VERSION)
+
     @mock.patch.object(server, "_http_get")
     def test_daily_range_ignores_null_items(self, http_get):
         http_get.return_value = [

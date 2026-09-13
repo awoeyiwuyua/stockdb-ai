@@ -94,6 +94,62 @@ class SqliteStoreTest(unittest.TestCase):
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode, "wal")
 
+    def test_read_from_other_thread_after_cross_thread_connect(self):
+        """0.10.36 回归：连接建在 A 线程、B 线程读取必须可用（webui/MCP 多线程）。
+
+        旧行为（NAS 0.10.35 实机实证）：store 单例连接随首个触达线程创建，
+        `ThreadingHTTPServer` 每请求一线程 → 读一律 "SQLite objects created in a
+        thread can only be used in that same thread"，get_mydb_data 成功率 0%、
+        get_board_open_effect_history 预计算快车道失效（退化为全市场重算 40s）。
+        """
+        import threading
+        errors: list[str] = []
+        seen: dict = {}
+
+        def reader() -> None:  # 另一个线程：连接由 write 所在线程创建
+            try:
+                seen["metrics"] = self.store.read_metrics("20260814")
+                seen["snapshots"] = self.store.read_snapshots("20260814")
+                seen["series"] = self.store.read_series("premium_mean")
+            except Exception as exc:  # noqa: BLE001 - 旧行为在此抛 ProgrammingError
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        self.store.write_metrics("20260814", {"metrics": {"n_samples": 47}})
+        self.store.write_snapshots("20260814", {"600004": {"open_price": 11.0}})
+        self.store.write_series("premium_mean", {"values": [0.01]})
+
+        t = threading.Thread(target=reader)
+        t.start()
+        t.join(timeout=10)
+
+        self.assertEqual(errors, [], "跨线程读取研究库失败（check_same_thread 回归）")
+        self.assertEqual(seen["metrics"]["metrics"]["n_samples"], 47)
+        self.assertEqual(seen["snapshots"]["600004"]["open_price"], 11.0)
+        self.assertEqual(seen["series"]["values"], [0.01])
+
+    def test_concurrent_readers_share_singleton_connection(self):
+        """多线程并发读（模拟 MCP 并发请求）不报错、结果一致。"""
+        import threading
+        self.store.write_metrics("20260815", {"metrics": {"n_samples": 33}})
+        results: list = []
+        errors: list[str] = []
+
+        def reader() -> None:
+            try:
+                results.append(self.store.read_metrics("20260815"))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{type(exc).__name__}: {exc}")
+
+        threads = [threading.Thread(target=reader) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 8)
+        for item in results:
+            self.assertEqual(item["metrics"]["n_samples"], 33)
+
     def test_migrate_from_engine(self):
         """从引擎 mydb 三段键全量导入（幂等）。"""
         rd = _FakeRd()

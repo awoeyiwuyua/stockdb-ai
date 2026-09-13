@@ -1,7 +1,8 @@
 """ops.alerts — 告警中心（横切关注点，0.9.2 批次 2 从 app.py 搬迁）。
 
 内容：Alerts 类（JSON 持久化 DATA_DIR/alerts.json + 内存镜像）、模块级单例、
-notify_alert 生产接线点。行为与 app.py 搬迁前完全一致（0.8.x 测试基线）。
+notify_alert 生产接线点。行为与 app.py 搬迁前完全一致（0.8.x 测试基线）；
+0.10.36 新增 Alerts.resolve（条件恢复即撤警，自愈）。
 """
 from __future__ import annotations
 
@@ -36,6 +37,9 @@ class Alerts:
     add 返回既有条目（幂等），跨日允许再次出现。超出 MAX_ALERTS=200 时滚动
     保留最新。线程安全：读写均持锁；落盘用「临时文件 + os.replace」原子替换，
     避免并发/崩溃产生半截文件。
+
+    0.10.36 自愈：resolve(source, message_prefix) 撤回「条件已恢复」的告警——
+    告警是条件式投影，条件恢复后条目即作废（否则面板红点长期失真）。
     """
 
     def __init__(self, path: str):
@@ -134,6 +138,34 @@ class Alerts:
         """当前告警条数。"""
         with self._lock:
             return len(self._items)
+
+    def resolve(self, source: str, message_prefix: str) -> int:
+        """撤回已恢复条件下的告警（0.10.36 自愈）。
+
+        匹配 (source 精确相等, message 以 message_prefix 开头) 的条目并移除；
+        返回移除条数。设计要点：
+
+        - **前缀匹配**：滞后告警文案含天数（"行情数据已滞后 35 天（最新 D）"），
+          滞后天数变化会改文案 → 精确匹配会漏撤（NAS 实证：数据 17:50 追平后
+          16:23 的「滞后 35 天」仍挂在面板上，与 35 天前无关）。
+        - **移除而非置状态**：告警是条件式投影（看门狗每轮重新评估），条件恢复
+          即条目作废；保留已解决条目只会让红点长期失真。
+        - 条件是「当前快照」而非历史事件（探针失败/滞后），故撤回不产生新条目，
+          也不进当日去重逻辑；条件再次恶化时 add 会重新投递。
+        - 无匹配 → 返回 0、不落盘（看门狗 60s 一轮，避免无谓 IO）。
+        """
+        src = str(source).strip()
+        prefix = str(message_prefix)
+        if not src or not prefix:
+            raise ValueError("resolve 需要非空 source 与 message 前缀")
+        with self._lock:
+            kept = [e for e in self._items
+                    if not (e["source"] == src and e["message"].startswith(prefix))]
+            removed = len(self._items) - len(kept)
+            if removed:
+                self._items = kept
+                self._save()
+            return removed
 
     def clear(self) -> None:
         """清空全部告警并落盘（文件写 '[]'，保持文件存在）。"""

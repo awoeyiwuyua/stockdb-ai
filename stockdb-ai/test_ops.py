@@ -643,6 +643,48 @@ class AlertsTest(_OpsTestCase):
         self.assertEqual(len(a.list(-3)), 5)
         self.assertEqual(len(a.list("abc")), 5)
 
+    def test_resolve_removes_matching_and_keeps_others(self):
+        """0.10.36 自愈：resolve(source, 前缀) 移除匹配条目并落盘；不匹配的保留。"""
+        a = self._alerts()
+        a.add("warning", "数据", "行情数据已滞后 35 天（最新 20260807）")
+        a.add("warning", "数据", "行情数据不可用（探针失败）")
+        a.add("error", "同步", "同步失败")
+        a.add("warning", "打板", "竞价偏差")
+        removed = a.resolve("数据", "行情数据不可用")
+        self.assertEqual(removed, 1)
+        messages = [e["message"] for e in a.list()]
+        self.assertNotIn("行情数据不可用（探针失败）", messages)
+        self.assertIn("行情数据已滞后 35 天（最新 20260807）", messages)  # 源同前缀不同
+        self.assertIn("同步失败", messages)                              # 源不同
+        self.assertEqual(a.resolve("数据", "行情数据不可用"), 0)          # 幂等：已撤无匹配
+        # 落盘生效：新实例读回一致
+        a2 = app.Alerts.init(a.path)
+        self.assertEqual([e["message"] for e in a2.list()], messages)
+
+    def test_resolve_prefix_matches_lag_variants(self):
+        """滞后文案随天数变化 → 前缀匹配撤得掉（精确匹配会漏撤）。"""
+        a = self._alerts()
+        a.add("warning", "数据", "行情数据已滞后 2 天（最新 20260901）")
+        self.assertEqual(a.resolve("数据", "行情数据已滞后"), 1)
+        self.assertEqual(a.count(), 0)
+
+    def test_resolve_no_match_no_write(self):
+        """无匹配 → 返回 0、内容不变（看门狗 60s 一轮，避免无谓落盘）。"""
+        a = self._alerts()
+        a.add("info", "系统", "保留")
+        before = os.path.getmtime(a.path)
+        self.assertEqual(a.resolve("数据", "行情数据"), 0)
+        self.assertEqual(a.count(), 1)
+        self.assertEqual(os.path.getmtime(a.path), before)
+
+    def test_resolve_rejects_empty_args(self):
+        """空 source / 空前缀 → 中文 ValueError（防误撤全部告警）。"""
+        a = self._alerts()
+        with self.assertRaises(ValueError):
+            a.resolve("", "行情")
+        with self.assertRaises(ValueError):
+            a.resolve("数据", "")
+
     def test_notify_alert_lazy_singleton(self):
         """notify_alert 惰性单例：首次调用创建、绑定 DATA_DIR、复用同一实例。"""
         ops_alerts._alerts_singleton = None
@@ -751,6 +793,43 @@ class FreshnessAlertTest(_OpsTestCase):
             app.data_freshness_alert(datetime.date.today().isoformat(),
                                      True, alerts=fa)        # 滞后 0 → 不调用
             m_add.assert_not_called()
+
+    # ---- 0.10.36 自愈：条件恢复撤警 ----
+
+    def test_freshness_probe_recovery_resolves_alert(self):
+        """探针失败告警 → 探针恢复（数据新鲜）即撤回，不残留红点。"""
+        app.data_freshness_alert(None, True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 1)
+        app.data_freshness_alert(self._days_ago(0), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_lag_recovery_resolves_alert(self):
+        """滞后告警 → 数据追平（滞后 0 ≤ 阈值）即撤回（跨文案前缀匹配）。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        self.assertIn("已滞后 9 天", self.alerts.list()[0]["message"])
+        app.data_freshness_alert(self._days_ago(1), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_stale_period_keeps_alert(self):
+        """仍滞后（>阈值且交易日）→ 不撤警；滞后天数变化也不撤（前缀只用于撤回）。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        app.data_freshness_alert(self._days_ago(6), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 2)  # 文案不同 → 当日去重不合并
+
+    def test_freshness_non_trading_day_also_resolves(self):
+        """非交易日（滞后 5 天本不告警）同样执行撤警：周一看盘前旧警已清。"""
+        app.data_freshness_alert(self._days_ago(9), True, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 1)
+        app.data_freshness_alert(self._days_ago(5), False, alerts=self.alerts)
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_freshness_resolve_does_not_touch_other_sources(self):
+        """撤警只动「数据」源的两条前缀，其他源告警不受影响。"""
+        self.alerts.add("error", "同步", "同步失败")
+        self.alerts.add("warning", "数据", "行情数据不可用（探针失败）")
+        app.data_freshness_alert(self._days_ago(0), True, alerts=self.alerts)
+        left = [e["message"] for e in self.alerts.list()]
+        self.assertEqual(left, ["同步失败"])
 
 
 # =====================================================================
@@ -1743,6 +1822,37 @@ class StaleSelfHealTest(_OpsTestCase):
             self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
             self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
         self.assertEqual(self.alerts.count(), 1)  # 去重：仍只有一条
+
+    # ---- 0.10.36 自愈：条件恢复撤警 ----
+
+    def test_evening_alert_resolves_when_caught_up(self):
+        """晚间告警后数据追平 → 下一次评估撤回（同一晚 21:0x 追平场景）。"""
+        now = datetime.datetime(2026, 8, 28, 21, 5)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260827"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            self.assertTrue(app.evening_stale_alert(now, alerts=self.alerts))
+        self.assertEqual(self.alerts.count(), 1)
+        with mock.patch.object(app, "is_trading_day", return_value=True), \
+             mock.patch.object(app, "data_latest_date", return_value="20260828"), \
+             mock.patch.object(app, "_expected_latest_date", return_value="20260828"):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 28, 21, 20), alerts=self.alerts))
+        self.assertEqual(self.alerts.count(), 0)
+
+    def test_evening_alert_resolves_before_window_and_non_trading_day(self):
+        """21:00 前 / 非交易日评估也撤旧警（周一开盘前残留的晚间兜底告警被清）。"""
+        self.alerts.add("warning", "数据", "晚间兜底：20260828 数据截至 21:00 仍未到位（最新 20260827）")
+        self.alerts.add("error", "同步", "同步失败")
+        with mock.patch.object(app, "is_trading_day", return_value=True):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 28, 16, 0), alerts=self.alerts))
+        self.assertEqual([e["message"] for e in self.alerts.list()], ["同步失败"])
+        self.alerts.add("warning", "数据", "晚间兜底：20260828 数据截至 21:00 仍未到位（最新 20260827）")
+        with mock.patch.object(app, "is_trading_day", return_value=False):
+            self.assertFalse(app.evening_stale_alert(
+                datetime.datetime(2026, 8, 29, 21, 5), alerts=self.alerts))
+        self.assertEqual([e["message"] for e in self.alerts.list()], ["同步失败"])
 
 
 class CatchupSedimentTest(unittest.TestCase):

@@ -1829,6 +1829,10 @@ def data_freshness_alert(latest_date, is_trading_day, *,
           非交易日滞后不告警（休市日数据不更新属正常）；滞后为负（时钟超前）
           不告警。
 
+    0.10.36 自愈：探针恢复 / 滞后回落到阈值内时**撤回**本函数投递过的两类告警
+    （前缀匹配：「行情数据不可用」「行情数据已滞后」）。此前只投不撤，数据追平
+    后旧告警仍挂面板（NAS 实证：09-11 17:50 追平，16:23 的「滞后 35 天」还在）。
+
     参数：
       latest_date:    最新交易日 'YYYYMMDD' / 'YYYY-MM-DD'；None 视为探针失败
       is_trading_day: 今天是否为交易日（由调用方按日历判定后传入）
@@ -1846,6 +1850,10 @@ def data_freshness_alert(latest_date, is_trading_day, *,
     lag = (date.today() - d).days
     if is_trading_day and lag > threshold:
         target.add("warning", "数据", f"行情数据已滞后 {lag} 天（最新 {latest_date}）")
+    else:
+        # 探针可用且滞后在阈值内（含非交易日、时钟超前）→ 条件已恢复，撤旧警
+        target.resolve("数据", "行情数据不可用")
+        target.resolve("数据", "行情数据已滞后")
 
 
 def evening_stale_alert(now_dt: datetime | None = None, *, alerts=None) -> bool:
@@ -1855,12 +1863,17 @@ def evening_stale_alert(now_dt: datetime | None = None, *, alerts=None) -> bool:
     旧阈值不报；此告警把「当天没到位」在当晚推给人（滞后重试同窗兜底，
     滞后重试全失败/未启用时这里是最后防线）。消息含最新日期，追平前
     每轮评估都是同一条消息 → 告警中心当日去重，不刷屏。
+    0.10.36 自愈：数据已追平（或未到 21:00 / 非交易日）→ 撤回「晚间兜底：」告警。
     返回是否投递（测试用）。
     """
     now = now_dt or datetime.now()
     if now.strftime("%H:%M") < EVENING_STALE_ALERT_AFTER:
+        target = alerts if alerts is not None else _get_alerts()
+        target.resolve("数据", "晚间兜底：")
         return False
     if not is_trading_day():
+        target = alerts if alerts is not None else _get_alerts()
+        target.resolve("数据", "晚间兜底：")
         return False
     expected = _expected_latest_date(now)
     latest = data_latest_date()
@@ -1869,6 +1882,9 @@ def evening_stale_alert(now_dt: datetime | None = None, *, alerts=None) -> bool:
         target.add("warning", "数据",
                    f"晚间兜底：{expected} 数据截至 {EVENING_STALE_ALERT_AFTER} 仍未到位（最新 {latest}）")
         return True
+    # 数据已追平（或无期望日期）→ 条件恢复，撤旧警
+    target = alerts if alerts is not None else _get_alerts()
+    target.resolve("数据", "晚间兜底：")
     return False
 
 
