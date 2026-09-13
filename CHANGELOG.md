@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## [0.10.39] — 2026-09-13（修复：回填必须写 daily 子载荷 + diag 网络降级不打红）
+
+> 0.10.38 收口时的整体复验抓到的两个缺陷（其中一个把 0.10.36 修好的快车道又打回 40s）。
+
+- **回填覆盖 daily → 打板快车道整段失效**：`auction_run_backfill` 只写 `metrics`，而 live
+  收口会写 `daily`（MCP `_precomputed_row` 依赖它）→ 今天跑 60 天回填后 **0/60 天有 daily**，
+  `get_board_open_effect_history` 从 **0.02s 退化为 39s 全市场重算**
+  （`cache_hit=False` / `precomputed_days=0`）。修法：回填第二遍按 live 同构写 `daily`
+  （matched/正平负/成功率/均值/分位/分布 + coverage；内部记账键 `_candidates` 不入 payload），
+  并重跑 60 天回填恢复（**60/60 有 daily**，快车道回到 **0.03s**）。
+  回归用例：`test_backfill_writes_daily_payload`、`test_backfill_daily_metrics_do_not_leak_internal_keys`。
+- **`/api/diag` 把「网络受限」判成系统故障**：`upstream_github` 探针失败（GitHub 从 NAS
+  间歇超时）原写 `ok=False` → `all_ok=false` 整体打红，属假警报。改为 `ok=True` +
+  `degraded=True` + note「网络受限：本次探测未完成（不影响本机数据与同步）」。上游真发新版
+  或探测恢复时，仍由看门狗告警/撤警负责（实测：探针失败告警出现后，下一拍探针成功即自动撤销至 0 条）。
+  用例：`test_diag_upstream_degraded`（改判据）、`test_diag_upstream_ok_when_reachable`（新增）。
+- **部署工具链第二次踩坑**：清单式部署漏了 `services/` 目录，导致本批的回填修复**根本没上
+  NAS**（白跑一轮回填才发现）。部署清单已改为**后端整棵树按目录同步**
+  （interfaces/services/core/storage/ops），杜绝「新增目录忘加清单」。
+- 测试：Python 全量 **481 全绿**。**实机最终整体复验 13/13 全绿**（0.10.39）：版本三处一致、
+  `diag all_ok=true`、数据未动（20260911）、MCP 研究库可读、快车道 0.04s、engine 版本可读、
+  无残留上游告警、09-07 分类正确且 `needs_action=false`、资产卡真身字段、补录/静音端点在线、
+  前端 8 个新关键词全在镜像产物内、timeline 逐条带 reason/class。
+
 ## [0.10.38] — 2026-09-13（驾驶舱改版：后端契约 / 横幅与折叠 / 三栏资产卡 / 补录与静音）
 
 > 用户给出驾驶舱改版设计稿并认可「先补后端契约」的落地顺序。改版起因是数据真身暴露的
