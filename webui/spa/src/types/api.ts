@@ -111,7 +111,14 @@ export interface VersionPayload {
 export interface OverviewPayload {
   generated_at?: string
   health?: HealthStatus | null
-  alerts?: { count: number; recent: AlertItem[] } | null
+  alerts?: {
+    count: number
+    recent: AlertItem[]
+    // 0.10.38 静音状态：只影响提醒强度，count 恒定（事实不隐藏）
+    muted?: boolean
+    mute_until?: number | null
+    mute_preset?: string | null
+  } | null
   mcp?: Record<string, unknown> | null
   version?: VersionPayload | null
 }

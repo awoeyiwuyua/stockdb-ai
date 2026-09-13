@@ -18,6 +18,14 @@ export const getContainerLogs = (tail = 150) => getJson(`/api/container/logs?tai
 export const restartContainer = () => postJson('/api/container/restart', {}) // 重启 stockdb（危险，需二次确认）
 // 启动同步：hot=true 热更新（默认）；hot=false 停服严格模式
 export const runSync = (hot = true) => postJson('/api/sync', { hot })
+// 0.10.38「立即补录」三选项（语义不同，UI 必须区分并给后果说明）：
+//   ① 重跑同步（=runSync，空转无害）② 仓库补沉淀（按水印缺口补日K分区）③ 打板指标回填
+export const runWarehouse = (days = 3, backfill = false) =>
+  postJson<{ ok: boolean; async?: boolean; reason?: string }>(
+    '/api/warehouse/run', { days, backfill })
+export const runAuctionBackfill = (days = 60) =>
+  postJson<{ ok: boolean; async?: boolean; reason?: string }>(
+    '/api/auction/run', { task: 'backfill', days })
 // 港股日K 落盘：codes 代码数组；years 年数。返回 { 代码: {ok, bars, latest} | {ok:false, error} }
 export interface HkSyncResultRow { ok: boolean; bars?: number; latest?: string; error?: string }
 export const hkSync = (codes: string[], years = 2) =>

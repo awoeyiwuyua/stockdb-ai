@@ -2,7 +2,8 @@
 
 内容：Alerts 类（JSON 持久化 DATA_DIR/alerts.json + 内存镜像）、模块级单例、
 notify_alert 生产接线点。行为与 app.py 搬迁前完全一致（0.8.x 测试基线）；
-0.10.36 新增 Alerts.resolve（条件恢复即撤警，自愈）。
+0.10.36 新增 Alerts.resolve（条件恢复即撤警，自愈）；
+0.10.38 新增静音状态（pending_alert_count 计数不随静音变化——静音只影响"提醒"）。
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import json
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 
 import config  # 模块引用（config.DATA_DIR 动态读取，测试 patch config 生效）
@@ -195,3 +197,128 @@ def notify_alert(level: str, source: str, message: str) -> dict:
     均由 Alerts.add 承担；不含 apikey 等敏感信息。
     """
     return _get_alerts().add(level, source, message)
+
+
+# ==================== 告警静音状态（0.10.38） ====================
+# 语义（用户拍板前的默认口径，已在 CHANGELOG 记明）：
+#   静音只影响"提醒"（顶栏红点/横幅的强提示），**不影响事实**——timeline 与横幅
+#   照常反映真实状态，pending 计数用的是静音前的条数；到期自动解除。
+# 存储：DATA_DIR/alert_mute.json（与 alerts.json 同卷，重建容器不丢）。
+MUTE_FILE = "alert_mute.json"
+_MUTE_PRESETS = {"1h": 3600, "4h": 14400, "today": None}   # today = 到当日 23:59:59
+_mute_cache: dict = {"at": 0.0, "sig": None, "val": None}
+_MUTE_TTL = 20.0
+
+
+def _mute_path() -> str:
+    return str(config.DATA_DIR / MUTE_FILE)
+
+
+def _mute_until_ts(kind: str, now: datetime | None = None) -> float | None:
+    """静音时长预设 → 解除时间戳（epoch 秒）；未知预设 → None。"""
+    now_dt = now or datetime.now()
+    if kind == "today":
+        end = now_dt.replace(hour=23, minute=59, second=59, microsecond=0)
+        return end.timestamp()
+    secs = _MUTE_PRESETS.get(kind)
+    if secs is None:
+        return None
+    return now_dt.timestamp() + secs
+
+
+def alert_mute_state(*, now: datetime | None = None) -> dict:
+    """当前静音状态（自动过期）：{muted, until, remaining_sec, reason, preset}。
+
+    文件缺失/损坏/已过期一律视为未静音（并顺手删除过期文件，避免状态陈旧）。
+    20s 缓存（驱动 5s 轮询的 snapshot，避免每拍读盘）；文件 mtime/size 变化即失效。
+    """
+    global _mute_cache
+    path = _mute_path()
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime, st.st_size)
+    except OSError:
+        sig = None
+    now_ts = (now or datetime.now()).timestamp()
+    if _mute_cache["val"] is not None and _mute_cache["sig"] == sig \
+            and time.time() - _mute_cache["at"] < _MUTE_TTL:
+        val = dict(_mute_cache["val"])
+    else:
+        val = {"until": None, "reason": None, "preset": None}
+        if sig is not None:
+            try:
+                raw = json.loads(open(path, encoding="utf-8").read())
+                if isinstance(raw, dict) and isinstance(raw.get("until"), (int, float)):
+                    val = {"until": float(raw["until"]),
+                           "reason": str(raw.get("reason") or "") or None,
+                           "preset": str(raw.get("preset") or "") or None}
+            except (OSError, ValueError):
+                val = {"until": None, "reason": None, "preset": None}
+        _mute_cache = {"at": time.time(), "sig": sig, "val": val}
+    until = val.get("until")
+    if until is None or until <= now_ts:
+        if until is not None:      # 过期：清掉文件（下次调用不再命中陈旧状态）
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            _mute_cache = {"at": 0.0, "sig": None, "val": None}
+        return {"muted": False, "until": None, "remaining_sec": 0,
+                "reason": None, "preset": None}
+    return {"muted": True, "until": until, "remaining_sec": int(until - now_ts),
+            "reason": val.get("reason"), "preset": val.get("preset")}
+
+
+def set_alert_mute(preset: str, *, reason: str | None = None,
+                   minutes: float | None = None,
+                   now: datetime | None = None) -> dict:
+    """设置静音：preset ∈ {1h, 4h, today} 或 minutes（自定义，上限 1440）。
+
+    返回新的静音状态；非法参数抛中文 ValueError（handler 转 400）。
+    """
+    global _mute_cache
+    if minutes is not None:
+        try:
+            mins = float(minutes)
+        except (TypeError, ValueError):
+            raise ValueError(f"minutes 非法：{minutes!r}")
+        if not 1 <= mins <= 1440:
+            raise ValueError("minutes 必须在 1~1440 之间")
+        until = (now or datetime.now()).timestamp() + mins * 60
+        preset_used = f"{int(mins)}m"
+    else:
+        until = _mute_until_ts(str(preset), now)
+        if until is None:
+            raise ValueError(f"未知静音预设 {preset!r}；合法值：1h / 4h / today / minutes")
+        preset_used = str(preset)
+    payload = {"until": until, "reason": (reason or "").strip() or None,
+               "preset": preset_used, "set_at": _now_iso()}
+    path = _mute_path()
+    try:
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as exc:
+        _warn(f"静音状态落盘失败：{path}（{exc}）")
+    _mute_cache = {"at": 0.0, "sig": None, "val": None}   # 立即失效缓存
+    return alert_mute_state(now=now)
+
+
+def clear_alert_mute() -> dict:
+    """解除静音（幂等）。"""
+    global _mute_cache
+    try:
+        os.remove(_mute_path())
+    except OSError:
+        pass
+    _mute_cache = {"at": 0.0, "sig": None, "val": None}
+    return {"muted": False, "until": None, "remaining_sec": 0, "reason": None, "preset": None}
+
+
+def pending_alert_count(*, limit: int = 200) -> int:
+    """待提醒告警条数（**不受静音影响**——静音只改提醒强度，不改事实）。"""
+    return _get_alerts().count()

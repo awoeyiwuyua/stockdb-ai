@@ -48,21 +48,15 @@
     </EmptyState>
 
     <template v-else>
-      <!-- ⓪ 告警横幅（0.10.38 置顶）：只在"有需处理项"时出现，带一键重试/看日志 -->
+      <!-- ⓪ 告警横幅（0.10.38 置顶）：需处理项或等待态出现；补录/重试/静音三动作 -->
       <AlertBanner
         :items="banner"
+        :awaiting="awaiting"
+        :silenced="store.alertMuted"
+        :mute-until="store.alertMuteUntil"
         @open-logs="openDrawer('logs')"
         @retried="onRefresh"
-      />
-
-      <!-- 等待态提示（今日尚未到同步点；不占告警位） -->
-      <el-alert
-        v-if="awaiting"
-        type="info"
-        :closable="false"
-        show-icon
-        :title="awaiting.action_hint || '等待今日定时同步'"
-        class="top-alert"
+        @mute-changed="onRefresh"
       />
 
       <!-- ① 四灯状态带（灯点击的抽屉联动批 3 接线；同步灯暂跳数据同步页） -->

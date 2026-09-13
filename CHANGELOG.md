@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## [0.10.38] — 2026-09-13（驾驶舱改版：后端契约 / 横幅与折叠 / 三栏资产卡 / 补录与静音）
+
+> 用户给出驾驶舱改版设计稿并认可「先补后端契约」的落地顺序。改版起因是数据真身暴露的
+> 两类问题：**叙事误报**（09-07 被部署重启打断的手动重试被当成「需处理」）与**编造字段**
+> （设计稿里 mydb 卡的「11 张基础数据表 / 连接池 2-10 / 无坏块」在 NAS 上没有任何数据支撑，
+> 真身是 80 KB 的 LevelDB 私有库）。
+
+**一、后端契约（前端才有东西可渲染）**
+- `app.sync_failure_class()`：同步记录分类纯函数（ok / self_healed / awaiting_mirror /
+  run_interrupted / verify_failed / data_source_error / not_effective / unknown +
+  needs_action + 中文 detail），上下文参数区分易误报场景：`has_later_success`
+  （该条之后有成功 → 已自愈）、`day_has_success`（当日另有成功）、`is_last_of_day`。
+- `app._reason_nature()`：reason 三分类（interrupt 打断 / fatal 真错误如认证失败 / wait 等上游）。
+  判定顺序按 NAS 真身校正过两轮（见下「实机抓到的 bug」）。
+- `load_timeline`：透出 `reason`/`warn`（此前只存在 sync_history.json 里、没透出）+
+  逐条 class/label/needs_action/detail + 日级 `needs_action`/`needs_action_count`/`action_hint`
+  + `awaiting`（今日未到同步点 → 不报「数据未更新」假警报）。
+- `app.assets_payload()`（60s TTL）：`research_db_stats`（研究库四表真实行数/体积/回滚模式）
+  + `backup_stats`（仓库与研究库**两套**备份分别计数）+ `disk_usage_detail`（行情/数仓/
+  研究库/mydb 分层体量，独立 300s TTL）。**剔除无数据支撑的字段**（无坏块/连接池/11 张表
+  全部删掉，取不到即 null → 前端显示「未监控」）。
+- `snapshot_payload` 新增 `assets` 块；`/api/diag` env 增 `engine_version`。
+
+**二、前端（横幅置顶 / 胶囊折叠 / 三栏资产卡）**
+- `domain/timeline.ts` + `timeline.test.ts`（14 例）：折叠/外推/横幅判定的纯函数与离线护栏。
+- `AlertBanner.vue`（新）：只收 needs_action 的日子；空则整体不渲染（删掉「全部正常」占位）。
+- `TimelineCard.vue`：失败**外推**成红色胶囊（带中文分类标签与悬停详情）、成功折成
+  `+N 次成功 · 末次 HH:MM`；展开态显示 reason/warn/分类；删除每行「告警 0」占位。
+- `AssetsCard.vue`：改**三栏**（行情底座 / 分析数仓 / 私有存储），全部真实字段，
+  缺字段显示「未监控」；对账状态取 `last_result.reconcile` 真值。
+- `vite.config.js`：vitest include 补 `.test.ts` —— 此前只匹配 `.test.js`，
+  `src/domain/lights.test.ts` 自 TS 化以来**一直被静默跳过**（11 例从未在 CI 跑过）。
+
+**三、两个新动作（语义定稿）**
+- **立即补录 = 下拉三选项**（语义不同，各自带后果确认）：① 重跑行情同步（空转无害）；
+  ② 仓库补沉淀（按水印缺口补日K，不重写已有分区）；③ 打板指标回填 60 天
+  （**会用 K 线口径覆盖同期已采集值**——文案里明说，用户可见代价）。
+- **告警静音**：`ops.alerts.set_alert_mute/clear_alert_mute/alert_mute_state` +
+  `GET/POST /api/alerts/mute`（预设 1h / 4h / today，或 minutes 1~1440）。
+  语义 = **只影响提醒强度，不改事实**：`count` 恒定、timeline 与横幅照常反映真实状态、
+  到期自动解除（过期即清文件）；`/api/alerts/summary` 与 `overview.alerts` 同时给
+  count 与 muted/mute_until，前端横幅显示「已静音至 HH:MM」与语义提示。
+
+**四、实机抓到的 bug（都已修 + 锁进单测）**
+1. 分类器被 warn 吞掉 reason 性质：09-07 那 10 条**每条**都带 warn「下载 0 文件且数据未更新」，
+   其中 3 条 reason 是「认证失败」（当时真故障）、1 条是「数据完整性验证未通过」（部署打断）——
+   先判 warn 会把真相全盖成「等上游」。改为 reason 性质与 verified 优先。
+2. 打断判定要求「非当日最后一条」：09-07 21:58 恰是最后一条（22:00 部署重启打断）→
+   永远走不到该分支；改为「当日有成功运行」即成立。
+3. `lights.test.ts` 时区依赖：用例用带空格的本地时间戳做绝对时区假设，容器 `TZ=UTC`
+   下偏移 8 小时判反（Docker 构建必挂）→ 改时区无关构造 + 新增 `parseLocalTs()`。
+4. 部署清单漏 `stockdb-ai/interfaces/web/routes.py`（文件清单式部署的典型坑）：
+   静音端点在镜像里根本不存在（复验 404 抓到）→ 部署清单改为**按目录同步**。
+5. 版本号漏 bump（镜像 0.10.38 而 `WEBUI_VERSION` 还是 0.10.37）→ 补齐。
+
+**五、实机复验（NAS，两批共 19 项全绿）**
+- 契约批 10/10：assets 真身（研究库 metrics=60/series=2/lists=12/snapshots=892/1.0 MB、
+  双备份 12+14 份、磁盘分层 23.9G+89.6M+1.0M+0.1M）；09-07 逐条分类
+  `self_healed×3 / awaiting_mirror×6 / run_interrupted×1`、`needs_action=False`（不再误报）；
+  09-11 首条 `self_healed` + reason 透出；SPA 新产物在镜像内；`diag all_ok=true`、`0.10.38`。
+- 动作批 9/9：静音闭环（设 1h → overview/summary 同步反映 → 解除 → 非法预设 400）；
+  补录三入口与覆盖说明在产物内；仓库/打板端点可达。
+
+**测试**：Python 全量 **478 全绿**（+11 静音用例）；前端 Vitest **94 全绿**（含首次纳入的
+lights 12 例与新增 timeline 14 例）；`vue-tsc` 0 错；`vite build` 通过。
+
 本项目面板版本号 = `WEBUI_VERSION`（`stockdb-ai/config.py`，0.9.1 起收敛至 config），
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；
 部署记录见 `docs/deployments.md`；本机目录关系与运行配方见 `docs/development-guide.md`。

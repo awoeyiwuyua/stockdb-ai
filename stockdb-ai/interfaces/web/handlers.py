@@ -27,6 +27,11 @@ import app  # noqa: E402 - 模块引用（而非 from-import）：DATA_DIR/fetch
 import config  # noqa: E402 - WEBUI_TOKEN 动态读（测试 patch config.WEBUI_TOKEN 生效）
 from interfaces.web.auth import TOKEN_HEADER, authorized  # noqa: E402 - token 门禁
 
+from ops.alerts import (  # noqa: E402 - 0.10.38 静音状态（handler 直接调用，不经 app）
+    alert_mute_state,
+    clear_alert_mute,
+    set_alert_mute,
+)
 from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），此时 app 已完整
     STATIC_DIR,
     WEBUI_UI,
@@ -650,9 +655,51 @@ class Handler(BaseHTTPRequestHandler):
                                    ensure_ascii=False))
 
     def _alerts_summary(self):
-        """GET /api/alerts/summary：告警条数（顶栏红点徽标数据源）。"""
-        self._send(200, json.dumps({"count": _get_alerts().count()},
-                                   ensure_ascii=False))
+        """GET /api/alerts/summary：告警条数与静音状态（顶栏红点/横幅的数据源）。
+
+        0.10.38：count **不受静音影响**（静音只改提醒强度，不改事实）；
+        muted/until 供顶栏与横幅显示"已静音至 HH:MM"。
+        """
+        state = alert_mute_state()
+        self._send(200, json.dumps(
+            {"count": _get_alerts().count(),
+             "muted": state["muted"], "until": state["until"],
+             "remaining_sec": state["remaining_sec"]},
+            ensure_ascii=False))
+
+    def _alerts_mute(self):
+        """GET/POST /api/alerts/mute：静音状态查询（GET）/ 设置与解除（POST）。
+
+        POST 体：{"preset": "1h"|"4h"|"today", "reason": "可选"} 或
+                {"minutes": 30, "reason": "可选"}；{"clear": true} 解除静音。
+        """
+        if self.command == "GET":
+            self._send(200, json.dumps(alert_mute_state(), ensure_ascii=False))
+            return
+        body = self._read_json()
+        try:
+            if body.get("clear") is True or str(body.get("action") or "") == "clear":
+                state = clear_alert_mute()
+                self._send(200, json.dumps(
+                    {"msg": "已解除静音", **state}, ensure_ascii=False))
+                return
+            minutes = body.get("minutes")
+            preset = str(body.get("preset") or "").strip()
+            if minutes is None and not preset:
+                self._send(400, json.dumps(
+                    {"error": "需提供 preset（1h/4h/today）或 minutes（1~1440）"},
+                    ensure_ascii=False))
+                return
+            state = set_alert_mute(preset, reason=body.get("reason"),
+                                   minutes=minutes)
+            until_txt = datetime.fromtimestamp(state["until"]).strftime("%m-%d %H:%M")
+            self._send(200, json.dumps(
+                {"msg": f"已静音至 {until_txt}", **state}, ensure_ascii=False))
+        except ValueError as exc:
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, json.dumps({"error": f"静音操作失败: {exc}"},
+                                       ensure_ascii=False))
 
     def _alerts_clear(self):
         """POST /api/alerts/clear：清空全部告警（写入 '[]' 保持文件存在）。"""
@@ -811,12 +858,18 @@ def overview_payload() -> dict:
             return default
 
     alerts = _safe(_get_alerts, None)
+    mute = _safe(alert_mute_state, {"muted": False, "until": None, "remaining_sec": 0})
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "health": _safe(health_status, None),
         "alerts": {
             "count": alerts.count() if alerts is not None else 0,
             "recent": alerts.list(8) if alerts is not None else [],
+            # 0.10.38：静音状态随 overview 下发（横幅/顶栏据此显示"已静音至 HH:MM"）；
+            # count 不受静音影响——静音只改提醒强度，不改事实
+            "muted": bool(mute.get("muted")),
+            "mute_until": mute.get("until"),
+            "mute_preset": mute.get("preset"),
         },
         "mcp": _safe(mcp_stats, None),
         "version": _safe(version_payload, None),

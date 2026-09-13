@@ -23,6 +23,9 @@ export const useGlobalStore = defineStore('global', {
     health: (s): HealthStatus | null => s.snapshot?.overview?.health ?? null,
     alertCount: (s): number => s.snapshot?.overview?.alerts?.count ?? 0,
     alertsRecent: (s): AlertItem[] => s.snapshot?.overview?.alerts?.recent ?? [],
+    // 0.10.38 静音（只降提醒强度；事实与计数照常）
+    alertMuted: (s): boolean => Boolean(s.snapshot?.overview?.alerts?.muted),
+    alertMuteUntil: (s): number | null => s.snapshot?.overview?.alerts?.mute_until ?? null,
     mcp: (s): Record<string, unknown> | null => s.snapshot?.overview?.mcp ?? null,
     version: (s): VersionPayload | null => s.snapshot?.overview?.version ?? null,
     // 数据滞后天数（health.lag_days，未知视为 null）

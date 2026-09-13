@@ -1248,6 +1248,112 @@ class SyncFailureClassTest(unittest.TestCase):
         self.assertEqual(self._cls(None)["class"], "unknown")
 
 
+class AlertMuteTest(_OpsTestCase):
+    """0.10.38 告警静音：只改提醒强度，不改事实（count 恒定、到期自动解除）。"""
+
+    def setUp(self):
+        super().setUp()
+        # 静音文件路径走 config.DATA_DIR（已 patch 到临时目录），但缓存要逐用例复位
+        ops_alerts._mute_cache = {"at": 0.0, "sig": None, "val": None}
+
+    def _mute_file(self):
+        return Path(self.tmp) / ops_alerts.MUTE_FILE
+
+    def test_default_not_muted(self):
+        st = ops_alerts.alert_mute_state()
+        self.assertFalse(st["muted"])
+        self.assertIsNone(st["until"])
+
+    def test_set_preset_mutes_with_expiry(self):
+        st = ops_alerts.set_alert_mute("1h", reason="例行维护")
+        self.assertTrue(st["muted"])
+        self.assertEqual(st["preset"], "1h")
+        self.assertEqual(st["reason"], "例行维护")
+        self.assertAlmostEqual(st["remaining_sec"], 3600, delta=5)
+        self.assertTrue(self._mute_file().exists())
+        self.assertTrue(ops_alerts.alert_mute_state()["muted"])   # 读回一致
+
+    def test_today_preset_expires_at_end_of_day(self):
+        now = datetime.datetime(2026, 9, 13, 10, 0, 0)
+        st = ops_alerts.set_alert_mute("today", now=now)
+        expect = now.replace(hour=23, minute=59, second=59).timestamp()
+        self.assertAlmostEqual(st["until"], expect, delta=1)
+        self.assertAlmostEqual(st["remaining_sec"], 13 * 3600 + 59 * 60 + 59, delta=2)
+
+    def test_custom_minutes_and_validation(self):
+        st = ops_alerts.set_alert_mute("", minutes=30)
+        self.assertTrue(st["muted"])
+        self.assertEqual(st["preset"], "30m")
+        for bad in (0, 1441, -5):
+            with self.assertRaises(ValueError):
+                ops_alerts.set_alert_mute("", minutes=bad)
+        with self.assertRaises(ValueError):
+            ops_alerts.set_alert_mute("bogus")
+        self.assertFalse(ops_alerts.set_alert_mute("1h").get("error", False))
+
+    def test_expired_state_auto_clears(self):
+        """到期 → 状态转 False 且清掉文件（避免陈旧状态一直挂着）。"""
+        future = datetime.datetime.now() + datetime.timedelta(hours=3)
+        ops_alerts.set_alert_mute("1h")
+        self.assertTrue(self._mute_file().exists())
+        st = ops_alerts.alert_mute_state(now=future)
+        self.assertFalse(st["muted"])
+        self.assertFalse(self._mute_file().exists())
+
+    def test_clear_is_idempotent(self):
+        ops_alerts.set_alert_mute("4h")
+        self.assertTrue(ops_alerts.clear_alert_mute()["muted"] is False)
+        self.assertFalse(ops_alerts.clear_alert_mute()["muted"])   # 再清不抛
+
+    def test_corrupt_file_degrades_to_not_muted(self):
+        self._mute_file().parent.mkdir(parents=True, exist_ok=True)
+        self._mute_file().write_text("{ not json", encoding="utf-8")
+        ops_alerts._mute_cache = {"at": 0.0, "sig": None, "val": None}
+        self.assertFalse(ops_alerts.alert_mute_state()["muted"])
+
+    def test_count_unaffected_by_mute(self):
+        """核心语义：静音不改事实——计数照常（横幅/统计不被静音骗）。"""
+        app._get_alerts().add("warning", "数据", "行情数据已滞后 3 天")
+        before = app._get_alerts().count()
+        ops_alerts.set_alert_mute("1h")
+        self.assertEqual(ops_alerts.pending_alert_count(), before)
+        self.assertEqual(app._get_alerts().count(), before)
+
+    def test_overview_payload_carries_mute_state(self):
+        """overview.alerts 带 muted/mute_until（前端横幅据此显示静音态）。"""
+        ops_alerts.set_alert_mute("1h")
+        payload = web_handlers.overview_payload()
+        self.assertTrue(payload["alerts"]["muted"])
+        self.assertIsInstance(payload["alerts"]["mute_until"], float)
+        self.assertEqual(payload["alerts"]["mute_preset"], "1h")
+
+    def test_summary_endpoint_reports_count_and_mute(self):
+        """GET /api/alerts/summary：count 与静音态同时给出。"""
+        app._get_alerts().add("warning", "数据", "测试告警")
+        ops_alerts.set_alert_mute("4h")
+        status, _, body = _do_get("/api/alerts/summary")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode())
+        self.assertEqual(payload["count"], 1)
+        self.assertTrue(payload["muted"])
+
+    def test_mute_endpoint_post_and_clear(self):
+        """POST /api/alerts/mute：设置 → 查询 → 解除；非法参数 400。"""
+        status, _, body = _do_post("/api/alerts/mute", {"preset": "1h"})
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body.decode())["muted"])
+        status, _, body = _do_get("/api/alerts/mute")
+        self.assertTrue(json.loads(body.decode())["muted"])
+        status, _, body = _do_post("/api/alerts/mute", {"clear": True})
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(body.decode())["muted"])
+        status, _, body = _do_post("/api/alerts/mute", {"preset": "bogus"})
+        self.assertEqual(status, 400)
+        self.assertIn("未知静音预设", json.loads(body.decode())["error"])
+        status, _, body = _do_post("/api/alerts/mute", {})
+        self.assertEqual(status, 400)
+
+
 class TimelineExtrasTest(_OpsTestCase):
     """load_timeline 0.10.38 扩展：reason/warn 透出 + 分类 + 日级 needs_action/awaiting。"""
 
@@ -1635,6 +1741,40 @@ def _do_get(path: str):
     handler.path = path
     handler.do_GET()
     raw = conn.wfile.getvalue()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    headers = {}
+    for line in head.split(b"\r\n")[1:]:
+        k, _, v = line.partition(b": ")
+        headers[k.decode().lower()] = v.decode()
+    return status, headers, body
+
+
+def _do_post(path: str, payload: dict, method: str | None = None):
+    """直连 POST 处理器（0.10.38：静音端点用例需要），返回 (status, headers, body)。
+
+    不调 do_POST（那会走完整 HTTP 解析：构造期 handle() 已消费 rfile/wfile，
+    实测踩到 'I/O operation on closed file'），改为直接调路由方法——与 routes.py
+    的映射同源，断言的是"路由 + 载荷"契约本身。
+    """
+    from interfaces.web.routes import POST_ROUTES
+    raw_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    conn = _FakeConn()
+    handler = _WebHandler.__new__(_WebHandler)     # 跳过 __init__ 的协议初始化
+    handler.command = method or "POST"
+    handler.requestline = f"{handler.command} {path} HTTP/1.1"   # _send 内置日志要用
+    handler.request_version = "HTTP/1.1"
+    handler.client_address = ("127.0.0.1", 1)
+    handler.headers = {"Content-Length": str(len(raw_body)),
+                       "Content-Type": "application/json"}
+    handler.path = path
+    handler.rfile = io.BytesIO(raw_body)
+    handler.wfile = io.BytesIO()
+    name = POST_ROUTES.get(path)
+    if name is None:
+        return 404, {}, b'{"error": "not found"}'
+    getattr(handler, name)()
+    raw = handler.wfile.getvalue()
     head, _, body = raw.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
     headers = {}
