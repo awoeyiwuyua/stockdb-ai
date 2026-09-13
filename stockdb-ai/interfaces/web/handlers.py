@@ -750,6 +750,16 @@ class Handler(BaseHTTPRequestHandler):
         up_note = ("网络受限：本次探测未完成（不影响本机数据与同步），"
                    "无法判断是否有新版" if up_degraded
                    else f"最新 release：{upstream['tag_name']}｜{up_status.get('message', '')}")
+        # 0.10.40：资产指纹随诊断透出（同名 tag 重传是独立信号，不该埋在版本比较里）
+        up_assets = (up_status.get("asset_watch") or {}) if isinstance(up_status, dict) else {}
+        up_asset_note = {
+            "baseline": "资产指纹已建基线",
+            "same": "资产指纹未变",
+            "changed": "⚠️ 同名资产已变更（需重新 pin SHA256 重建镜像）",
+            "none": "资产指纹不可用",
+        }.get(up_assets.get("status"))
+        if up_asset_note and not up_degraded:
+            up_note = f"{up_note}｜{up_asset_note}"
 
         cs = None
         try:
@@ -769,7 +779,8 @@ class Handler(BaseHTTPRequestHandler):
 
         checks = [
             {"name": "upstream_github", "label": "上游 GitHub", "ok": True,
-             "degraded": up_degraded, "note": up_note},
+             "degraded": up_degraded, "note": up_note,
+             "asset_status": up_assets.get("status")},
             {"name": "stockdb_service", "label": "stockdb 服务", "ok": stockdb_ok,
              "note": ((f"{cs.get('status')}：{cs.get('note', '')}；" if cs else "状态获取失败；")
                       + (f"上游闸口：熔断开（{_stockdb_breaker['fails']} 次失败，降级中）"

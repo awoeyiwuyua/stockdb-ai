@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## [0.10.40] — 2026-09-13（遗留收口：上游资产指纹——同名 tag 重传可主动发现）
+
+> 清 PR/CHANGELOG 里登记的遗留事项。本版解决其中最要命的一条：
+> **同名 tag 重传二进制**——项目历史上两次（09-07 协议门禁、09-08 重建二进制）都是
+> **靠同步全线失败被动发现**的，探针只看 tag_name/published_at 永远看不见。
+
+- **探针端点 `/releases/latest` → `/releases`（列表）**：
+  - `/latest` **排除 prerelease**：上游把新版标成 pre-release 时探针完全看不到（旧缺口）；
+    列表端点能看到，且返回体会标记 `prerelease`；若最新正式版与最新 pre-release 不是同一条，
+    附带 `newer_prerelease` 与 `stable`。
+  - 列表同时带回 `assets`，可对资产取指纹；draft 一律跳过。
+- **资产指纹 `asset_fingerprint()`**：对「资产名 + `digest`（`sha256:…`）+ 大小 + updated_at」
+  排序后取 sha256。**刻意排除 `download_count`**（每次下载都变，会天天误报——已有用例锁住）；
+  资产顺序无关；digest 缺失时退化用 size+updated_at。
+- **指纹档案 `upstream_asset_watch()`**（`DATA_DIR/upstream_watch.json`）：首次见到某 tag
+  **只建基线不告警**（否则升级当天就误报），此后同 tag 指纹变化 → `changed`：
+  「同名资产已变更，需重新核对 SHA256 并重建镜像」。
+- **判定与告警接线**：`upstream_status()` 新增 `kind="asset_changed"`（与"版本号是否变大"相互
+  独立——重传时版本号可能完全没变）；`upstream_release_alert()` 把 asset_changed 纳入告警中心
+  （source="上游"，当日去重，恢复即撤警）；`/api/diag` 的 upstream 检查透出 `asset_status`
+  与中文说明（`baseline` 已建基线 / `same` 未变 / ⚠️ `changed` 已变更）。
+- **修掉自己引入的 API 陷阱**：初版 `upstream_asset_watch(release=None)` 用 `None` 同时表示
+  "省略参数"与"无数据"，导致"无数据"分支根本走不到、还会去打真网络。改用哨兵 `_UNSET` 区分
+  （用例 `test_watch_no_release_degrades` 抓到的）。
+- 测试：`test_ops` 新增 `UpstreamAssetFingerprintTest` 13 例（指纹稳定性/忽略下载数/检出
+  digest 与 size 变化/顺序无关/基线→same→changed 生命周期/save=False 不落盘/档案损坏自愈/
+  asset_changed 判定与告警撤警/prerelease 可见/draft 跳过）；`FetchReleaseTest` 桩点与
+  mock 响应体同步改为列表形态 → **Python 全量 494 全绿**。
+- 实测（本地直连 GitHub 真数据）：`测试版本0.3.5` 8 个资产，指纹
+  `ed5446e4…`；基线 → same → 篡改 digest → changed 全链路符合预期。
+
+**实机复验（NAS 0.10.40，4/4 + 演练闭环）**：`/api/version` 三处版本一致 0.10.40、
+`diag all_ok=true`，上游检查显示 `asset_status=baseline` 且 note 为
+「最新 release：测试版本0.3.5｜引擎已是最新｜资产指纹已建基线」；档案落盘
+`/data/upstream_watch.json`（`ed5446e4…`，asset_count=8）。**跨机器指纹一致**
+（NAS 与本地各自计算得到同一 sha256，说明口径可复现）。离线演练（不依赖 GitHub 可达性，
+走同一生产代码路径）：篡改档案指纹 → `upstream_asset_watch` 报 `changed`
+（`00000000→ed5446e4`）→ `upstream_status` 给出 `kind=asset_changed` 与中文处置指引 →
+`upstream_release_alert` 投递 `warning`（source=上游，1 条）→ 清理后回到 `same`、告警 0 条。
+注：NAS 到 GitHub 为**间歇连通**（本次探测一度不可达），探针失败时该项降级为
+`asset_status=none`/`degraded=true`，不影响本机数据与同步。
+
+### 遗留事项处置记录
+- ✅ **同名 tag 重传**：本版解决（指纹比对 + 告警）。
+- ✅ **prerelease 看不到**：本版解决（列表端点）。
+- ⏸️ **mydb 命名空间清单**：**确认不实现**。引擎 mydb 无廉价全库枚举手段
+  （`mydb_tables()` 只按已知业务前缀枚举；全库 `keys("*")` 会挂死整站 rd，见
+  `storage/providers/mydb_store.py` 0.9.14 注释与事故记录）。资产卡改用
+  **研究库（SQLite）真实计数 + mydb 磁盘占用**，并在 UI 上显示"未监控"而非编数字。
+  如将来确需命名空间清单，方案是让引擎侧暴露一次廉价的前缀枚举接口，而非在 webui 侧空转。
+
 ## [0.10.39] — 2026-09-13（修复：回填必须写 daily 子载荷 + diag 网络降级不打红）
 
 > 0.10.38 收口时的整体复验抓到的两个缺陷（其中一个把 0.10.36 修好的快车道又打回 40s）。

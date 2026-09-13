@@ -995,7 +995,12 @@ class _MockGitHubHandler(BaseHTTPRequestHandler):
 
 class FetchReleaseTest(_OpsTestCase):
     """fetch_upstream_release：本地 http.server mock 200 解析 tag_name、非 200 /
-    异常返回 None、TTL 缓存二次调用不再次请求（mock 计数）。"""
+    异常返回 None、TTL 缓存二次调用不再次请求（mock 计数）。
+
+    0.10.40：探针端点由 /releases/latest 改为 /releases?per_page=10（列表，含
+    prerelease 与 assets），桩点同步改到 GITHUB_RELEASES_URL；mock 响应体也改成
+    列表形态（此前是单对象）。
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -1004,7 +1009,7 @@ class FetchReleaseTest(_OpsTestCase):
         cls.thread = threading.Thread(target=cls.server.serve_forever,
                                       daemon=True)
         cls.thread.start()
-        cls.base = f"http://127.0.0.1:{cls.port}/releases/latest"
+        cls.base = f"http://127.0.0.1:{cls.port}/releases?per_page=10"
 
     @classmethod
     def tearDownClass(cls):
@@ -1015,22 +1020,27 @@ class FetchReleaseTest(_OpsTestCase):
         super().setUp()
         _MockGitHubHandler.responses.clear()
         _MockGitHubHandler.requests.clear()
-        self.url_patcher = mock.patch.object(app, "GITHUB_RELEASE_URL", self.base)
+        self.url_patcher = mock.patch.object(app, "GITHUB_RELEASES_URL", self.base)
         self.url_patcher.start()
         self.addCleanup(self.url_patcher.stop)
 
     def test_release_200_parses_tag_name(self):
-        """本地 mock 200：解析 tag_name / html_url / published_at。"""
-        _MockGitHubHandler.responses.append((200, {
+        """本地 mock 200（列表形态）：解析最新一条的 tag_name/html_url/published_at。"""
+        _MockGitHubHandler.responses.append((200, [{
             "tag_name": "v1.2.3",
             "html_url": "https://github.com/hello245m/free-stockdb/releases/tag/v1.2.3",
-            "published_at": "2026-08-01T00:00:00Z"}))
+            "published_at": "2026-08-01T00:00:00Z",
+            "prerelease": False, "draft": False,
+            "assets": [{"name": "a.tar", "digest": "sha256:aa", "size": 10,
+                        "updated_at": "2026-08-01T00:00:00Z"}]}]))
         r = app.fetch_upstream_release(force=True)
         self.assertEqual(r["tag_name"], "v1.2.3")
         self.assertEqual(r["html_url"],
                          "https://github.com/hello245m/free-stockdb/releases/tag/v1.2.3")
         self.assertEqual(r["published_at"], "2026-08-01T00:00:00Z")
-        self.assertEqual(_MockGitHubHandler.requests, ["/releases/latest"])
+        self.assertEqual(r["asset_count"], 1)
+        self.assertTrue(r["asset_fingerprint"])
+        self.assertEqual(len(_MockGitHubHandler.requests), 1)
 
     def test_release_non_200_returns_none(self):
         """非 200（本地 mock 500）→ None 不抛。"""
@@ -1040,7 +1050,7 @@ class FetchReleaseTest(_OpsTestCase):
 
     def test_release_http_error_returns_none(self):
         """HTTPError（403，patch 层面）→ None 不抛。"""
-        err = urllib.error.HTTPError(app.GITHUB_RELEASE_URL, 403, "Forbidden",
+        err = urllib.error.HTTPError(app.GITHUB_RELEASES_URL, 403, "Forbidden",
                                      {}, None)
         with mock.patch.object(urllib.request, "urlopen", side_effect=err):
             self.assertIsNone(app.fetch_upstream_release(force=True))
@@ -1246,6 +1256,164 @@ class SyncFailureClassTest(unittest.TestCase):
 
     def test_non_dict_degrades(self):
         self.assertEqual(self._cls(None)["class"], "unknown")
+
+
+class UpstreamAssetFingerprintTest(_OpsTestCase):
+    """0.10.40 上游资产指纹：同名 tag 重传的主动发现（历史两次都靠同步失败被动发现）。"""
+
+    def setUp(self):
+        super().setUp()
+        app._RELEASE_CACHE.update(at=0.0, val=None)
+
+    @staticmethod
+    def _asset(name, digest, size=100, updated="2026-09-10T13:21:38Z"):
+        return {"name": name, "digest": digest, "size": size, "updated_at": updated}
+
+    def _release(self, tag="测试版本0.3.5", assets=None, prerelease=False):
+        assets = assets if assets is not None else [
+            self._asset("free-stockdb-manylinux-x64-v0.3.5-more-power.tar", "sha256:aa", 10557440),
+            self._asset("free-stockdb-windows-v0.3.5-more-power.zip", "sha256:bb", 4328388),
+        ]
+        return {"tag_name": tag, "html_url": "https://x", "published_at": "2026-07-19T00:00:00Z",
+                "prerelease": prerelease, "draft": False, "asset_count": len(assets),
+                "asset_fingerprint": app.asset_fingerprint(assets)}
+
+    # ---- 指纹本身 ----
+    def test_fingerprint_ignores_download_count(self):
+        """下载数天天变——进指纹就会天天误报，必须排除。"""
+        a = self._asset("x.tar", "sha256:aa")
+        b = {**a, "download_count": 999, "state": "uploaded", "id": 123}
+        self.assertEqual(app.asset_fingerprint([a]), app.asset_fingerprint([b]))
+
+    def test_fingerprint_detects_digest_or_size_change(self):
+        """digest 变（重传二进制）/ size 变 / 资产增删 都要能检出。"""
+        base = self._asset("x.tar", "sha256:aa", 100)
+        self.assertNotEqual(app.asset_fingerprint([base]),
+                            app.asset_fingerprint([{**base, "digest": "sha256:bb"}]))
+        self.assertNotEqual(app.asset_fingerprint([base]),
+                            app.asset_fingerprint([{**base, "size": 101}]))
+        self.assertNotEqual(app.asset_fingerprint([base]),
+                            app.asset_fingerprint([base, self._asset("y.zip", "sha256:cc")]))
+
+    def test_fingerprint_order_independent(self):
+        """资产顺序不参与指纹（同一组资产换序不应报变更）。"""
+        a = self._asset("a.tar", "sha256:aa")
+        b = self._asset("b.zip", "sha256:bb")
+        self.assertEqual(app.asset_fingerprint([a, b]), app.asset_fingerprint([b, a]))
+
+    # ---- 档案生命周期 ----
+    def test_watch_baseline_then_same(self):
+        """首见只建基线（不告警），第二次同指纹 → same。"""
+        rel = self._release()
+        self.assertEqual(app.upstream_asset_watch(rel)["status"], "baseline")
+        self.assertEqual(app.upstream_asset_watch(rel)["status"], "same")
+        doc = json.loads((Path(self.tmp) / app.UPSTREAM_WATCH_FILE).read_text(encoding="utf-8"))
+        self.assertIn("测试版本0.3.5", doc)
+        self.assertEqual(doc["测试版本0.3.5"]["asset_count"], 2)
+
+    def test_watch_detects_reupload_same_tag(self):
+        """同名 tag 重传（digest 变）→ changed，并保留前后指纹供人工核对。"""
+        app.upstream_asset_watch(self._release())
+        tampered = self._release(assets=[
+            self._asset("free-stockdb-manylinux-x64-v0.3.5-more-power.tar", "sha256:NEW",
+                        10557440)])
+        out = app.upstream_asset_watch(tampered)
+        self.assertEqual(out["status"], "changed")
+        self.assertNotEqual(out["previous_fingerprint"], out["fingerprint"])
+        self.assertEqual(out["tag"], "测试版本0.3.5")
+        # 变更后基线更新 → 再来一次是 same（不重复刷屏）
+        self.assertEqual(app.upstream_asset_watch(tampered)["status"], "same")
+
+    def test_watch_no_release_degrades(self):
+        self.assertEqual(app.upstream_asset_watch(None)["status"], "none")
+        self.assertEqual(app.upstream_asset_watch({"tag_name": "x"})["status"], "none")
+
+    def test_watch_save_false_does_not_write(self):
+        app.upstream_asset_watch(self._release(), save=False)
+        self.assertFalse((Path(self.tmp) / app.UPSTREAM_WATCH_FILE).exists())
+
+    def test_watch_corrupt_archive_recovers(self):
+        (Path(self.tmp) / app.UPSTREAM_WATCH_FILE).write_text("{ not json", encoding="utf-8")
+        self.assertEqual(app.upstream_asset_watch(self._release())["status"], "baseline")
+
+    # ---- 与版本判定/告警的接线 ----
+    def test_upstream_status_reports_asset_changed(self):
+        """指纹变化 → kind=asset_changed（即使版本号相同也要报）。"""
+        rel = self._release()
+        app.upstream_asset_watch(rel)
+        tampered = self._release(assets=[self._asset("only-one.tar", "sha256:zz")])
+        with mock.patch.object(app, "fetch_upstream_release", return_value=tampered), \
+             mock.patch.object(app, "_env_version_tag", return_value="0.3.5"), \
+             mock.patch("storage.providers.free_stockdb.engine_version_info",
+                        return_value={"base": "0.3.5", "version": "0.3.5-stockdb"}):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "asset_changed")
+        self.assertIn("同名资产已变更", st["message"])
+        self.assertIn("重新核对 SHA256", st["message"])
+
+    def test_status_up_to_date_when_fingerprint_same(self):
+        """指纹未变 + 版本相同 → 仍是 up_to_date（指纹机制本身不产生噪声）。"""
+        rel = self._release()
+        app.upstream_asset_watch(rel)
+        with mock.patch.object(app, "fetch_upstream_release", return_value=rel), \
+             mock.patch.object(app, "_env_version_tag", return_value="0.3.5"), \
+             mock.patch("storage.providers.free_stockdb.engine_version_info",
+                        return_value={"base": "0.3.5", "version": "0.3.5-stockdb"}):
+            st = app.upstream_status()
+        self.assertEqual(st["kind"], "up_to_date")
+        self.assertEqual(st["asset_watch"]["status"], "same")
+
+    def test_alert_warns_on_asset_changed_and_resolves(self):
+        """asset_changed 进告警中心（当日去重）；恢复 up_to_date 后撤警。"""
+        alerts = app.Alerts.init(os.path.join(self.tmp, "up_asset.json"))
+        app.upstream_release_alert(alerts=alerts, status={
+            "kind": "asset_changed",
+            "message": "上游 **x 同名资产已变更**：需重新核对 SHA256 并重建镜像"})
+        top = alerts.list()[0]
+        self.assertEqual((top["level"], top["source"]), ("warning", "上游"))
+        self.assertIn("同名资产已变更", top["message"])
+        app.upstream_release_alert(alerts=alerts, status={"kind": "up_to_date", "message": "最新"})
+        self.assertEqual(alerts.count(), 0)
+
+    # ---- 探针端点 ----
+    def _fake_urlopen(self, payload):
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps(payload).encode()
+
+        return mock.patch("urllib.request.urlopen", return_value=_Resp())
+
+    def test_probe_uses_releases_list_and_marks_prerelease(self):
+        """探针走 /releases 列表：能看见 prerelease（旧 /latest 端点看不到）。"""
+        self.assertIn("/releases?", app.GITHUB_RELEASES_URL)
+        payload = [{"tag_name": "测试版本0.4.0", "html_url": "https://x",
+                    "published_at": "2026-09-13T00:00:00Z", "prerelease": True,
+                    "draft": False, "assets": [self._asset("a.tar", "sha256:aa")]},
+                   {"tag_name": "测试版本0.3.5", "html_url": "https://y",
+                    "published_at": "2026-07-19T00:00:00Z", "prerelease": False,
+                    "draft": False, "assets": [self._asset("b.tar", "sha256:bb")]}]
+        with self._fake_urlopen(payload):
+            rel = app.fetch_upstream_release(force=True)
+        self.assertEqual(rel["tag_name"], "测试版本0.4.0")
+        self.assertTrue(rel["prerelease"])
+        self.assertTrue(rel.get("newer_prerelease"))
+        self.assertEqual(rel["stable"]["tag_name"], "测试版本0.3.5")
+        self.assertTrue(rel["asset_fingerprint"])
+
+    def test_probe_skips_drafts(self):
+        payload = [{"tag_name": "draft", "draft": True, "assets": []},
+                   {"tag_name": "测试版本0.3.5", "draft": False, "prerelease": False,
+                    "assets": [self._asset("a.tar", "sha256:aa")]}]
+        with self._fake_urlopen(payload):
+            rel = app.fetch_upstream_release(force=True)
+        self.assertEqual(rel["tag_name"], "测试版本0.3.5")
+        self.assertFalse(rel.get("newer_prerelease", False))
 
 
 class AlertMuteTest(_OpsTestCase):
