@@ -54,6 +54,17 @@
 4. 部署清单漏 `stockdb-ai/interfaces/web/routes.py`（文件清单式部署的典型坑）：
    静音端点在镜像里根本不存在（复验 404 抓到）→ 部署清单改为**按目录同步**。
 5. 版本号漏 bump（镜像 0.10.38 而 `WEBUI_VERSION` 还是 0.10.37）→ 补齐。
+6. **回填覆盖掉 daily 子载荷**（0.10.39 修）：`auction_run_backfill` 只写 `metrics`，
+   而 live 收口会写 `daily`（MCP 预计算快车道 `_precomputed_row` 依赖它）→ 今天跑 60 天回填后
+   快车道整段失效（`cache_hit=False` / `precomputed_days=0` / **40s 全市场重算**，0/60 天有 daily）。
+   修法：回填第二遍按 live 同构写 `daily`（计数/成功率/分位/分布 + coverage，含内部键
+   `_candidates` 不外泄），并重跑 60 天回填恢复（**60/60 天有 daily**）。回归用例：
+   `test_backfill_writes_daily_payload` / `test_backfill_daily_metrics_do_not_leak_internal_keys`。
+7. **`/api/diag` 把"网络受限"判成系统故障**：`upstream_github` 探针失败（GitHub 从 NAS
+   间歇超时）原写 `ok=False` → `all_ok=false` 整体打红，属假警报。改为 `ok=True` +
+   `degraded=True` + note「网络受限：本次探测未完成（不影响本机数据与同步）」，`all_ok` 不再被
+   网络条件污染（上游真发新版或探测恢复时，仍由看门狗告警/撤警负责）。
+
 
 **五、实机复验（NAS，两批共 19 项全绿）**
 - 契约批 10/10：assets 真身（研究库 metrics=60/series=2/lists=12/snapshots=892/1.0 MB、
@@ -65,6 +76,16 @@
 
 **测试**：Python 全量 **478 全绿**（+11 静音用例）；前端 Vitest **94 全绿**（含首次纳入的
 lights 12 例与新增 timeline 14 例）；`vue-tsc` 0 错；`vite build` 通过。
+
+**六、最终整体复验（0.10.38 收口，12/12 全绿）**
+一次性回归"老修复未退化 + 新改版生效"：
+- A 版本与健康：三处版本一致 0.10.38、`diag all_ok=true`、数据仍 `20260911`（多次重建部署未影响数据）
+- B 0.10.36 老修复：MCP `get_mydb_data` 可读（竞价快照 33 条）、打板快车道 **0.03s**
+  （`cache_hit=true` / `precomputed_days=5`，此前 40s）
+- C 0.10.37 老修复：`engine` 版本来源可读（0.3.5-stockdb / binary）、无「上游」误报告警
+  （实测：探针失败告警出现后，看门狗下一拍探针成功即**自动撤销**至 0 条——自愈闭环）
+- D 0.10.38 改版：09-07 分类逐条正确且 `needs_action=false`、资产卡真身字段齐全、
+  补录三端点可达、静音端点在线且无残留、前端 8 个新关键词全在镜像产物内
 
 本项目面板版本号 = `WEBUI_VERSION`（`stockdb-ai/config.py`，0.9.1 起收敛至 config），
 镜像 tag 跟随上游引擎版本。发布纪律见 `docs/release-policy.md`；

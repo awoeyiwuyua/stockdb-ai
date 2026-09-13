@@ -513,8 +513,11 @@ def auction_run_backfill(days: int = 60) -> dict:
         if not latest:
             return {"ok": False, "reason": "无法确定最新交易日", "backfilled_days": 0, "series": {}}
 
-        # 第一遍：按时间正序收集 (date, metrics)，从最旧到最新
-        rows: list[tuple[str, dict]] = []
+        # 第一遍：按时间正序收集 (date, metrics, snapshots)，从最旧到最新
+        # 0.10.39：连当日样本一起留着——回填必须同时写 daily 子载荷，否则会把
+        # live 路径写的 daily 覆盖掉（MCP 预计算快车道 `_precomputed_row` 依赖它，
+        # 缺 daily 即退化为全市场重算 40s；NAS 0.10.38 实机复验抓到过）。
+        rows: list[tuple[str, dict, list]] = []
         t = latest
         for _ in range(days):
             t1 = _auction_prev_trade_date(t)          # T-1 交易日（涨停判定日）
@@ -543,9 +546,9 @@ def auction_run_backfill(days: int = 60) -> dict:
                     else:
                         missing_open += 1  # 守恒：候选 = n_samples + missing_open_count
             m = _auction_compute_metrics(snaps)
-            m = {**m, "missing_open_count": missing_open}
+            m = {**m, "missing_open_count": missing_open, "_candidates": len(codes)}
             if m["n_samples"] > 0:
-                rows.append((t, m))
+                rows.append((t, m, snaps))
             t = t1
         rows.reverse()  # 最旧 → 最新
 
@@ -553,19 +556,27 @@ def auction_run_backfill(days: int = 60) -> dict:
         # 0.8.11：分位口径改为用户拍板定义——此前 60 个有效观测中严格低于当日值
         # 的天数/60；不足 60 个观测 → None（历史回填日因此无分位，属预期）
         all_vals = {metric: [] for metric in AUCTION_METRICS}
-        for (d, m) in rows:
+        for (d, m, snaps) in rows:
             rank = {}
             for metric in AUCTION_METRICS:
                 if m.get(metric) is not None:
                     rank[metric] = _auction_percentile_rank(m[metric], all_vals[metric][-60:])
             strength = {metric: _auction_strength_label(rank.get(metric))
                         for metric in AUCTION_METRICS}
-            payload = {"metrics": m,
+            payload = {"metrics": {k: v for k, v in m.items() if not k.startswith("_")},
                        "rank_60d": rank,
                        "strength_60d": strength,
                        "window": 60, "n_samples": m["n_samples"],
                        "computed_at": _now_iso(), "value_source": "kline",
                        "contract": "auction-metric-v1"}
+            # daily 子载荷（0.10.39）：与 live 收口同构——覆盖/计数/分位/分布
+            candidates = int(m.get("_candidates") or 0)
+            payload["daily"] = _auction_build_daily_row(
+                snaps, payload,
+                trade_date=f"{d[:4]}-{d[4:6]}-{d[6:8]}",
+                coverage={"codes_requested": candidates, "fetched": len(snaps),
+                          "fetch_errors": 0,
+                          "missing_open": m.get("missing_open_count", 0)})
             research_store.write_metrics(d, payload)
             for metric in AUCTION_METRICS:
                 if m.get(metric) is not None:

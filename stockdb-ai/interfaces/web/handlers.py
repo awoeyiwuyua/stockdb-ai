@@ -738,12 +738,17 @@ class Handler(BaseHTTPRequestHandler):
             upstream = None
         upstream_ok = bool(upstream and upstream.get("tag_name"))
         # 0.10.37 D：核对诊断里的版本标注与真实判定一致（发新版/探针失败/不可判定
-        # 都在 note 里显式说明，不再只写「最新 release：<tag>」让巡检误判为已最新）
+        # 都在 note 里显式说明，不再只写「最新 release：<tag>」让巡检误判为已最新）。
+        # 0.10.38：**降级不计入 ok**——GitHub 不可达（本机网络受限，NAS 实测间歇超时）
+        # 是"探测器跑不起来"，不是系统不健康；此前写成 ok=False 会把 diag 整体打红
+        # （all_ok=false），属典型假警报。改为 ok=True + degraded=True + note 说明。
         try:
             up_status = app.upstream_status()
         except Exception:  # noqa: BLE001
             up_status = {"kind": "unknown", "message": "上游状态评估异常"}
-        up_note = ("不可达（网络受限时降级提示，不影响本机数据）" if not upstream_ok
+        up_degraded = not upstream_ok
+        up_note = ("网络受限：本次探测未完成（不影响本机数据与同步），"
+                   "无法判断是否有新版" if up_degraded
                    else f"最新 release：{upstream['tag_name']}｜{up_status.get('message', '')}")
 
         cs = None
@@ -763,8 +768,8 @@ class Handler(BaseHTTPRequestHandler):
             disk_ok, disk_note = False, str(exc)
 
         checks = [
-            {"name": "upstream_github", "label": "上游 GitHub", "ok": upstream_ok,
-             "note": up_note},
+            {"name": "upstream_github", "label": "上游 GitHub", "ok": True,
+             "degraded": up_degraded, "note": up_note},
             {"name": "stockdb_service", "label": "stockdb 服务", "ok": stockdb_ok,
              "note": ((f"{cs.get('status')}：{cs.get('note', '')}；" if cs else "状态获取失败；")
                       + (f"上游闸口：熔断开（{_stockdb_breaker['fails']} 次失败，降级中）"

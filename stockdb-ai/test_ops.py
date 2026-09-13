@@ -1852,14 +1852,30 @@ class _DiagTests(_OpsTestCase):
         self.assertEqual(payload["env"]["webui_version"], app.WEBUI_VERSION)
 
     def test_diag_upstream_degraded(self):
-        """上游不可达 → upstream_github ok=False 且整体仍 200（单块降级）。"""
+        """上游不可达 → 该检查标记 degraded 但 **ok=True**（网络受限不是系统不健康，
+        0.10.38：此前 ok=False 会把 diag 整体打红，属假警报）。
+        注：不断言 all_ok——本地/CI 环境下 stockdb_service 等其他检查会因无容器而 false，
+        本用例只锁"上游网络受限不再把该项判红"这一条。"""
         with mock.patch.object(app, "fetch_upstream_release", return_value=None):
             status, _, body = _do_get("/api/diag")
         self.assertEqual(status, 200)
         payload = json.loads(body.decode())
         up = next(c for c in payload["checks"] if c["name"] == "upstream_github")
-        self.assertFalse(up["ok"])
-        self.assertIn("降级", up["note"])
+        self.assertTrue(up["ok"])
+        self.assertTrue(up["degraded"])
+        self.assertIn("网络受限", up["note"])
+
+    def test_diag_upstream_ok_when_reachable(self):
+        """上游可达 → degraded=False、note 带判定说明。"""
+        rel = {"tag_name": "测试版本0.3.5", "html_url": "https://x",
+               "published_at": "2026-07-19T00:00:00Z"}
+        with mock.patch.object(app, "fetch_upstream_release", return_value=rel):
+            status, _, body = _do_get("/api/diag")
+        payload = json.loads(body.decode())
+        up = next(c for c in payload["checks"] if c["name"] == "upstream_github")
+        self.assertTrue(up["ok"])
+        self.assertFalse(up["degraded"])
+        self.assertIn("测试版本0.3.5", up["note"])
 
     def test_diag_pybao_check(self):
         """pybao 检查 = 三个模块 find_spec 全命中（无 pybao 时为 False 也合法）。"""
@@ -2164,6 +2180,40 @@ class _AuctionBackfillTests(_OpsTestCase):
     def _metrics(self, d8):
         # round-trip：走 research store 接口替身（0.9.5 M5）
         return self._fake_research.read_metrics(d8)
+
+    def test_backfill_writes_daily_payload(self):
+        """0.10.39 回归：回填必须同时写 daily 子载荷。
+
+        NAS 0.10.38 实机抓到的事故：回填只写 metrics，把 live 收口写的 daily 覆盖掉，
+        MCP 预计算快车道（`_precomputed_row` 读 daily）随即失效 → `get_board_open_effect_history`
+        从 0.02s 退化为 40s 全市场重算（cache_hit=False / precomputed_days=0）。
+        """
+        app.auction_run_backfill(days=3)
+        for d8 in ("20260812", "20260813", "20260814"):
+            payload = self._metrics(d8)
+            daily = payload.get("daily")
+            self.assertIsInstance(daily, dict, f"{d8} 缺 daily 子载荷（快车道会失效）")
+            # 与 live 收口同构的关键字段（MCP _precomputed_row / 前端直读依赖）
+            for key in ("matched_count", "positive_count", "flat_count", "negative_count",
+                        "success_rate", "average_open_return_pct", "distribution",
+                        "metrics", "trade_date"):
+                self.assertIn(key, daily, f"{d8}.daily 缺 {key}")
+            self.assertEqual(daily["trade_date"], f"{d8[:4]}-{d8[4:6]}-{d8[6:8]}")
+            # 计数自洽：匹配数 = 正 + 平 + 负
+            self.assertEqual(daily["matched_count"],
+                             daily["positive_count"] + daily["flat_count"] + daily["negative_count"])
+            # 覆盖块：候选 = 样本 + 缺价（守恒）
+            cov = daily.get("coverage") or {}
+            self.assertEqual(cov.get("codes_requested"),
+                             cov.get("fetched", 0) + (cov.get("missing_open") or 0))
+
+    def test_backfill_daily_metrics_do_not_leak_internal_keys(self):
+        """内部记账键（_candidates）不得进落盘 payload（只用于覆盖块计算）。"""
+        app.auction_run_backfill(days=3)
+        for d8 in ("20260812", "20260813", "20260814"):
+            payload = self._metrics(d8)
+            self.assertNotIn("_candidates", payload["metrics"])
+            self.assertNotIn("_candidates", payload)
 
     def test_backfill_idempotent(self):
         app.auction_run_backfill(days=3)
