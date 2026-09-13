@@ -143,7 +143,12 @@ WEBUI_PORT=18080 ./stockdb-ai/dev.sh           # 换本地端口
 > 同步主流程为**热更新**（同步器检测到新数据文件后自动重启 stockdb 加载新快照，
 > 重启窗口约 1-2 秒）；**停服同步**为故障兜底（「更多操作 → 停服同步」）。
 
-> A股休市表（`app.py` 的 `XSHG_HOLIDAYS`）取自 [exchange_calendars](https://github.com/gerrymanoim/exchange_calendars) XSHG 日历，数据截至 2026 年；官方次年放假安排公布后，用 `stockdb-ai/scripts/extract_xshg_holidays.py` 重新提取更新（webui 运行时零依赖，判定不依赖外部服务）。
+> 交易日历（内嵌于 `stockdb-ai/core/calendar_market.py`）取自 [exchange_calendars](https://github.com/gerrymanoim/exchange_calendars)：
+> A 股 `XSHG_HOLIDAYS`（覆盖至 2026-12-31）、港股 `XHKG_HOLIDAYS`（覆盖至 2027-09-13）。
+> 官方放假安排公布后，用 `stockdb-ai/scripts/extract_calendar_holidays.py --calendar {XSHG,XHKG}`
+> 重新提取更新（webui 运行时零依赖，判定不依赖外部服务）。
+> **两市场必须各一张表**——2026 年实测：香港休/A股开 6 天、A股休/香港开 11 天（含国庆整周）。
+> 交易所日历**不收录台风/黑色暴雨临时休市**（事后才知），本项目按「数据即事实」处理：拉不到就跳过该日。
 
 ### 4. 本地 ZCode 接入
 只读 MCP server 已迁入本仓库 `stockdb-ai/interfaces/mcp/stockdb_mcp_server.py`（纯标准库，连 `STOCKDB_HOST:7899`），
