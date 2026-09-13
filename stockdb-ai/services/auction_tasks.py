@@ -64,6 +64,9 @@ except Exception as _auction_import_exc:  # noqa: BLE001 - 任一模块缺失时
 
 
 _auction_fired: dict = {}  # 日级防重触发守卫：{date: {"collect": bool, "close": bool}}
+# 0.10.42：兜底现算覆盖率护栏阈值——兜底清单 < 前一日权威 n_samples × 该比例即告警
+# （打板候选日间波动不可能腰斩；2026-09-09 的 13 vs 66 即此类）
+_AUCTION_FALLBACK_MIN_RATIO = 0.5
 # 0.10.35：守卫落盘（config.schedule_fired_provider 注入，见 app.py 装配）——
 # 此前纯内存，进程重启即清空 → 晚间重启后 now>=09:26 再次触发采集，采到收盘价
 # 冒充开盘价（2026-09-10 实证）。注入 None（未装配/测试）时退化为原内存语义。
@@ -222,6 +225,45 @@ def _auction_calendar_guard(d8: str) -> None:
         pass
 
 
+def _auction_fallback_coverage_check(prev: str, fallback_codes: int) -> dict:
+    """兜底现算覆盖率护栏（0.10.42）：前一日清单缺失时用的**前日快照可能只是部分快照**。
+
+    2026-09-09 实证：09-08 清单为空（当日引擎区间语义退化，全市场快照只有 ~13 只有 bar），
+    08 号清单又是空的 → 走兜底现算 → 用这份**残缺快照**算出 13 只清单 → 09-09 竞价采集
+    只采到 13 只（权威口径 66 只，n_samples 差 5 倍）。而 `coverage.formal_usable` 当时为
+    True（批量通道不报错，只是多数代码无 bar → 被归入 suspended），**没有任何一处会告警**。
+
+    判定：与「前一日自己的权威指标 n_samples」比——兜底清单不到其一半即为可疑
+    （打板候选日间波动不可能腰斩）。可疑 → warning 告警 + 返回值带 aborted 标记，
+    但**不阻断**采集（保守：宁可采到偏少数据也别当天完全没数据，人工据告警处置）。
+    """
+    prev_n: int | None = None
+    try:
+        if research_store is not None:
+            prev_payload = research_store.read_metrics(prev) or {}
+            metrics = prev_payload.get("metrics")
+            if not isinstance(metrics, dict):
+                metrics = prev_payload if "n_samples" in prev_payload else {}
+            raw_n = metrics.get("n_samples")
+            prev_n = int(raw_n) if raw_n is not None else None
+    except Exception:  # noqa: BLE001 - 读不到前值不阻塞采集
+        prev_n = None
+    if not prev_n or prev_n <= 0:
+        return {"checked": False, "prev_n_samples": prev_n, "suspicious": False}
+    ratio = fallback_codes / prev_n
+    suspicious = ratio < _AUCTION_FALLBACK_MIN_RATIO
+    if suspicious:
+        msg = (f"兜底清单仅 {fallback_codes} 只，前一日（{prev}）权威口径 {prev_n} 只"
+               f"（{ratio:.0%}）——疑为部分快照，请核对 {prev} 全市场数据完整性")
+        log(f"⚠️ 打板清单兜底覆盖率异常：{msg}")
+        try:
+            notify_alert("warning", "打板兜底", msg)
+        except Exception:  # noqa: BLE001 - 告警通道异常忽略
+            pass
+    return {"checked": True, "prev_n_samples": prev_n, "ratio": round(ratio, 4),
+            "suspicious": suspicious, "fallback_codes": fallback_codes}
+
+
 def auction_run_collect() -> dict:
     """09:26 打板竞价采集任务（幂等，可手动重跑）。
 
@@ -243,6 +285,7 @@ def auction_run_collect() -> dict:
 
         # ① 清单：昨日 16:30 已算好落库；缺失/为空 → 前一交易日快照兜底现算
         codes = _auction_load_codes(today)
+        fallback_cov: dict | None = None
         if not codes:
             prev = _auction_prev_trade_date(today)
             snaps = query_snapshot({"date": prev, "limit": 0})
@@ -253,7 +296,14 @@ def auction_run_collect() -> dict:
                                             _auction_lag_close(snaps2.get("points") or []))
             listing = _auction_compute_limitup_list(pts1)
             codes = listing.get("codes") or []
-            log(f"📊 打板清单缺失，已兜底现算（{prev}）→ {len(codes)} 只")
+            # 0.10.42：兜底可能消费"部分快照"（2026-09-09 实证：13 vs 权威 66）——
+            # 覆盖率护栏告警（不阻断采集，人工据告警处置）
+            fallback_cov = _auction_fallback_coverage_check(prev, len(codes))
+            log(f"📊 打板清单缺失，已兜底现算（{prev}）→ {len(codes)} 只"
+                + (f"｜覆盖率护栏：前日权威 {fallback_cov['prev_n_samples']} 只、"
+                   f"比例 {fallback_cov.get('ratio')}"
+                   + ("（⚠️ 可疑）" if fallback_cov.get("suspicious") else "（正常）")
+                   if fallback_cov.get("checked") else "｜覆盖率护栏：无前日权威值可比"))
         if not codes:
             return {"ok": False, "reason": "清单为空且兜底现算无结果",
                     "collected": 0, "errors_count": 0, "metrics": None, "rank_60d": None, "strength_60d": None}
@@ -309,6 +359,8 @@ def auction_run_collect() -> dict:
             f"premium_mean={metrics.get('premium_mean')}, n={metrics.get('n_samples')}")
         _records_append({"date": today, "task": "collect", "ok": True,
                          "collected": len(ok_items), "errors": len(errors),
+                         "list_source": "fallback" if fallback_cov else "stored",
+                         "fallback_coverage": fallback_cov,
                          "metrics": metrics, "at": _now_iso()})
         _daily_backup()  # 0.9.5 M5：日检后自动备份研究成果库
         return {"ok": True, "collected": len(ok_items), "errors_count": len(errors),

@@ -623,6 +623,58 @@ class _LimitReferenceTests(_OpsTestCase):
         self.assertEqual(app._auction_lag_close(pts), {"600000": 4.29})
 
 
+class FallbackCoverageGuardTest(_OpsTestCase):
+    """0.10.41：兜底清单覆盖率护栏（2026-09-09 的 13 vs 权威 66 实证）。
+
+    成因：09-08 清单为空 → 兜底现算消费"部分快照"（当日引擎区间语义退化，
+    全市场快照只有 ~13 只有 bar，但 `coverage.formal_usable` 仍为 True：批量通道
+    不报错，只把无 bar 的代码归入 suspended）→ 静默产出 13 只清单 →
+    09-09 竞价采集只采到 13 只（权威 66，n_samples 差 5 倍）。
+    """
+
+    def _store(self, n_samples):
+        store = mock.Mock()
+        store.read_metrics.return_value = {"metrics": {"n_samples": n_samples}}
+        return store
+
+    def test_suspicious_when_far_below_prev_authority(self):
+        with mock.patch.object(auction_tasks_mod, "research_store", self._store(66)), \
+                mock.patch.object(auction_tasks_mod, "notify_alert") as alert:
+            out = auction_tasks_mod._auction_fallback_coverage_check("20260908", 13)
+        self.assertTrue(out["checked"])
+        self.assertTrue(out["suspicious"])
+        self.assertEqual(out["prev_n_samples"], 66)
+        self.assertAlmostEqual(out["ratio"], 13 / 66, places=3)
+        alert.assert_called_once()
+        self.assertEqual(alert.call_args[0][1], "打板兜底")
+
+    def test_normal_when_comparable(self):
+        with mock.patch.object(auction_tasks_mod, "research_store", self._store(66)), \
+                mock.patch.object(auction_tasks_mod, "notify_alert") as alert:
+            out = auction_tasks_mod._auction_fallback_coverage_check("20260908", 60)
+        self.assertTrue(out["checked"])
+        self.assertFalse(out["suspicious"])
+        alert.assert_not_called()
+
+    def test_degrades_without_prev_authority(self):
+        """前日无权威值（读不到 / n_samples 缺失）→ 不判定也不告警（保守放行）。"""
+        for store in (None, mock.Mock(read_metrics=mock.Mock(return_value={})),
+                      mock.Mock(read_metrics=mock.Mock(side_effect=RuntimeError("boom")))):
+            with mock.patch.object(auction_tasks_mod, "research_store", store), \
+                    mock.patch.object(auction_tasks_mod, "notify_alert") as alert:
+                out = auction_tasks_mod._auction_fallback_coverage_check("20260908", 13)
+            self.assertFalse(out["suspicious"])
+            self.assertFalse(out["checked"])
+            alert.assert_not_called()
+
+    def test_alert_channel_failure_does_not_raise(self):
+        with mock.patch.object(auction_tasks_mod, "research_store", self._store(66)), \
+                mock.patch.object(auction_tasks_mod, "notify_alert",
+                                  side_effect=RuntimeError("alert down")):
+            out = auction_tasks_mod._auction_fallback_coverage_check("20260908", 5)
+        self.assertTrue(out["suspicious"])  # 告警挂了也要如实判定
+
+
 class _MydbRdTests(_OpsTestCase):
     """mydb 读写：QueryResult/JSON 串归一化、并发串行化、失败丢弃连接自愈。"""
 
