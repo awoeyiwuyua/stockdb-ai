@@ -1,5 +1,56 @@
 # CHANGELOG
 
+## [0.10.41] — 2026-09-13（**港股日K 读路径打通**：pybao 惰性 QueryResult + 键形态）
+
+> 清 ROADMAP 主线 H1/H2（港股入仓库 / 自动同步）之前的前置故障。开工前先验现状，
+> 结果发现**港股数据一直在 mydb 里，只是从来没读出来过**——H1/H2 的真正拦路石是这个。
+
+- **三处同源缺陷（NAS 容器内 pybao 0.3.5 实机取证）**：`QueryResult` 是**惰性响应对象**，
+  `.do()` 才取回原生数据；`.keys()` / `.all()` / `.len()` 返回错误文案字符串
+  `'Missing required parameters'`，`iter()` 逐字符产出该文案：
+  1. `storage/providers/mydb_store._rd_to_py` 缺 `.do()` 分支（MCP 侧 `_to_py` 一直有）→
+     `mydb_tables()` 返回 `[' ', 'M', 'a', …]`、`mydb_read(table, "")` 658 键**全空**；
+  2. `interfaces/mcp/pybao_tools.rd_keys` 直接 `list(QueryResult)` →
+     `query_mydb` 的 keys 变 `[' ', ' ', 'M']`、total=27（＝错误文案字符数）、values 全 null；
+  3. `app.hk_klines` 的 `for v in rd.vals(...)` 恒 0 行 → **港股写入进得去、读不出来**。
+- **键形态修正（与直觉相反，实机实测）**：物理键是段式的，
+  `get(table, "00700", "20240828")` **三段**命中；
+  两段拼接 `get(table, "00700:20240828")` 与带表名的整串**恒返回 `[]`**；
+  单段键（`打板指标`/`自定义`）则用两段 `get(table, "metrics")`。
+  `mydb_read`/`query_mydb` 此前只发整串 → 即便 `.do()` 修好也是全 null。
+  修法：候选序列逐个试（`_rd_get_any` / `mydb_key_candidates`），首个非空即返回；
+  **剥离表名前缀只在首段确属已登记表名前缀时进行**（否则会把 `00700:20240828` 的代码段当表名剥掉，
+  用例 `test_query_mydb_lookup_key_keeps_composite` 抓到）；`rd_get` 改收可变参数以透传段数。
+- **`rd.delete(table, *args)` 可用**（实机枚举确认）——mydb 首次具备删除能力，
+  本版用它清掉探测期写脏的无代码段键 `hk日k:20260912`。
+- **自愈契约修复**：单键读改走 `_rd_get_any` 后一度绕过了 `_mydb_rd_reset()`，
+  全部候选失败时也不上抛异常（静默吞掉）→ 恢复「异常 → 丢弃缓存连接 → 下次重连」，
+  且全部候选失败时**上抛首个异常**（用例 `test_failure_drops_connection_and_recovers` 抓到的）。
+  `hk_klines` 增加可选 `dates` 参数：vals 通道为空时退化为逐日三段 `get`。
+- **验证（NAS 0.10.41 实机，9/9 + HTTP 6/6 全绿）**：
+  `hk日k` 657 键枚举正常、`mydb_read` 单键与全表（657/657 非空）均命中、
+  MCP `query_mydb` 5/5 非空、`hk_klines('00700')` n=501（20240828~20260911）、
+  `hk_klines('00100')` n=156，字段完整（date/open/high/low/close/volume/amount）；
+  `/api/version` 与 `/api/diag` 均为 0.10.41、`diag all_ok=true`、`latest=20260911`；
+  `/api/data/read` 复合键经 HTTP 亦返回真值。
+- **数据面（探测期污染的清理，已记账）**：`hk_sync(['00700'], years=3)` 覆写回真实行情
+  （末条 close=428.4，非桩值 111.0/222.0），删除无代码段脏键，657 = 501 + 156。
+  遗留（**已知，未修**）：`hk_klines` 单码上限 **520 根**（`years=3` 取回 320 根仍 ≤520，
+  实测 501 根亦未超），超出部分需分页或改用区间读取——等 H1/H2 落地时一并处理。
+- 测试：`test_ops` 新增 `MydbKeyFormCompatTest` 6 例（三段唯一命中/剥前缀/单段键不回退/
+  全候选失败上抛/`rd_keys` 惰性归一）；两处既有断言从「两段拼接」改为「三段下发」
+  （旧断言的期望本身就是错的，属实现与真实的偏差）。**Python 全量 454 全绿**。
+
+### 遗留事项处置记录
+- ✅ **港股读不出来**（ROADMAP H1/H2 的真正前置）：本版解决（三处同源 `QueryResult` 缺陷 + 键形态）。
+- ✅ **mydb 无删除能力**：实机确认 `rd.delete(table, *args)` 可用，已用于清理脏键。
+- ⏸️ **`hk_klines` 单码 520 根上限**：`years` 调大也拿不到更早历史（`years=3` 实取 320 根即停），
+  未修。需要时改「按区间读取 + 分页」或在 H2 迁仓库时以 `daily` 分区替代 mydb 承载。
+- ⏸️ **`/api/data/read` 全表列取 O(n) 次单键读**：657 键即 657 次 rd 往返（逐键持锁，
+  不阻塞其余 rd，但面板点一次要等）。MCP 侧 `query_mydb` 已有 `limit`/`cursor`；
+  HTTP 侧还没分页，未修。
+- ⏸️ **H1 港股自动同步 / H2 港股入仓库**：前置故障本版已清，功能本身未动（ROADMAP 保持未勾选）。
+
 ## [0.10.40] — 2026-09-13（遗留收口：上游资产指纹——同名 tag 重传可主动发现）
 
 > 清 PR/CHANGELOG 里登记的遗留事项。本版解决其中最要命的一条：

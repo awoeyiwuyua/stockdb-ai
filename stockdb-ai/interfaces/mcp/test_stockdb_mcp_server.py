@@ -872,7 +872,8 @@ class StockdbMcpServerTests(unittest.TestCase):
         self.assertEqual(
             outcome["result"]["value"], {"date": 20260813, "close": 12.5},
         )
-        fake_rd.get.assert_called_once_with("hk日k", "00700:20260813")
+        # 0.10.41：复合键按三段形态下发（两段拼接 "00700:20260813" 在引擎上恒空）
+        fake_rd.get.assert_called_once_with("hk日k", "00700", "20260813")
 
     @staticmethod
     def _fake_rd_600_keys() -> mock.Mock:
@@ -1568,9 +1569,10 @@ class StockdbMcpServerTests(unittest.TestCase):
         outcome = pybao_tools.query_mydb({"table": "hk日k"})
 
         self.assertTrue(outcome["ok"])
-        # lookup key 取首个冒号后的全部（00700:20250425），而非最后一段（20250425）
-        lookup_keys = [call.args[1] for call in fake_rd.get.call_args_list]
-        self.assertEqual(lookup_keys, ["00700:20250425"])
+        # 0.10.41：剥表名前缀后按**三段**下发（00400 代码段必须保留；两段拼接
+        # "00700:20250425" 在引擎上恒空——NAS 实机取证）
+        lookup_args = [call.args for call in fake_rd.get.call_args_list]
+        self.assertEqual(lookup_args, [("hk日k", "00700", "20250425")])
         self.assertEqual(
             outcome["result"]["values"]["hk日k:00700:20250425"], {"close": 12.5},
         )

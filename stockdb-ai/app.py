@@ -1102,22 +1102,47 @@ def hk_sync(codes: list[str], years: int = 2) -> dict:
     return results
 
 
-def hk_klines(code: str) -> list[dict]:
-    """读取 mydb hk日k: 表（升序）。value 内嵌 date，用 vals 全量读取。
-    0.8.10：rd 读取持锁 + 失败自愈。"""
+def hk_klines(code: str, dates: list[str] | None = None) -> list[dict]:
+    """读取 mydb hk日k: 表（升序）。value 内嵌 date。
+
+    0.8.10：rd 读取持锁 + 失败自愈。
+    0.10.41（NAS 实机定位）：原实现 `for v in rd.vals(...)` 恒空——`rd.vals` 返回的
+    QueryResult **迭代坏掉**（`__iter__` 走 `.keys()`，而它返回错误文案字符串
+    `'Missing required parameters'`，逐字符产出 `'M','i','s'...`，且每条 `_rd_to_py`
+    都失败 → 0 行）。这正是"港股数据写进去了却读不出来"的根因。
+    修法：① 优先 `_rd_to_py(rd.vals(...))`（内部 .do() 取回原生数据，兼容 dict/list）；
+      ② 若仍为空且给了 `dates`（交易日集合），退化为**逐日 `rd.get(table, code, date)`**
+      ——`get` 是实测唯一稳定的精确读法（引擎单键语义清晰，不受批量通道缺陷影响）。
+    """
     code = _normalize_hk_code(code)
+    rows: list[dict] = []
     with _rd_lock:
         try:
             rd = _mydb_rd()
-            vals = rd.vals(_HK_TABLE, code, "*") or []
+            raw = _rd_to_py(rd.vals(_HK_TABLE, code, "*"))
         except Exception:
             _mydb_rd_reset()
             raise
-    rows = []
-    for v in vals:
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = list(raw.values())
+    else:
+        items = []
+    for v in items:
         v = _rd_to_py(v)
         if isinstance(v, dict) and v.get("date"):
             rows.append(v)
+    if not rows and dates:
+        for d in dates:
+            try:
+                with _rd_lock:
+                    val = _rd_to_py(_mydb_rd().get(_HK_TABLE, code, str(d)))
+            except Exception:
+                _mydb_rd_reset()
+                continue
+            if isinstance(val, dict) and val.get("date"):
+                rows.append(val)
     rows.sort(key=lambda r: int(r["date"]))
     return rows
 
