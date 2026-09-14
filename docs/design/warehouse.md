@@ -115,6 +115,39 @@ tick 盘中流式到达（逐码追加写同一文件），按日文件会写放
   `v_week_current` / `v_month_current` 查询时从 v_daily 实时聚合
   （周期边界 = 本周一/本月1日 → current_date），历史周期固定落盘、当前周期滚动可见
 
+### 2.5 daily 镜像字段清单与「可空原因」台账（0.10.44 建档）
+
+> 起因：0.10.44 排查发现 `v_daily.pct_chg`/`amplitude` **整列恒 NULL**（09-08~09-14 实测
+> 5173 行全是空），而同两列在周/月聚合里正常有值——同一个字段名在两张表里两种状态，
+> 排查者第一反应必是"数据丢了"。根因不是引擎：**引擎单日 bar 实测带 21 键**（含
+> pct_chg/amplitude/turnover/vol_ratio/pb/pe_ttm/市值股本），是快照适配函数
+> `_point_snapshot_item` 用**手写清单**只挑走 11 键，其余字段在进入 sink 之前就被丢掉。
+> 本节把 daily 26 列的来源与可空原因一次性写清，避免同一件事被反复当故障排查。
+
+**daily 26 列的来源分三类**：
+
+| 类别 | 列 | 来源 |
+|---|---|---|
+| 引擎 bar 原生 | code/name/is_st/open/high/low/close/prev_close/volume/amount、turnover/pct_chg/amplitude/vol_ratio/pb/pe_ttm/total_share/float_share/total_mv/float_mv | 快照通道逐字段透传（0.10.44 起补全；此前末 10 列被适配层丢弃 → 恒 NULL） |
+| 任务层注入 | date（快照不带日期）、prev_close | 服务层：`date` 由任务注入；引擎键 `pre_close` 改名 `prev_close`（`warehouse_tasks._snapshot_points`） |
+| 本地物化 | adj_factor / open_fq / high_fq / low_fq / close_fq | 沉淀时按 `factor_map` 一次计算（0.10.10）；**引擎无此 5 键**（实测 0/20 非空）→ 因子通道未接时按「原价入库」设计留 NULL |
+
+**排查纪律（本节的用处）**：看到某列全 NULL，先按上表定位是哪一类——①「引擎 bar 原生」
+类若为空 = **bug**（适配层丢字段，0.10.44 修的正是这类）；②「本地物化」类为空 =
+**设计内**（因子/事件未就绪，不编值）。两类现象相同、性质相反，**别再用「引擎没给」当
+万能解释**——先实测引擎 bar 的键位清单（`.tmp-test/probe_engine_coverage.py` 一把梭）。
+
+**已决：不为 pct_chg/amplitude 重写历史**（0.10.44，用户拍板）——两列可从
+`(close - prev_close) / prev_close` 现场派生，且周/月聚合本就是这个口径；为两个
+「能算出来」的列去重写 200+ 个不可变分区，风险收益不成比例。**新数据从部署次日的
+沉淀起自动带上**，历史分区保持 NULL（facts 只增不改）。若将来真要全量补齐，走
+`backfill_daily_direct.py` 重灌（注意该脚本会因幂等跳过已有分区，须先删除分区文件，
+详见该脚本 docstring，切勿盲删）。
+
+**口径警告（写代码前必读）**：引擎 `pct_chg` **保留 2 位小数**（600000 = 1.51），本地
+公式给 1.51187905——**不要用本地公式"修正"引擎值**，否则日K/周月K/引擎三处口径不一致
+（CHANGELOG 0.10.7「读到什么写什么」，`_point_snapshot_item` docstring 已锁）。
+
 ### 2.3 复权：沉淀时物化，查询零计算（0.10.10 重构，取代查询时 ASOF）
 
 **旧设计（已废弃）**：`adjust` 独立 dataset + `v_daily_fq` 查询时 `ASOF LEFT JOIN`

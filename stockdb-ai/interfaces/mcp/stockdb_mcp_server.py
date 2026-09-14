@@ -1823,8 +1823,20 @@ def _bar_from_get(data: object) -> dict | None:
 
 
 def _point_snapshot_item(code: str, bar: dict) -> dict:
-    """TRADED 点的业务行：{code, name, status, open, prev_close, close, high, low,
-    volume, amount, is_st}。"""
+    """TRADED 点的业务行（引擎日K bar 原样透传，0.10.44 起补齐后 10 个字段）。
+
+    0.10.44 修复：本函数此前只挑 11 键（手写字段清单），而引擎单日 bar 实测带
+    **21 键**——漏掉的 turnover/pct_chg/amplitude/vol_ratio/pb/pe_ttm/市值与股本 6+4 键
+    在整个仓库链路上被静默丢弃：sink 把这 10 列建好了却永远写 NULL（实测 09-08~09-14
+    `v_daily.pct_chg`/`amplitude` 全 NULL，而同两列在周/月聚合里正常有值），根因就在此。
+    注意镜像语义（CHANGELOG 0.10.7「读到什么写什么」）：引擎值原样透传，**不得本地
+    重算**——引擎 `pct_chg` 保留 2 位小数（1.51），本地公式给 1.51187905，自算会让
+    日K 与引擎/周月K 三处口径不一致。
+
+    返回 {code, name, status, open, prev_close, close, high, low, volume, amount,
+    turnover, pct_chg, amplitude, vol_ratio, pb, pe_ttm, total_share, float_share,
+    total_mv, float_mv, is_st}。缺字段为 None（sink 侧落 NULL），不编值。
+    """
     return {
         "code": code,
         "name": bar.get("name") or "",
@@ -1836,6 +1848,17 @@ def _point_snapshot_item(code: str, bar: dict) -> dict:
         "low": bar.get("low"),
         "volume": bar.get("volume"),
         "amount": bar.get("amount"),
+        # 0.10.44：引擎 bar 本就提供的镜像字段（此前被手写清单丢掉）
+        "turnover": bar.get("turnover"),
+        "pct_chg": bar.get("pct_chg"),
+        "amplitude": bar.get("amplitude"),
+        "vol_ratio": bar.get("vol_ratio"),
+        "pb": bar.get("pb"),
+        "pe_ttm": bar.get("pe_ttm"),
+        "total_share": bar.get("total_share"),
+        "float_share": bar.get("float_share"),
+        "total_mv": bar.get("total_mv"),
+        "float_mv": bar.get("float_mv"),
         "is_st": bar.get("is_st"),
     }
 
@@ -1909,7 +1932,8 @@ def query_point_snapshot(args: dict) -> dict:
     TRADED 进 points；无 bar 按 universe 归属 / 时点是否已发布 分类为
     INVALID_SYMBOL / NOT_PUBLISHED / SUSPENDED（分类与失败进 errors，上限 100 条）。
     返回 {"source", "date", "points", "truncated", "coverage", "errors",
-    "known_limitations"}；envelope known_at = date。
+    "known_limitations"}；envelope known_at = date。points 每项为引擎日K bar 原样
+    透传（0.10.44：20 字段 + status，见 `_point_snapshot_item`）。
     """
     date = str(args.get("date") or "")
     if not date:
