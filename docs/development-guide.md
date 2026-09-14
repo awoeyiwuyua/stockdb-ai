@@ -77,3 +77,23 @@
 - **mkdtemp 目录不可写**：Python 3.14 Windows 对 `os.mkdir(0o700)`（tempfile.mkdtemp
   内部）施加受限 ACL——仅影响受限令牌环境；真实终端无此问题
 - **系统代理**：任何 python 网络请求默认走 127.0.0.1:7890（Clash），务必 `NO_PROXY`
+
+## 5. NAS 部署已知坑（2026-09-14 补记，均为实机踩过）
+
+- **工作区是 CRLF，仓库里是 LF**：本机 `core.autocrlf=true` → git 存 LF、工作区检出
+  CRLF。部署脚本按**字节**上传工作区文件，于是 NAS 上的 `.py` 是 CRLF 而 git 里是 LF
+  ——`sha256sum` 比对必然不等，**别据此判断"部署没生效"**（git 视角 `git status`
+  干净、`git diff` 为空，说明内容一致，差异纯粹是行尾）。运行时代码不受影响（Docker
+  `COPY` 逐行处理、CRLF 无副作用，已实证同版本两次构建产物不同 digest 但行为一致）；
+  若要求 NAS 源树与仓库**字节一致**，部署后按需重同步一次。
+  **判据**：`git status --short` 为空 = 内容一致；`sha256sum` 不等 = 行尾/权限差异。
+- **`sudo` 抢 stdin 会挂死**：`sudo -S -p ''` 从 stdin 读密码，**同一条 exec 里出现
+  第二个 sudo、或与其它读 stdin 的命令串联**，就会互相抢输入而卡到超时（实测把
+  SSH 通道卡满 120s）。规矩：**一次 exec 一个 sudo**；要装多个文件就写成脚本文件
+  `sftp.put` 上去再 `sudo -S -p '' sh /tmp/xxx.sh`（脚本从文件读，不与密码抢 stdin）。
+- **fnOS 卷丢执行位**：git clone / 解压到 `/vol1` 后 `entrypoint.sh`、`dev.sh` 可能失去
+  `+x`，重建容器即启动失败。同步一律用 `install -m <mode>` 显式带权限（不要 `cp`）。
+- **卷上 `find` / `docker system df` 很慢**：可能几十秒到分钟级，容易误判成"SSH 断了"；
+  查目录就指定深度、查镜像用 `docker images --format`，别用全盘扫描。
+- **compose 用精确 tag 而非 `:latest`**：改动后必须 `image:` 改到新 tag 再 build/up，
+  否则 `up -d` 会继续用旧镜像（0.10.44 起旧 tag 已清理，回滚需重新 build）。
