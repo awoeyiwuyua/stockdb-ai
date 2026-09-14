@@ -2062,6 +2062,45 @@ class StockdbMcpServerTests(unittest.TestCase):
     @mock.patch.object(server, "_latest_trade_date")
     @mock.patch.object(server, "query_stock_list")
     @mock.patch.object(server, "_http_get")
+    def test_point_snapshot_passes_through_engine_mirror_fields(
+            self, http_get, query_stock_list, latest):
+        """0.10.44：引擎 bar 的镜像字段必须原样透传（此前手写清单丢掉 10 个键）。
+
+        回归的是真实故障：`_point_snapshot_item` 只挑 11 键 → sink 的
+        turnover/pct_chg/amplitude/vol_ratio/pb/pe_ttm/市值股本 10 列永远 NULL
+        （实测 09-08~09-14 `v_daily.pct_chg`/`amplitude` 全空，周/月K 却有值）。
+        """
+        query_stock_list.return_value = {"total": 1, "codes": ["600001"]}
+        latest.return_value = "20260813"
+        # 键名用**引擎原生**形态（bar 里是 pre_close；prev_close 是通道侧的改名适配，
+        # 见 _point_snapshot_item 与 services/warehouse_tasks._snapshot_points）
+        http_get.return_value = {
+            "date": 20260813, "code": "600001", "open": 10.0, "close": 10.5,
+            "pre_close": 10.0, "high": 10.6, "low": 9.9, "volume": 1000.0,
+            "amount": 10000.0, "turnover": 0.23, "pct_chg": 1.51,
+            "amplitude": 2.05, "vol_ratio": 1.27, "pb": 0.42, "pe_ttm": 6.11,
+            "total_share": 3.3e10, "float_share": 3.3e10,
+            "total_mv": 3.1e11, "float_mv": 3.1e11, "is_st": False,
+        }
+
+        response = server.dispatch({
+            "jsonrpc": "2.0", "id": 331, "method": "tools/call",
+            "params": {"name": "get_point_snapshot", "arguments": {"date": "20260813"}},
+        })
+
+        point = json.loads(response["result"]["content"][0]["text"])["points"][0]
+        # 引擎值原样镜像：不得本地重算（引擎 pct_chg 只 2 位小数，自算给 1.51187905）
+        self.assertEqual(point["pct_chg"], 1.51)
+        self.assertEqual(point["amplitude"], 2.05)
+        for field in ("turnover", "vol_ratio", "pb", "pe_ttm",
+                      "total_share", "float_share", "total_mv", "float_mv"):
+            self.assertEqual(point[field], http_get.return_value[field], field)
+        # prev_close 是唯一的改名适配（引擎键 pre_close）
+        self.assertEqual(point["prev_close"], 10.0)
+
+    @mock.patch.object(server, "_latest_trade_date")
+    @mock.patch.object(server, "query_stock_list")
+    @mock.patch.object(server, "_http_get")
     def test_point_snapshot_invalid_symbol(self, http_get, query_stock_list, latest):
         query_stock_list.return_value = {"total": 1, "codes": ["600001"]}
         latest.return_value = "20260813"

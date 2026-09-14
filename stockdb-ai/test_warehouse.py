@@ -305,6 +305,47 @@ class WarehouseSinkTest(unittest.TestCase):
         self.assertEqual(got[0], ("000001", datetime.date(2026, 9, 8), False, None, None))
         self.assertEqual(got[1], ("600000", datetime.date(2026, 9, 8), True, 1.25, "浦发银行"))
 
+    def test_snapshot_channel_materializes_engine_mirror_fields(self):
+        """0.10.44：快照通道 20 字段 → 分区 26 列，pct_chg/amplitude 不再恒 NULL。
+
+        回归真实故障：`_point_snapshot_item` 手写清单只挑 11 键，sink 声明好的
+        turnover/pct_chg/amplitude/vol_ratio/pb/pe_ttm/市值股本 10 列永远写 NULL
+        （实测 09-08~09-14 `v_daily.pct_chg`/`amplitude` 全空）。
+        这里用**快照通道输出形态**（prev_close + 模拟 _snapshot_points 改名适配）
+        过一遍写盘，断言关键列真落到了 Parquet 里。
+        """
+        point = {
+            "code": "600000", "name": "浦发银行", "status": "TRADED", "is_st": False,
+            "open": 9.28, "high": 9.43, "low": 9.24, "close": 9.4, "prev_close": 9.26,
+            "volume": 77187100.0, "amount": 722310000.0,
+            # 0.10.44 新增透传的镜像字段（引擎 bar 原生携带）
+            "turnover": 0.23, "pct_chg": 1.51, "amplitude": 2.05, "vol_ratio": 1.27,
+            "pb": 0.42, "pe_ttm": 6.11,
+            "total_share": 33305838300.0, "float_share": 33305838300.0,
+            "total_mv": 313075000000.0, "float_mv": 313075000000.0,
+        }
+        # 与生产 services/warehouse_tasks._snapshot_points 同构的改名适配
+        engine_row = {**point, "pre_close": point["prev_close"]}
+
+        sentinel = {"status": "TRADED"}  # 非镜像键必须被 sink 忽略（列集由 sink 定）
+        result = sink.write_daily(self.root, "20260914", [{**engine_row, **sentinel}])
+        self.assertEqual(result["status"], "written")
+        self.assertEqual(result["rows"], 1)
+
+        con = duckdb.connect()
+        try:
+            path = layout.daily_partition(self.root, "20260914", "sh")
+            row = con.execute(
+                f"SELECT turnover, pct_chg, amplitude, vol_ratio, pb, pe_ttm, "
+                f"total_share, float_share, total_mv, float_mv, close, prev_close "
+                f"FROM read_parquet('{path.as_posix()}')"
+            ).fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row, (0.23, 1.51, 2.05, 1.27, 0.42, 6.11,
+                               33305838300.0, 33305838300.0,
+                               313075000000.0, 313075000000.0, 9.4, 9.26))
+
     def test_empty_write_advances_watermark_only(self):
         result = sink.write_daily(self.root, "20260826", [])
         self.assertEqual(result["status"], "empty")
