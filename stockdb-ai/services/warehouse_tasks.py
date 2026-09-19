@@ -4,9 +4,10 @@
 流程：就绪门（data_latest >= today）→ 全市场快照（TRADED 行 = 当日日K）→
 sink 写分区（factor_map 物化复权列）+ codes 刷新 → reconcile 对账（三板斧）→
 records 日检 + 告警。
-复权（0.10.10）：周一/首刷经 adjust_provider 注入因子事件 → _build_factor_map 展开为
-{code: cum} 缓存，沉淀时物化 adj_factor+fq 列（一次计算多次复用，查询零 JOIN）；
-事件不落 facts（内存输入，审计留档延后）。SDK 通道接入前 adjust_provider=None →
+复权（0.11.0 日期维度接线）：每沉淀日经 adjust_provider 拉全市场复权事件
+（{code,date,div,give,trans,mult,cum}，date=除权除息日、cum=累计因子）→
+按沉淀日取 ≤当日 的最新 cum 物化 adj_factor+fq 列（backfill 历史日期口径正确）；
+事件首次发现落 warehouse.duckdb adjust_events 审计表。未接通道/拉取失败 →
 物化列 NULL 原价，不阻塞沉淀。
 
 依赖纪律：不 import storage.warehouse（C3，层边界测试强制）——sink/reconcile/
@@ -14,6 +15,7 @@ availability 经注入点由 app.py（组合根）绑定；引擎快照/交易�
 """
 from __future__ import annotations
 
+import bisect
 import threading
 import time
 from datetime import datetime
@@ -25,6 +27,11 @@ from storage.records import append as _records_append
 
 # ---- 依赖注入点（app.py 装配时绑定；测试直接赋值，见 test_warehouse W4 段） ----
 query_snapshot = None   # interfaces.mcp.stockdb_mcp_server.query_point_snapshot
+adjust_provider = None  # (codes: list[str]) -> list[dict]（全市场复权事件摊平
+                        # {code,date,div,give,trans,mult,cum}；未接通道为 None
+                        # → 物化列 NULL 原价）
+record_adjust_events = None  # (root, events) -> int（adjust_events 审计表落盘；
+                             # storage.warehouse.catalog；仅首见事件插入）
 data_latest = None      # app.data_latest_date（最新已同步交易日探针）
 is_trading_day = None   # app.is_trading_day
 sink = None             # storage.warehouse.sink（模块；.catalog/.layout 为其子模块属性）
@@ -32,11 +39,7 @@ reconcile_daily = None  # storage.warehouse.reconcile.reconcile_daily
 warehouse_root = None   # () -> Path（storage.warehouse.layout.root_dir）
 availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
-backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：warehouse.duckdb 日级备份）
-adjust_provider = None  # () -> list[dict]（复权因子事件序列：{code,date,div,give,trans,mult,cum}；
-                        # 未接 SDK 通道前为 None → 物化列 NULL 原价，延后项）
-# 周度复权事件刷新：周一沉淀日顺带全量（事件小、全量幂等）
-_ADJUST_WEEKDAYS = {0}
+backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：日级备份）
 
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
 _wh_run_state: dict = {"running": False, "started": None, "finished": None, "result": None}
@@ -46,30 +49,55 @@ _RETRY_UNTIL = "20:00"  # 超过此时刻放弃当日沉淀（告警收口）
 _GAP_WINDOW_TRADING_DAYS = 5  # 缺口守卫回看窗口（交易日数）；有界防全史扫描
 _gap_alerted: dict = {}  # {date: True}——引擎侧也无数据的洞，同日告警去重
 
-# 0.10.10：每日累计因子缓存 {code: cum}（周度/首刷刷新；沉淀物化复用，一次计算）
-_factor_map_cache: dict[str, float] = {}
+# 0.11.0：复权事件按自然日缓存——全市场 ~5.5k 码逐码读引擎（分钟级），
+# 同日内的补沉淀/缺口回填直接复用；codes 超出已缓存集合时全量重拉。
+_adj_cache: dict = {"day": None, "codes": set(), "series": {}}
 
 
 def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _build_factor_map(events: list[dict]) -> dict[str, float]:
-    """复权事件序列 → {code: 截至当日最新累计因子 cum}（0.10.10 物化输入）。
+def _build_factor_series(events: list[dict]) -> dict[str, list[tuple[int, float]]]:
+    """复权事件摊平列表 → {code: [(date_int, cum), ...] 按日期升序}（0.11.0 日期维度）。
 
-    引擎事件按码返回（div/give/trans/mult/cum 每次分红/送转一条，cum 为累计因子）；
-    事件未带 date 时以注入的刷新日为准。缺码/非有限值 → 不进入 map（物化列 NULL 原价）。
+    事件 date = 除权除息日（该日起 cum 生效）；沉淀日取 ≤当日 的最后一条 cum。
+    date 非法 / cum 非有限值 / 缺码 的条目跳过（物化列 NULL 原价）。
+    同日多事件按原顺序稳定排序——bisect_right 取末条 = 当日最后写入的 cum。
     """
-    out: dict[str, float] = {}
+    series: dict[str, list[tuple[int, float]]] = {}
     for ev in events or []:
         code = str(ev.get("code") or "").strip()
-        cum = ev.get("cum")
+        date = str(ev.get("date") or "").strip()
         try:
-            cum = float(cum)
+            cum = float(ev.get("cum"))
         except (TypeError, ValueError):
             continue
-        if code and cum is not None and cum == cum and abs(cum) != float("inf"):
-            out[code] = cum
+        if not code or len(date) != 8 or not date.isdigit():
+            continue
+        if cum != cum or cum in (float("inf"), float("-inf")):
+            continue
+        series.setdefault(code, []).append((int(date), cum))
+    for pts in series.values():
+        pts.sort()
+    return series
+
+
+def _factor_map_at(series: dict[str, list[tuple[int, float]]],
+                   date8: str) -> dict[str, float]:
+    """事件序列 → {code: 沉淀日当日有效累计因子}（≤date 的最后一条事件 cum）。
+
+    修复 0.10.10 隐患：backfill 历史日期不再拿到"今天的因子"。
+    """
+    try:
+        d = int(date8)
+    except (TypeError, ValueError):
+        return {}
+    out: dict[str, float] = {}
+    for code, pts in series.items():
+        i = bisect.bisect_right(pts, (d, float("inf")))
+        if i:
+            out[code] = pts[i - 1][1]
     return out
 
 
@@ -146,21 +174,26 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     break  # 只补 watermark 之后的缺口，不重复沉淀
                 targets.append(target)
                 target = _prev_date(target)
-        # 周度/首刷复权刷新（周一 or 缓存空）：事件经 adjust_provider 注入，
-        # 展开为 factor_map（0.10.10：内存输入，不占 facts；审计留档延后）
-        global _factor_map_cache
-        try:
-            if (datetime.now().weekday() in _ADJUST_WEEKDAYS or not _factor_map_cache):
-                adjust_rows = _adjust_rows(latest)
-                if adjust_rows:
-                    _factor_map_cache = _build_factor_map(adjust_rows)
-        except Exception as exc:  # noqa: BLE001 - 复权刷新失败不阻塞日K沉淀
-            log(f"⚠️ 仓库复权刷新失败（不阻塞日K）：{exc}")
+        # 0.11.0：预取各目标日快照（原先沉淀循环内逐日拉取；提前以合并因子代码集）
+        day_points: dict[str, list[dict]] = {}
+        for t in sorted(targets):
+            day_points[t] = [p for p in _snapshot_points(t)
+                             if isinstance(p, dict) and p.get("status") == "TRADED"]
 
-        # 每日沉淀：factor_map 物化复权列（一次计算多次复用；事件未就绪 → 原价 NULL）
+        # 复权事件刷新（0.11.0：每沉淀日拉取，按沉淀日取 ≤当日 的 cum 物化；
+        # 未接通道/拉取失败 → 物化列 NULL 原价，不阻塞沉淀）
+        codes = sorted({str(p.get("code") or "") for pts in day_points.values()
+                        for p in pts} - {""})
+        events, series = _adjust_events(codes)
+        if events and record_adjust_events is not None:
+            try:
+                record_adjust_events(root, events)
+            except Exception as exc:  # noqa: BLE001 - 审计落盘失败不阻塞沉淀
+                log(f"⚠️ 复权事件审计落盘失败（不影响沉淀）: {exc}")
+
+        # 每日沉淀：按沉淀日构建 factor_map（backfill 历史日期口径正确）
         for t in sorted(targets):  # 旧 → 新（缺口感知语义下 targets 已升序，幂等保序）
-            points = [p for p in _snapshot_points(t)
-                      if isinstance(p, dict) and p.get("status") == "TRADED"]
+            points = day_points[t]
             if not points:
                 # 空交易日标记（catalog）：缺口感知回填据此跳过，节假日不再反复重探
                 try:
@@ -169,7 +202,8 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     pass
                 results.append({"date": t, "status": "empty"})
                 continue
-            w = sink.write_daily(root, t, points, factor_map=_factor_map_cache)
+            w = sink.write_daily(root, t, points,
+                                 factor_map=_factor_map_at(series, t) if series else None)
             sink.write_codes(root, [{"code": p.get("code"), "name": p.get("name")}
                                     for p in points])
             rec = reconcile_daily(root, t, points,
@@ -322,11 +356,32 @@ def _aggregate_months(root, results) -> None:
             sink.aggregate_monthly(root, month_end)
 
 
-def _adjust_rows(latest: str) -> list[dict]:
-    """复权因子事件序列（经注入的 adjust_provider；None → 未接通道，物化列 NULL 原价）。"""
-    if adjust_provider is None:
-        return []
-    return adjust_provider() or []
+def _adjust_events(codes: list[str]) -> tuple[list[dict], dict]:
+    """全市场复权事件拉取（经注入的 adjust_provider；None/失败 → 空表，物化列 NULL 原价）。
+
+    返回 (events, series)：events 为本轮新拉取的摊平事件（供审计落盘；当日缓存
+    命中时为空列表），series 为 {code: [(date, cum)]} 事件序列（0.11.0 日期维度）。
+    每自然日只全量拉一轮（~5.5k 码逐码读引擎，分钟级）；codes 超出当日已缓存
+    集合时全量重拉并合并。拉取失败不缓存（下次运行重试），绝不阻塞沉淀。
+    """
+    if adjust_provider is None or not codes:
+        return [], {}
+    today = datetime.now().strftime("%Y%m%d")
+    have: set = _adj_cache.get("codes") or set()
+    if _adj_cache.get("day") == today:
+        if set(codes) <= have:
+            return [], _adj_cache.get("series") or {}
+        codes = sorted(have | set(codes))
+    try:
+        events = adjust_provider(codes) or []
+    except Exception as exc:  # noqa: BLE001 - 复权拉取失败不阻塞日K沉淀
+        log(f"⚠️ 仓库复权事件拉取失败（本日物化列回退 NULL 原价）: {exc}")
+        return [], {}
+    series = _build_factor_series(events)
+    _adj_cache.update(day=today, codes=set(codes), series=series)
+    log(f"📊 复权事件刷新：{len(codes)} 码 / {len(events)} 事件 / "
+        f"{len(series)} 码含事件")
+    return events, series
 
 
 def maybe_catchup_sediment() -> bool:
@@ -496,7 +551,7 @@ def warehouse_status() -> dict:
     if available and root is not None and sink is not None:
         try:
             out["watermark_daily"] = sink.catalog.get_watermark(root, "daily")
-            out["factor_map_size"] = len(_factor_map_cache)  # 0.10.10：复权物化缓存规模
+            out["factor_map_size"] = len(_adj_cache.get("series") or {})  # 0.11.0：当日因子序列覆盖码数
         except Exception as exc:  # noqa: BLE001 - 状态查询不抛
             out["catalog_error"] = str(exc)
     return out

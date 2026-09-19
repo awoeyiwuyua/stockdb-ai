@@ -896,7 +896,7 @@ class WarehouseTasksTest(unittest.TestCase):
                        ("query_snapshot", "data_latest", "is_trading_day", "sink",
                         "reconcile_daily", "warehouse_root", "availability",
                         "refresh_views", "backup_duckdb", "adjust_provider",
-                        "_get_alerts", "notify_alert")}
+                        "record_adjust_events", "_get_alerts", "notify_alert")}
         wt.query_snapshot = lambda q: {"points": _traded_points()}
         wt.data_latest = lambda force=False: "20260822"
         wt.is_trading_day = lambda d: True
@@ -906,8 +906,9 @@ class WarehouseTasksTest(unittest.TestCase):
         wt.availability = lambda: (True, "ok")
         wt.refresh_views = lambda: None
         wt.backup_duckdb = lambda root, force=False: None  # 0.10.8：隔离备份副作用
-        wt.adjust_provider = None
-        # 0.10.45：告警单例/投递打桩（记录式，防真实落盘）；守卫模块态复位
+        wt.adjust_provider = None  # 0.11.0：(codes) -> events；未接线默认 NULL 物化
+        wt.record_adjust_events = None
+        # 0.11.0：告警单例/投递打桩（记录式，防真实落盘）；守卫模块态复位
         self._fake_alerts = self._FakeAlerts()
         self._alert_added: list = []
         wt._get_alerts = lambda: self._fake_alerts
@@ -915,6 +916,8 @@ class WarehouseTasksTest(unittest.TestCase):
                            self._alert_added.append((level, source, message)))
         self._saved_gap_alerted = dict(wt._gap_alerted)
         wt._gap_alerted = {}
+        self._saved_adj_cache = dict(wt._adj_cache)
+        wt._adj_cache.update(day=None, codes=set(), series={})
         # 日检/告警/日志落 tmp（防写到默认 /data）
         self._cm = mock.patch.multiple(config, DATA_DIR=self.root)
         self._cm.start()
@@ -943,6 +946,7 @@ class WarehouseTasksTest(unittest.TestCase):
         for k, v in self._saved.items():
             setattr(self.wt, k, v)
         self.wt._gap_alerted = self._saved_gap_alerted
+        self.wt._adj_cache = self._saved_adj_cache
         self._tmp.cleanup()
 
     def test_sediment_run_writes_reconciles_and_records(self):
@@ -1244,6 +1248,136 @@ class WarehouseTasksTest(unittest.TestCase):
         res2 = self.wt.maybe_backfill_gaps()
         self.assertEqual(res2["holes"], [])
         self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+
+    # ---- 0.11.0 复权因子通道（日期维度接线；v_daily 复权 5 列从 NULL 变可用） ----
+
+    def test_factor_series_and_per_day_maps(self):
+        """事件序列按沉淀日取 ≤当日 的最新 cum（bisect 语义）。"""
+        events = [
+            {"code": "600000", "date": "20260101", "cum": 1.5},
+            {"code": "600000", "date": "20260701", "cum": 2.0},
+            {"code": "000001", "date": "20260315", "cum": 3.0},
+        ]
+        s = self.wt._build_factor_series(events)
+        self.assertEqual(self.wt._factor_map_at(s, "20251231"), {})
+        self.assertEqual(self.wt._factor_map_at(s, "20260201"), {"600000": 1.5})
+        self.assertEqual(self.wt._factor_map_at(s, "20260501"),
+                         {"600000": 1.5, "000001": 3.0})
+        self.assertEqual(self.wt._factor_map_at(s, "20260701"),
+                         {"600000": 2.0, "000001": 3.0})
+        self.assertEqual(self.wt._factor_map_at(s, "20261231"),
+                         {"600000": 2.0, "000001": 3.0})
+
+    def test_factor_series_skips_bad_events(self):
+        """date 非法 / cum 非数 / 缺码 的条目跳过（不进序列，物化 NULL）。"""
+        events = [
+            {"code": "600000", "date": "20260101", "cum": 1.5},
+            {"code": "600000", "date": "bad", "cum": 9.9},
+            {"code": "600000", "date": "20260201", "cum": "x"},
+            {"code": "", "date": "20260201", "cum": 9.9},
+            {"code": "600000", "date": "20260201", "cum": float("inf")},
+        ]
+        s = self.wt._build_factor_series(events)
+        self.assertEqual(s, {"600000": [(20260101, 1.5)]})
+
+    def test_sediment_uses_dated_factors(self):
+        """主链路：当日沉淀取最新因子；backfill 历史日期取 ≤当日 的因子
+        （修复 0.10.10 口径失真——backfill 曾拿"今天的因子"）。"""
+        import duckdb
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self.wt.adjust_provider = lambda codes: [
+            {"code": "600000", "date": "20260101", "cum": 1.5},
+            {"code": "600000", "date": "20260822", "cum": 2.5},
+        ]  # 000001 无事件 → 复权列 NULL
+        # 当日沉淀：0822 → 因子 2.5
+        res = self.wt.warehouse_run(days=1)
+        self.assertTrue(res["ok"], res)
+        con = duckdb.connect()
+        try:
+            sh = layout.daily_partition(self.root, "20260822", "sh")
+            sz = layout.daily_partition(self.root, "20260822", "sz")
+            row_sh = con.execute(
+                f"SELECT code, adj_factor, close_fq FROM read_parquet('{sh.as_posix()}') "
+                f"WHERE code='600000'").fetchone()
+            row_sz = con.execute(
+                f"SELECT code, adj_factor, close_fq FROM read_parquet('{sz.as_posix()}') "
+                f"WHERE code='000001'").fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row_sh, ("600000", 2.5, 10.2 * 2.5))
+        self.assertEqual(row_sz, ("000001", None, None))  # 无事件 → 复权列 NULL
+        # 缺口回填：0821（无分区）→ 因子取 ≤0821 的 1.5，而非最新 2.5
+        res2 = self.wt.warehouse_run(days=2, backfill=True)
+        self.assertTrue(res2["ok"], res2)
+        dates = [d["date"] for d in res2["days"]]
+        self.assertIn("20260821", dates)
+        con = duckdb.connect()
+        try:
+            path = layout.daily_partition(self.root, "20260821", "sh")
+            row2 = con.execute(
+                f"SELECT adj_factor FROM read_parquet('{path.as_posix()}') "
+                f"WHERE code='600000'").fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row2, (1.5,))
+
+    def test_adjust_events_audit_recorded_and_deduped(self):
+        """事件首见落 adjust_events（PK code+date 去重，source_ts=发现时间）。"""
+        import duckdb
+        from storage.warehouse import catalog as wh_catalog
+        self.wt.record_adjust_events = wh_catalog.record_adjust_events
+        self.wt.adjust_provider = lambda codes: [
+            {"code": "600000", "date": "20260716", "cum": 13.35}]
+        self.wt.warehouse_run(days=1)
+        con = duckdb.connect(str(layout.duckdb_path(self.root)))
+        try:
+            rows = con.execute(
+                "SELECT code, date, cum FROM adjust_events").fetchall()
+        finally:
+            con.close()
+        self.assertEqual(rows, [("600000", "20260716", 13.35)])
+        # 同事件重复刷新 → 首见语义不重复插入
+        self.assertEqual(self.wt.record_adjust_events(
+            self.root, [{"code": "600000", "date": "20260716", "cum": 13.35}]), 0)
+
+    def test_provider_failure_degrades_to_null(self):
+        """provider 抛异常 → 沉淀继续、复权列 NULL（不阻塞日K）。"""
+        import duckdb
+
+        def _boom(codes):
+            raise RuntimeError("engine down")
+
+        self.wt.adjust_provider = _boom
+        res = self.wt.warehouse_run(days=1)
+        self.assertTrue(res["ok"], res)
+        con = duckdb.connect()
+        try:
+            path = layout.daily_partition(self.root, "20260822", "sh")
+            row = con.execute(
+                f"SELECT adj_factor FROM read_parquet('{path.as_posix()}') "
+                f"WHERE code='600000'").fetchone()
+        finally:
+            con.close()
+        self.assertEqual(row, (None,))
+
+    def test_adjust_events_same_day_cache_reuse(self):
+        """同日第二次运行不再触发 provider（自然日缓存）；codes 超集才重拉。"""
+        calls = {"n": 0}
+
+        def _provider(codes):
+            calls["n"] += 1
+            return [{"code": c, "date": "20260716", "cum": 13.35} for c in codes]
+
+        self.wt.adjust_provider = _provider
+        self.wt.warehouse_run(days=1)
+        first = calls["n"]
+        self.wt.warehouse_run(days=1)  # 幂等空跑：无目标日 → 不触发
+        self.assertEqual(calls["n"], first)
+        # 新目标日（缺口回填）且 codes ⊆ 已缓存 → 仍不重拉
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        res = self.wt.warehouse_run(days=2, backfill=True)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(calls["n"], first)
 
 
 class EngineGateConvergenceTest(unittest.TestCase):

@@ -719,6 +719,33 @@ def query_adjust_factors(code: str, date_pattern: str) -> object:
     return rows
 
 
+def collect_adjust_events(codes: list[str]) -> list[dict]:
+    """全市场复权事件摊平（warehouse adjust_provider 注入用，0.11.0）。
+
+    逐码读引擎 复权:<code>:*（query_adjust_factors，TTL 300s/码），摊平为
+    {code, date, div, give, trans, mult, cum}——date=除权除息日、cum=累计因子。
+    单码失败跳过（引擎抖动不阻塞沉淀；缺口经 adjust_events 审计表可见）。
+    量级：~5.5k 码 × 引擎单连接串行，全量一轮分钟级——调用方按自然日缓存。
+    """
+    events: list[dict] = []
+    for code in codes or []:
+        try:
+            rows = query_adjust_factors(str(code), "*")
+        except Exception:  # noqa: BLE001 - 单码失败跳过，不阻塞整轮
+            continue
+        for r in rows or []:
+            if not isinstance(r, dict):
+                continue
+            date = str(r.get("date") or "").strip()
+            if len(date) != 8 or not date.isdigit():
+                continue
+            events.append({"code": str(code), "date": date,
+                           "div": r.get("div"), "give": r.get("give"),
+                           "trans": r.get("trans"), "mult": r.get("mult"),
+                           "cum": r.get("cum")})
+    return events
+
+
 def _latest_trade_date() -> str | None:
     """探针最新交易日：当前月与前 2 个月的 YYYYMM 前缀逐个 _http_get("get", "日k:000001:<YYYYMM>*")，
     取全部行最大 date（int→str 8 位）；全空返回 None。结果 TTL 缓存 300s（key "latest_date"）。
