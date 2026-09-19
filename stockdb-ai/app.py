@@ -176,6 +176,13 @@ def append_history(entry: dict) -> None:
         log(f"  ⚠️ 同步历史写入失败: {exc}")
 
 
+def _timeline_today():
+    """时间线窗口起点（真实今天）。独立函数供测试冻结窗口——固定日期播种的
+    时间线用例会随真实时间推移滑出 7 交易日窗口（2026-09-19 实证：0904 播种
+    09-14 尚在窗内、09-19 起恒红），与 _monotonic 同属可 patch 时钟缝。"""
+    return datetime.now().date()
+
+
 def load_timeline(days: int = 7) -> list[dict]:
     """驾驶舱时间线载荷（W1 批 2，docs/design/webui-cockpit-redesign.md §2.3）。
 
@@ -197,7 +204,7 @@ def load_timeline(days: int = 7) -> list[dict]:
 
     # 交易日序列：今天往回收集 days 个交易日（日历不可用时退化为跳过周末）
     probes: list = []
-    probe = datetime.now().date()
+    probe = _timeline_today()
     guard = 0
     while len(probes) < days and guard < days * 5 + 14:
         guard += 1

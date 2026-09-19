@@ -19,7 +19,7 @@ import time
 from datetime import datetime
 
 import config
-from ops.alerts import notify_alert
+from ops.alerts import notify_alert, _get_alerts
 from ops.logging import log
 from storage.records import append as _records_append
 
@@ -43,6 +43,8 @@ _wh_run_state: dict = {"running": False, "started": None, "finished": None, "res
 _RETRY_INTERVAL = 600  # 未就绪/失败重试间隔（10 分钟）
 _BACKFILL_FLOOR = "20000101"  # 回填下界（引擎日K实测起点 2000 年）
 _RETRY_UNTIL = "20:00"  # 超过此时刻放弃当日沉淀（告警收口）
+_GAP_WINDOW_TRADING_DAYS = 5  # 缺口守卫回看窗口（交易日数）；有界防全史扫描
+_gap_alerted: dict = {}  # {date: True}——引擎侧也无数据的洞，同日告警去重
 
 # 0.10.10：每日累计因子缓存 {code: cum}（周度/首刷刷新；沉淀物化复用，一次计算）
 _factor_map_cache: dict[str, float] = {}
@@ -364,6 +366,104 @@ def maybe_catchup_sediment() -> bool:
         return False
 
 
+def maybe_backfill_gaps() -> dict:
+    """缺口自愈守卫（0.10.45）：调度沉淀成功收尾后调用，回看水位线以下近期窗口。
+
+    背景（0915 实证）：调度沉淀 days=1 只写最新日——上游晚发跨过 20:00 收口、
+    数据 T+1 追平后，水位线越过中间日 → 永久空洞（面板全绿：health 只看
+    watermark/lag；周K被完整性校验卡住；run_sql 跨洞查询静默漏行）。
+    晚到钩子同样 days=1 且只在 watermark < latest 时触发，对此盲区。
+
+    语义：
+    - 有界窗口：自水位线（含，正常必有分区）向下数 _GAP_WINDOW_TRADING_DAYS 个
+      交易日，只做 .exists()/标记查询——绝不在无洞时触发全史扫描（backfill 的
+      days 参数在"洞数<days"时会扫到 _BACKFILL_FLOOR，fnOS 卷上是分钟级 stat 风暴）；
+    - 洞 = 无分区且无 empty: 标记的交易日（已标记日语义由人工处置，见 0908）；
+    - 引擎侧探测（快照 limit=0，与沉淀通道同源）：有 TRADED 点才回填——避免为
+      引擎也缺的日子写错 empty 标记（上游追平后标记会挡住回填，0908 教训）；
+      无数据则投 warn 告警待次日再探，绝不写标记；
+    - 回填同步执行（days=len(可回填洞)，扫描自水位线向下在最新洞处停住；单洞
+      实测 ~2s），完成后对账 ok 即 resolve 告警——告警是条件式投影（洞存在才挂）；
+    - 幂等：已有分区/已标记日不计洞；异常绝不外抛（调度线程调用）。
+    返回 {"ok", "holes", "filled", "engine_missing", "triggered", "error"}（测试用）。
+    """
+    out = {"ok": False, "holes": [], "filled": [], "engine_missing": [],
+           "triggered": False, "error": None}
+    try:
+        if availability is None or not availability()[0]:
+            return out
+        if sink is None or warehouse_root is None:
+            return out
+        if query_snapshot is None:  # 快照通道未装配：无探测手段，退化为人工巡检
+            return out
+        root = warehouse_root()
+        watermark = (sink.catalog.get_watermark(root, "daily")
+                     if hasattr(sink, "catalog") else None)
+        if not watermark:
+            return out  # 尚无沉淀（首刷前）→ 无"缺口"概念
+        holes = []
+        cursor = watermark
+        checked = 0
+        while checked < _GAP_WINDOW_TRADING_DAYS and cursor >= _BACKFILL_FLOOR:
+            if is_trading_day is None or is_trading_day(
+                    datetime.strptime(cursor, "%Y%m%d").date()):
+                checked += 1
+                has_file = any(sink.layout.daily_partition(root, cursor, m).exists()
+                               for m in ("sh", "sz", "bj"))
+                marked_empty = sink.catalog.get_meta(root, f"empty:{cursor}") is not None
+                if not has_file and not marked_empty:
+                    holes.append(cursor)
+            cursor = _prev_date(cursor)
+        out["holes"] = holes
+        if not holes:
+            out["ok"] = True
+            _get_alerts().resolve("仓库", "缺口自愈：")  # 洞已消（含人工补）→ 撤旧警
+            return out
+        # 自新向旧逐洞探测；首个引擎缺数据的洞之后的洞本轮不可达
+        # （backfill 扫描自水位线向下、会停在未填洞上），留待后续轮次。
+        fillable = []
+        blocked = False
+        for d in holes:
+            points = (query_snapshot({"date": d, "limit": 0}) or {}).get("points") or []
+            traded = [p for p in points
+                      if isinstance(p, dict) and p.get("status") == "TRADED"]
+            if traded:
+                if not blocked:
+                    fillable.append(d)
+            else:
+                blocked = True
+                out["engine_missing"].append(d)
+                if not _gap_alerted.get(d):
+                    _gap_alerted[d] = True
+                    notify_alert("warn", "仓库",
+                                 f"缺口自愈：{d} 缺仓库分区且引擎侧也无数据"
+                                 f"（疑上游未发布）；待追平后自动回补")
+        res = None
+        if fillable:
+            res = warehouse_run(days=len(fillable), backfill=True)
+            out["triggered"] = bool(res.get("ok"))
+            for day in (res.get("days") or []):
+                if day.get("write", {}).get("status") == "written":
+                    out["filled"].append(day["date"])
+                    _gap_alerted.pop(day["date"], None)
+            if out["filled"]:
+                log(f"📊 缺口守卫回填完成：{out['filled']}（探测洞 {holes}）")
+        # 条件式告警（洞存在才挂、全清即撤）：回填未完成的洞与引擎缺数据的洞
+        failed = [d for d in fillable if d not in out["filled"]]
+        if failed:
+            notify_alert("warn", "仓库",
+                         f"缺口自愈：{','.join(failed)} 缺仓库分区且回填未完成"
+                         f"（{(res or {}).get('reason') or '对账未通过'}），请人工核查")
+        if not out["engine_missing"] and not failed:
+            _get_alerts().resolve("仓库", "缺口自愈：")
+        out["ok"] = True
+        return out
+    except Exception as exc:  # noqa: BLE001 - 守卫绝不外抛（调度线程调用）
+        out["error"] = str(exc)
+        log(f"⚠️ 缺口守卫异常（已忽略）: {exc}")
+        return out
+
+
 def warehouse_run_async(days: int = 1, reconcile_sample: int = 10,
                         backfill: bool = False) -> dict:
     """异步触发沉淀（HTTP 运维口用；单飞防重，状态进 _wh_run_state）。"""
@@ -431,6 +531,9 @@ def warehouse_scheduler_loop() -> None:
                         w = days[-1].get("write", {}) if days else {}
                         log(f"📊 仓库沉淀完成（{today}）: rows={w.get('rows')} "
                             f"markets={w.get('markets')} reconcile={days[-1].get('reconcile', {}).get('ok') if days else None}")
+                        # 0.10.45 缺口守卫：水位线之下近期窗口如有中间日空洞
+                        # （上游晚发 T+1 追平所致），确认引擎有数据后自动回填。
+                        maybe_backfill_gaps()
                     elif str(res.get("reason") or "").startswith("未就绪："):
                         # 就绪门未过：数据同步未收口 → 延后重试
                         guard["attempts"] += 1

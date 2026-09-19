@@ -97,3 +97,12 @@
   查目录就指定深度、查镜像用 `docker images --format`，别用全盘扫描。
 - **compose 用精确 tag 而非 `:latest`**：改动后必须 `image:` 改到新 tag 再 build/up，
   否则 `up -d` 会继续用旧镜像（0.10.44 起旧 tag 已清理，回滚需重新 build）。
+- **`.env` CRLF 污染 shell 侧 token → webui POST body 静默丢失**（2026-09-19 实测）：
+  `/vol1/stockdb/.env` 曾是 CRLF 行尾，shell 里 `cut` 取出的 `WEBUI_TOKEN` 尾部带
+  `\r`；把它放进 `X-StockDB-Token` 请求头后，头值里的裸 `\r` 被服务器当成行结束，
+  **其后的 Content-Type / Content-Length 头全部丢失** → `_read_json` 读到 length=0
+  返回 `{}` → **所有 POST body 参数静默变默认值**（实测 `backfill:true` 被吞成
+  False，三次"成功"的仓库回填实际秒完成零目标；GET 接口与 `/mcp`（不带 token 头）
+  完全正常，极具迷惑性）。**判别**：`POST /api/auction/run {"task":"bogus"}` 回显
+  `非法 task ''` = body 丢失，`非法 task 'bogus'` = 正常。**预防**：读 token 后一律
+  `tr -d "\r\n"`；`.env` 已转 LF（备份 `.env.bak-crlf-20260919`）。
