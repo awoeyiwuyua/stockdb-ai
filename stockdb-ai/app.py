@@ -2762,19 +2762,28 @@ def _wire_warehouse_tasks() -> None:
     注入点负责运行时降级（镜像无 musllinux wheel 场景不拖垮 webui 启动）。
     """
     try:
-        from interfaces.mcp.stockdb_mcp_server import query_point_snapshot as _wh_snapshot
+        from interfaces.mcp.stockdb_mcp_server import (
+            collect_adjust_events as _wh_adjust_events,
+            query_point_snapshot as _wh_snapshot,
+        )
     except Exception:  # noqa: BLE001 - MCP 缺失时沉淀任务整体降级
         _wh_snapshot = None
+        _wh_adjust_events = None
     _warehouse_tasks.query_snapshot = _wh_snapshot
+    # 0.11.0：复权因子通道接线（0.10.10 埋点，组合根唯一缺绑定的注入点）——
+    # 全市场复权事件经引擎 HTTP 通道（复权:<code>:* 表）进入仓库物化。
+    _warehouse_tasks.adjust_provider = _wh_adjust_events
     _warehouse_tasks.data_latest = data_latest_date
     _warehouse_tasks.is_trading_day = is_trading_day
     try:
         from storage import warehouse as _wh_pkg
         from storage.warehouse import backup as _wh_backup
+        from storage.warehouse import catalog as _wh_catalog
         from storage.warehouse import layout as _wh_layout
         from storage.warehouse import reconcile as _wh_reconcile
         from storage.warehouse import sink as _wh_sink
         _warehouse_tasks.sink = _wh_sink
+        _warehouse_tasks.record_adjust_events = _wh_catalog.record_adjust_events  # 0.11.0 审计
         _warehouse_tasks.reconcile_daily = _wh_reconcile.reconcile_daily
         _warehouse_tasks.warehouse_root = _wh_layout.root_dir
         _warehouse_tasks.availability = _wh_pkg.availability

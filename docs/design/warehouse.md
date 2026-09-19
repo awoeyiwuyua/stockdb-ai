@@ -169,11 +169,17 @@ v_daily_fq = v_daily 直接读物化列——零 JOIN、零计算、多查询复
   只增不改全部继承；不再是独立 dataset
 - **只增不改不破坏**：因子事件只追加（新分红追加新事件，历史 cum 不变）→ 物化列
   历史值永不变；reconcile 增加"复权列回读"校验
-- **事件源是内存输入，不占 facts**：引擎事件经 adjust_provider 注入 →
-  `_build_factor_map` 展开为 {code: cum} 缓存（周度/首刷刷新），物化后即弃；
-  审计留档延后（如需可写 warehouse.duckdb 内表，低频量小）
-- **依赖顺序**：daily 物化依赖 factor_map 就绪（周一/首刷先行）；未就绪时
-  物化列 NULL（原价），事件到位后下次沉淀补齐该日——补写窗口内旧分区重写
+- **事件源与审计（0.11.0）**：引擎事件经 adjust_provider(codes) 注入（逐码读
+  `复权:<code>:*`，引擎 HTTP 通道，单码失败跳过），摊平为
+  {code,date,div,give,trans,mult,cum}——date=除权除息日，cum=累计因子（后复权方向）；
+  **首见事件落 warehouse.duckdb adjust_events 审计表**（PK code+date，
+  source_ts=发现时间，run_sql 可查），物化后内存即弃
+- **日期维度（0.11.0）**：`_build_factor_series` 构建事件序列（按日期升序），
+  沉淀日取 ≤当日 的最后一条 cum（bisect）——backfill 历史日期不再拿到
+  "今天的因子"（修复 0.10.10 口径失真隐患）；缺码/未接通道 → 物化列 NULL（原价）
+- **刷新节奏（0.11.0）**：每沉淀日全量拉取（自然日缓存，同日补沉淀/缺口回填
+  复用；codes 超集时重拉）——弃用 0.10.10 的"仅周一"（周中除权滞后 ≤4 交易日）；
+  量级 ~5.5k 码 × 引擎单连接，全量一轮分钟级，当日沉淀窗口内完成
   （见 §3 不变量修订）
 - **week/month/year 聚合物化时同带复权列**：聚合产物 = 一次计算、带全信息
 
@@ -228,8 +234,8 @@ v_daily_fq = v_daily 直接读物化列——零 JOIN、零计算、多查询复
 - 调度：第四条线程，交易日 `WAREHOUSE_SEDIMENT_TIME`（默认 16:40，config 可覆盖）触发；
   就绪门 `data_latest(force=True) >= 今日`（与打板收口同判定），未就绪 10 分钟重试至 20:00 告警收口
 - 拉取：全市场快照 `query_point_snapshot(limit=0)` 一次往返（SDK 批量快路径），TRADED 行 = 当日日K
-- 写入：sink 分区 + codes 刷新 + watermark 推进；复权快照周一（或首次）全量——依赖
-  adjust_provider 注入（引擎键空间无批量端点，SDK 通道接入前为 None → 跳过，延后项）
+- 写入：sink 分区 + codes 刷新 + watermark 推进；复权事件每沉淀日拉取（0.11.0 接线，
+  adjust_provider(codes) 逐码读 `复权:<code>:*`，自然日缓存；失败降级 NULL 不阻塞）
 - 纪律：try/except 降级 + log + notify_alert + records.append（trace_id 贯穿）
 - 手动通道：`POST /api/warehouse/run {"days":1-5}`（小范围测试拉取，幂等补缺口）；
   `GET /api/warehouse/status`（watermark/守卫/任务状态）
@@ -279,7 +285,8 @@ DEPENDENCY_UNAVAILABLE（hint：uv sync / musllinux 无 wheel 属预期）；超
 ## 9. 延后项（ROADMAP 收敛清单登记）
 
 历史回填（用户 2026-08-22 延后；分区按年，将来补历史只是加目录）；分钟K/基本面/龙虎榜数据集
-（dataset 维度已预留）；hk日k 迁仓库（mydb 届时只剩自定义表）；adjust_provider SDK 通道。
+（dataset 维度已预留）；hk日k 迁仓库（mydb 届时只剩自定义表）。~~adjust_provider SDK 通道~~
+（0.11.0 已接线：引擎 HTTP 通道逐码读 `复权:<code>:*`，日期维度物化 + adjust_events 审计）。
 
 ## 10. 发版门（0.10.0 打版前全部通过）
 

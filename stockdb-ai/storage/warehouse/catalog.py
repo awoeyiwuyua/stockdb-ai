@@ -19,6 +19,22 @@ CREATE TABLE IF NOT EXISTS meta (
 )
 """
 
+# 0.11.0：复权事件审计（warehouse_run 刷新时仅插入首见事件；source_ts=发现时间）。
+# 主键 (code, date)——引擎侧同日多事件以末条 cum 为准，审计表记录首次发现的那条。
+_ADJUST_EVENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS adjust_events (
+    code TEXT NOT NULL,
+    date TEXT NOT NULL,
+    div DOUBLE,
+    give DOUBLE,
+    trans DOUBLE,
+    mult DOUBLE,
+    cum DOUBLE,
+    source_ts TEXT NOT NULL,
+    PRIMARY KEY (code, date)
+)
+"""
+
 
 def _connect(root: Path):
     import duckdb
@@ -27,7 +43,50 @@ def _connect(root: Path):
     root.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(layout.duckdb_path(root)))
     con.execute(_SCHEMA)
+    con.execute(_ADJUST_EVENTS_SCHEMA)
     return con
+
+
+def record_adjust_events(root: Path, events: list[dict]) -> int:
+    """复权事件审计落盘（0.11.0）：仅插入首见的 (code, date)，返回新增条数。
+
+    审计语义 = 事件首次发现时间（source_ts）；重复刷新不覆盖已有行。
+    量级：首轮 ~14 万行（全市场上市以来事件），此后每日增量数条——
+    executemany 批量导入，秒级。
+    """
+    from datetime import datetime
+
+    con = _connect(root)
+    try:
+        existing = {r[0] for r in
+                    con.execute("SELECT code || ':' || date FROM adjust_events").fetchall()}
+        ts = datetime.now().isoformat(timespec="seconds")
+
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        rows = []
+        for ev in events or []:
+            code = str(ev.get("code") or "").strip()
+            date = str(ev.get("date") or "").strip()
+            if not code or len(date) != 8 or not date.isdigit():
+                continue
+            if f"{code}:{date}" in existing:
+                continue
+            rows.append((code, date, _num(ev.get("div")), _num(ev.get("give")),
+                         _num(ev.get("trans")), _num(ev.get("mult")),
+                         _num(ev.get("cum")), ts))
+        if rows:
+            con.executemany(
+                "INSERT INTO adjust_events "
+                "(code, date, div, give, trans, mult, cum, source_ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        return len(rows)
+    finally:
+        con.close()
 
 
 def get_meta(root: Path, key: str, default=None):
