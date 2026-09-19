@@ -392,6 +392,15 @@ class TimelineTests(_OpsTestCase):
     patch 到临时目录，不触碰真实数据卷。
     """
 
+    def setUp(self):
+        super().setUp()
+        # 冻结窗口起点：播种日期 20260904 恒在 7 交易日窗内
+        # （否则随真实时间推移滑出窗口——2026-09-19 起该类恒红的日期腐化）
+        self._today = mock.patch.object(
+            app, "_timeline_today", lambda: datetime.datetime(2026, 9, 4).date())
+        self._today.start()
+        self.addCleanup(self._today.stop)
+
     def test_load_timeline_aggregates_four_sources(self):
         d = Path(self.tmp)
         # 沉淀记录：collect 干扰项 + 两条 warehouse_sediment（断言末条为准）
@@ -1808,6 +1817,11 @@ class TimelineExtrasTest(_OpsTestCase):
 
     def setUp(self):
         super().setUp()
+        # 冻结窗口起点到播种区间末（0907/0908/0909/0911 恒在 7 交易日窗内）
+        self._today = mock.patch.object(
+            app, "_timeline_today", lambda: datetime.datetime(2026, 9, 11).date())
+        self._today.start()
+        self.addCleanup(self._today.stop)
         # HISTORY_FILE 是 import 期常量，DATA_DIR patch 盖不住它 → 必须显式指向临时目录
         # （否则读到仓库真实 data/ 的历史，用例互相串扰且与真机数据耦合）
         self._hist = mock.patch.object(app, "HISTORY_FILE", Path(self.tmp) / "sync_history.json")

@@ -895,7 +895,8 @@ class WarehouseTasksTest(unittest.TestCase):
         self._saved = {k: getattr(wt, k) for k in
                        ("query_snapshot", "data_latest", "is_trading_day", "sink",
                         "reconcile_daily", "warehouse_root", "availability",
-                        "refresh_views", "backup_duckdb", "adjust_provider")}
+                        "refresh_views", "backup_duckdb", "adjust_provider",
+                        "_get_alerts", "notify_alert")}
         wt.query_snapshot = lambda q: {"points": _traded_points()}
         wt.data_latest = lambda force=False: "20260822"
         wt.is_trading_day = lambda d: True
@@ -906,14 +907,43 @@ class WarehouseTasksTest(unittest.TestCase):
         wt.refresh_views = lambda: None
         wt.backup_duckdb = lambda root, force=False: None  # 0.10.8：隔离备份副作用
         wt.adjust_provider = None
+        # 0.10.45：告警单例/投递打桩（记录式，防真实落盘）；守卫模块态复位
+        self._fake_alerts = self._FakeAlerts()
+        self._alert_added: list = []
+        wt._get_alerts = lambda: self._fake_alerts
+        wt.notify_alert = (lambda level, source, message:
+                           self._alert_added.append((level, source, message)))
+        self._saved_gap_alerted = dict(wt._gap_alerted)
+        wt._gap_alerted = {}
         # 日检/告警/日志落 tmp（防写到默认 /data）
         self._cm = mock.patch.multiple(config, DATA_DIR=self.root)
         self._cm.start()
+
+    class _FakeAlerts:
+        """告警单例替身：resolve 记录（add 走 notify_alert 桩）。"""
+
+        def __init__(self):
+            self.resolved: list = []
+
+        def resolve(self, source, prefix):
+            self.resolved.append((source, prefix))
+            return 1
+
+    def _fill_days(self, dates):
+        """铺指定日期分区（单只样本行；日期 yyyymmdd 串）——窗口测试底座。"""
+        for d in dates:
+            self.wt.sink.write_daily(self.root, d, [{
+                "code": "600000", "name": "样本", "is_st": False,
+                "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5,
+                "prev_close": 9.8, "volume": 1000.0, "amount": 10000.0,
+            }])
 
     def tearDown(self):
         self._cm.stop()
         for k, v in self._saved.items():
             setattr(self.wt, k, v)
+        self.wt._gap_alerted = self._saved_gap_alerted
+        self._tmp.cleanup()
 
     def test_sediment_run_writes_reconciles_and_records(self):
         res = self.wt.warehouse_run(days=1)
@@ -1098,6 +1128,122 @@ class WarehouseTasksTest(unittest.TestCase):
         self.wt.backup_duckdb = lambda root, force=False: (_ for _ in ()).throw(RuntimeError("boom"))
         res2 = self.wt.warehouse_run(days=1)
         self.assertTrue(res2["ok"])
+
+    # ---- 0.10.45 缺口自愈守卫（0915 场景回归：水位线越过中间日成永久洞） ----
+
+    def test_gap_guard_fills_hole_below_watermark(self):
+        """主链路（0915 复刻）：洞在水位线下、引擎有数据 → 同步回填对账、
+        水位线不回退、条件恢复撤警。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        # 2026-08：0817 周一~0821 周五、0822 周六。铺 0817~0820 + 水位线 0822，
+        # 0821 留洞（= 上游晚发 T+1 追平、调度 days=1 越过中间日后的形态）。
+        self._fill_days(["20260817", "20260818", "20260819", "20260820"])
+        self._fill_days(["20260822"])
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "daily"), "20260822")
+        res = self.wt.maybe_backfill_gaps()
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["holes"], ["20260821"])
+        self.assertTrue(res["triggered"], res)
+        self.assertEqual(res["filled"], ["20260821"])
+        self.assertTrue(layout.daily_partition(self.root, "20260821", "sh").exists())
+        self.assertTrue(layout.daily_partition(self.root, "20260821", "sz").exists())
+        # 水位线不回退
+        self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "daily"), "20260822")
+        # 回填落盘对账通过 → 条件恢复 → 撤警（前缀匹配）
+        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+
+    def test_gap_guard_no_holes_no_probe(self):
+        """无洞：零引擎往返（有界性），撤旧警，无回填。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self._fill_days(["20260817", "20260818", "20260819", "20260820", "20260821"])
+        self._fill_days(["20260822"])
+        probes: list = []
+        self.wt.query_snapshot = lambda q: probes.append(q) or {"points": []}
+        res = self.wt.maybe_backfill_gaps()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["holes"], [])
+        self.assertEqual(len(probes), 0)  # 无洞 → 零引擎往返
+        self.assertFalse(res["triggered"])
+        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+
+    def test_gap_guard_engine_missing_waits_without_mark(self):
+        """引擎侧也无数据：不回填、不写 empty 标记（0908 教训——标记会挡住
+        追平后的回填）、同日告警去重、引擎追平后自动回填。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self._fill_days(["20260817", "20260818", "20260819", "20260820"])
+        self._fill_days(["20260822"])
+        self.wt.query_snapshot = lambda q: {"points": []}
+        res = self.wt.maybe_backfill_gaps()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["holes"], ["20260821"])
+        self.assertFalse(res["triggered"])
+        self.assertEqual(res["engine_missing"], ["20260821"])
+        self.assertFalse(layout.daily_partition(self.root, "20260821", "sh").exists())
+        self.assertIsNone(self.wt.sink.catalog.get_meta(self.root, "empty:20260821"))
+        self.assertEqual(len(self._alert_added), 1)
+        self.assertEqual(self._alert_added[0][0], "warn")
+        self.assertIn("20260821", self._alert_added[0][2])
+        # 同日第二轮：洞还在但不重复告警
+        res2 = self.wt.maybe_backfill_gaps()
+        self.assertEqual(len(self._alert_added), 1)
+        # 引擎追平 → 下一轮守卫自动回填
+        self.wt.query_snapshot = lambda q: {"points": _traded_points()}
+        res3 = self.wt.maybe_backfill_gaps()
+        self.assertEqual(res3["filled"], ["20260821"])
+        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+
+    def test_gap_guard_window_bounded(self):
+        """窗口有界：洞多于窗口只报窗口内 _GAP_WINDOW_TRADING_DAYS 个，
+        引擎探测次数 = 洞数（绝不向下扫到回填下界）。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self._fill_days(["20260822"])  # 只有水位线日，下方全空
+        probes: list = []
+        self.wt.query_snapshot = lambda q: probes.append(q) or {"points": []}
+        res = self.wt.maybe_backfill_gaps()
+        self.assertEqual(len(res["holes"]), self.wt._GAP_WINDOW_TRADING_DAYS)
+        self.assertEqual(len(probes), self.wt._GAP_WINDOW_TRADING_DAYS)
+        self.assertFalse(res["triggered"])  # 引擎全缺 → 不回填
+        self.assertEqual(len(self._alert_added), self.wt._GAP_WINDOW_TRADING_DAYS)
+
+    def test_gap_guard_ignores_marks_and_non_trading(self):
+        """已标记 empty 的日与非交易日不计洞（标记语义归人工处置）。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self._fill_days(["20260818", "20260819", "20260820", "20260821"])
+        self._fill_days(["20260822"])
+        self.wt.sink.catalog.set_meta(self.root, "empty:20260817", 1)
+        res = self.wt.maybe_backfill_gaps()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["holes"], [])
+        self.assertFalse(res["triggered"])
+
+    def test_gap_guard_backfill_incomplete_alerts(self):
+        """探测有数据但写入时落空（引擎数据恰好消失）→ warn 告警、不误撤警；
+        空交易日分支的 empty 标记使次轮守卫不再视其为洞。"""
+        self.wt.is_trading_day = lambda d: d.weekday() < 5
+        self._fill_days(["20260817", "20260818", "20260819", "20260820"])
+        self._fill_days(["20260822"])
+        calls = {"n": 0}
+
+        def _qs(q):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"points": _traded_points()}       # 探测：有数据
+            return {"points": [_traded_points()[2]]}      # 沉淀：只剩停牌 → 空
+
+        self.wt.query_snapshot = _qs
+        res = self.wt.maybe_backfill_gaps()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["holes"], ["20260821"])
+        self.assertTrue(res["triggered"])
+        self.assertEqual(res["filled"], [])               # 写入空 → 未完成
+        self.assertEqual(len(self._alert_added), 1)
+        self.assertIn("回填未完成", self._alert_added[0][2])
+        self.assertNotIn(("仓库", "缺口自愈："),
+                         self._fake_alerts.resolved)      # 条件未恢复不撤警
+        # backfill 空交易日分支写了 empty 标记 → 次轮守卫不再视其为洞 → 撤警
+        res2 = self.wt.maybe_backfill_gaps()
+        self.assertEqual(res2["holes"], [])
+        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
 
 
 class EngineGateConvergenceTest(unittest.TestCase):
