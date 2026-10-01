@@ -2709,3 +2709,250 @@ class WarehouseRunToolTests(unittest.TestCase):
         self.assertTrue(res["result"]["isError"])
         payload = json.loads(res["result"]["content"][0]["text"])
         self.assertEqual(payload["code"], "DEPENDENCY_UNAVAILABLE")
+
+
+class _WarehouseDailySourceTests(unittest.TestCase):
+    """0.11.2 慢路径取数源：仓库 Parquet 优先、引擎逐码回退（NAS 实测 68.9s → 秒级）。
+
+    关键不变量——**换源不得改语义**：两条路径必须产出同构 snapshot 与 metadata
+    （信封的 coverage/formal_usable/partial_reasons 是下游与用户都依赖的判据）。
+    """
+
+    CODES = ["600000", "300750"]
+
+    @staticmethod
+    def _engine_rows():
+        """引擎返回形态（date=int、pre_close、is_st 布尔）——两码 × 两日。
+
+        刻意给两日：装配侧的 `prev_close` 历史追踪分支（普通日取上一实际成交日
+        收盘）只有第二日起才生效，单日样本掩盖该分支。
+        第二日的 pre_close 刻意与真实前收不同，用于验证"历史追踪优先于 pre_close"。
+        """
+        return {
+            "600000": [
+                {"date": 20260105, "open": 9.04, "high": 9.06, "low": 8.91,
+                 "close": 9.01, "pre_close": 9.07, "amount": 593490000.0,
+                 "is_st": False, "code": "600000"},
+                {"date": 20260106, "open": 9.10, "high": 9.20, "low": 9.00,
+                 "close": 9.15, "pre_close": 1.23, "amount": 480800000.0,
+                 "is_st": False, "code": "600000"},
+            ],
+            "300750": [
+                {"date": 20260105, "open": 200.0, "high": 205.0, "low": 198.0,
+                 "close": 203.0, "pre_close": 201.0, "amount": 650000000.0,
+                 "is_st": False, "code": "300750"},
+                {"date": 20260106, "open": 204.0, "high": 206.0, "low": 202.0,
+                 "close": 205.0, "pre_close": 4.56, "amount": 660000000.0,
+                 "is_st": False, "code": "300750"},
+            ],
+        }
+
+    def _engine_result(self):
+        rows = self._engine_rows()
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", None):
+            return server.query_fullmarket_daily_snapshot(
+                "20260105", "20260106", workers=1)
+
+    def _warehouse_result(self, present=None):
+        """仓库读取器替身：行键形与 read_fullmarket_daily 一致（pre_close / is_st 串）。"""
+        rows = self._engine_rows()
+        code_rows = []
+        for code in self.CODES:
+            if present is not None and code not in present:
+                continue
+            code_rows.append((code, [{
+                "date": str(r["date"]),
+                "open": r["open"], "high": r["high"], "low": r["low"],
+                "close": r["close"], "pre_close": r["pre_close"],
+                "volume": 1.0, "amount": r["amount"],
+                "is_st": "1" if r["is_st"] else "0",
+                "adj_factor": None, "name": "样本",
+            } for r in rows[code]]))
+        reader = mock.Mock(return_value={
+            "code_rows": code_rows,
+            "codes_present": {code for code, _ in code_rows},
+            "watermark": "20260106", "row_count": sum(len(r) for _, r in code_rows),
+        })
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            result = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260106", workers=1)
+        return result, reader
+
+    @staticmethod
+    def _canon(snapshot):
+        """snapshot → 可比较的规范形态（bar 字段逐项固定顺序）。"""
+        out = {}
+        for date_str, bars in snapshot.items():
+            out[date_str] = sorted(
+                (b.code, b.close, b.high, b.low, b.amount, b.prev_close, b.open, b.is_st)
+                for b in bars
+            )
+        return out
+
+    def test_full_market_codes_list_still_uses_warehouse(self):
+        """0.11.2 部署期实测缺陷回归：**慢路径自己把 universe 展开成 codes 传进来**，
+        故"全市场"判据必须是"请求集 == universe"，而不是 `codes is None`。
+        首版用 `codes is None` → 恰好把要修的调用拦在门外（接线成功却仍逐码 70s）。
+        """
+        rows = self._engine_rows()
+        (snap, meta), reader = self._warehouse_result()
+        reader.assert_called_once()
+        self.assertEqual(meta["data_source"], "warehouse")
+
+    def test_universe_equal_codes_are_eligible(self):
+        """显式传入与 universe 完全相同的码列表 → 等同全市场请求，走仓库。"""
+        reader = mock.Mock(return_value={
+            "code_rows": [("600000", [{"date": "20260105", "open": 9.0, "high": 9.1,
+                                       "low": 8.9, "close": 9.0, "pre_close": 9.0,
+                                       "volume": 1.0, "amount": 1.0, "is_st": "0",
+                                       "adj_factor": None, "name": "x"}])],
+            "codes_present": {"600000"}, "watermark": "20260105", "row_count": 1,
+        })
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            _, meta = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260105", codes=list(self.CODES), workers=1)
+        reader.assert_called_once()
+        self.assertEqual(meta["data_source"], "warehouse")
+
+    def test_subset_codes_never_use_warehouse(self):
+        """真·子集请求（调试小样本）→ 不走仓库。"""
+        rows = self._engine_rows()
+        reader = mock.Mock()
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            _, meta = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260105", codes=["600000"], workers=1)
+        reader.assert_not_called()
+        self.assertEqual(meta["data_source"], "engine")
+
+    def test_warehouse_rows_equal_engine_rows(self):
+        """等价性铁证：同一批日K，两源产出的 snapshot 与 metadata 必须同构。"""
+        eng_snap, eng_meta = self._engine_result()
+        (wh_snap, wh_meta), reader = self._warehouse_result()
+        reader.assert_called_once()
+        # 只比对语义与信封，data_source 是两源唯一允许的差异（溯源字段）
+        self.assertEqual(self._canon(wh_snap), self._canon(eng_snap))
+        self.assertEqual(wh_meta["data_source"], "warehouse")
+        self.assertEqual(eng_meta["data_source"], "engine")
+        for key in ("universe_count", "requested_code_count", "fetched_code_count",
+                    "empty_code_count", "failed_code_count", "raw_row_count",
+                    "scope_is_partial", "coverage_is_complete", "candidate_coverage",
+                    "partial_reasons", "formal_usable", "is_partial"):
+            self.assertEqual(wh_meta[key], eng_meta[key], "信封字段分歧：%s" % key)
+
+    def test_warehouse_used_only_for_fullmarket_default_request(self):
+        """显式 codes / limit 是调试小样本 → 不走仓库（引擎按需取更省）。"""
+        rows = self._engine_rows()
+        reader = mock.Mock()
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            server.query_fullmarket_daily_snapshot(
+                "20260105", "20260105", codes=["600000"], workers=1)
+        reader.assert_not_called()
+
+    def test_incomplete_warehouse_coverage_fetches_only_gap_codes(self):
+        """仓库缺码（停牌无成交，NAS 实测 5196/5200）→ **只让引擎补缺口码**，
+        而不是整段退回（首版即栽在"全码子集"守卫上：白跑 70s 全量 HTTP）。
+
+        同时**不得**把回退记成 failed（会把信封染成 SOURCE_REQUEST_FAILED / 假降级）。
+        """
+        rows = self._engine_rows()
+        fetched = []
+        reader = mock.Mock(return_value={
+            "code_rows": [("600000", [{
+                "date": "20260105", "open": 9.04, "high": 9.06, "low": 8.91,
+                "close": 9.01, "pre_close": 9.07, "volume": 1.0,
+                "amount": 593490000.0, "is_st": "0", "adj_factor": None, "name": "x",
+            }, {
+                "date": "20260106", "open": 9.10, "high": 9.20, "low": 9.00,
+                "close": 9.15, "pre_close": 1.23, "volume": 1.0,
+                "amount": 480800000.0, "is_st": "0", "adj_factor": None, "name": "x",
+            }])],
+            "codes_present": {"600000"},
+            "watermark": "20260106", "row_count": 2,
+        })
+
+        def fake_kline(code, *_):
+            fetched.append(code)
+            return rows[code]
+
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline", side_effect=fake_kline), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            snap, meta = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260106", workers=1)
+
+        reader.assert_called_once()
+        self.assertEqual(fetched, ["300750"])          # 只拉缺口码，不是全量
+        self.assertEqual(meta["data_source"], "warehouse+engine")
+        self.assertEqual(meta["warehouse_codes"], 1)
+        self.assertEqual(meta["warehouse_gap_codes"], 1)
+        self.assertEqual(meta["failed_code_count"], 0)
+        self.assertNotIn("SOURCE_REQUEST_FAILED", meta["partial_reasons"])
+        self.assertEqual(meta["requested_code_count"], 2)   # 口径未被缺口集污染
+        self.assertEqual(len(snap["2026-01-05"]), 2)        # 两码数据都在
+
+    def test_large_warehouse_gap_falls_back_to_full_engine(self):
+        """缺口过大（>1%/50 码，如区间早于仓库覆盖）→ 整段退回引擎，不逐码补。"""
+        rows = self._engine_rows()
+        # 仓库只覆盖 1/2 码之外的模拟：把 requested 放大到 200 码，仓库只给 1 码
+        codes = ["600%03d" % i for i in range(1, 201)]
+        engine_rows = {c: [{"date": 20260105, "open": 1.0, "high": 1.1, "low": 0.9,
+                            "close": 1.0, "pre_close": 1.0, "amount": 1.0,
+                            "is_st": False, "code": c}] for c in codes}
+        reader = mock.Mock(return_value={
+            "code_rows": [(codes[0], [{"date": "20260105", "open": 1.0, "high": 1.1,
+                                       "low": 0.9, "close": 1.0, "pre_close": 1.0,
+                                       "volume": 1.0, "amount": 1.0, "is_st": "0",
+                                       "adj_factor": None, "name": "x"}])],
+            "codes_present": {codes[0]}, "watermark": "20260105", "row_count": 1,
+        })
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 200, "codes": codes}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: engine_rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            snap, meta = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260105", workers=1)
+        # 缺口 199 码 > 上限 → 走纯引擎（fetch 循环收到全部 requested_codes）
+        self.assertEqual(meta["data_source"], "engine")
+        self.assertEqual(meta["fetched_code_count"], 200)
+        self.assertEqual(len(snap["2026-01-05"]), 200)
+
+    def test_reader_exception_falls_back_to_engine(self):
+        """仓库读取抛异常 → 静默退回引擎（可用性不变）。"""
+        rows = self._engine_rows()
+        reader = mock.Mock(side_effect=RuntimeError("duckdb boom"))
+        with mock.patch.object(server, "query_stock_list",
+                               return_value={"total": 2, "codes": list(self.CODES)}), \
+             mock.patch.object(server, "query_daily_kline",
+                               side_effect=lambda code, *_: rows[code]), \
+             mock.patch.object(server, "warehouse_daily_reader", reader):
+            snap, meta = server.query_fullmarket_daily_snapshot(
+                "20260105", "20260105", workers=1)
+        self.assertEqual(meta["data_source"], "engine")
+        self.assertEqual(meta["failed_code_count"], 0)
+        self.assertEqual(len(snap["2026-01-05"]), 2)
+
+    def test_not_wired_keeps_legacy_behaviour(self):
+        """未接线（独立进程/无组合根）→ 行为与旧版完全一致，不触碰仓库。"""
+        _, meta = self._engine_result()
+        self.assertEqual(meta["data_source"], "engine")
+        self.assertTrue(meta["formal_usable"])

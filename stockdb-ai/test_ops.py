@@ -2294,17 +2294,20 @@ class _StaticServingTests(_OpsTestCase):
 
 
 class _DiagTests(_OpsTestCase):
-    """Phase 5.1 /api/diag：一键诊断聚合（五检查 + 环境块，单块降级不 500）。"""
+    """Phase 5.1 /api/diag：一键诊断聚合（七检查 + 环境块，单块降级不 500）。
+    0.11.1：新增 warehouse_db（WAL 收口可见性——长期不收口曾完全不可见）。
+    0.12.0：新增 hk_sync（港股同步新鲜度——手动通道时代陈化在面板上不可见）。"""
 
     def test_diag_structure(self):
-        """五项检查齐全 + env 关键字段 + all_ok 汇总。"""
+        """七项检查齐全 + env 关键字段 + all_ok 汇总。"""
         with mock.patch.object(app, "fetch_upstream_release", return_value=None):
             status, _, body = _do_get("/api/diag")
         self.assertEqual(status, 200)
         payload = json.loads(body.decode())
         names = [c["name"] for c in payload["checks"]]
         self.assertEqual(names, ["upstream_github", "stockdb_service",
-                                 "pybao", "disk", "calendar"])
+                                 "pybao", "disk", "warehouse_db", "hk_sync",
+                                 "calendar"])
         for c in payload["checks"]:
             self.assertIn("label", c)
             self.assertIn("ok", c)
@@ -2313,6 +2316,66 @@ class _DiagTests(_OpsTestCase):
         for key in ("python", "arch", "webui_version", "ui_mode", "data_latest", "uptime_seconds"):
             self.assertIn(key, payload["env"])
         self.assertEqual(payload["env"]["webui_version"], app.WEBUI_VERSION)
+
+    def test_diag_hk_sync_never_red(self):
+        """港股同步检查**恒 ok=True**（只读观测项）：滞后/无记录记 degraded + note，
+        绝不把 diag 整体打红——沿 0.10.38"降级不计入 ok"纪律。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            status, _, body = _do_get("/api/diag")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode())
+        hk = next(c for c in payload["checks"] if c["name"] == "hk_sync")
+        self.assertTrue(hk["ok"])
+        self.assertIn("degraded", hk)
+        self.assertIsInstance(hk["note"], str)
+        self.assertTrue(hk["note"])
+
+    def test_diag_hk_sync_probe_actually_runs(self):
+        """0.12.0 回归：港股观测项必须**真的取到状态**并给出清单事实。
+
+        实测教训（0.11.1 warehouse_db 首版同款盲区）：探针写错属性/路径时
+        AttributeError 被本块 except 吞成"状态不可用"，静默降级成假绿。
+        故锁两点：无异常摘要（探针跑通）+ note 带清单代码（取到配置事实）。
+        """
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            status, _, body = _do_get("/api/diag")
+        payload = json.loads(body.decode())
+        hk = next(c for c in payload["checks"] if c["name"] == "hk_sync")
+        self.assertNotIn("观测项异常", hk["note"])  # 探针真跑通，不是异常降级
+        self.assertNotIn("状态不可用", hk["note"])
+        self.assertIn("00700", hk["note"])  # 默认清单含首批标的
+        self.assertIn("调度", hk["note"])
+
+    def test_diag_warehouse_db_never_red(self):
+        """仓库库文件检查**恒 ok=True**（只读观测项）：WAL 未收口记 degraded + note，
+        绝不把 diag 整体打红——沿 0.10.38"降级不计入 ok"纪律。"""
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            status, _, body = _do_get("/api/diag")
+        self.assertEqual(status, 200)
+        payload = json.loads(body.decode())
+        wh = next(c for c in payload["checks"] if c["name"] == "warehouse_db")
+        self.assertTrue(wh["ok"])
+        self.assertIn("degraded", wh)
+        self.assertIsInstance(wh["note"], str)
+        self.assertTrue(wh["note"])
+
+    def test_diag_warehouse_db_probe_actually_runs(self):
+        """0.11.1 回归：观测项必须**真的取到仓库根**并给出文件事实。
+
+        实测缺陷（NAS 0.11.1 首版）：handlers 写成 `app.WAREHOUSE_DIR`，而 app.py 并未
+        把该常量暴露为模块属性 → AttributeError 被本块 except 吞成"状态不可用"，
+        **静默降级成假绿**。故此处既锁"探针跑通"（无异常摘要），也锁"路径与布局同源"
+        （config.WAREHOUSE_DIR 指向的库文件存在时，note 必须带 mtime）。
+        """
+        with mock.patch.object(app, "fetch_upstream_release", return_value=None):
+            status, _, body = _do_get("/api/diag")
+        payload = json.loads(body.decode())
+        wh = next(c for c in payload["checks"] if c["name"] == "warehouse_db")
+        self.assertNotIn("观测项异常", wh["note"])  # 探针真跑通，不是异常降级
+        from storage.warehouse import layout
+        if layout.duckdb_path(config.WAREHOUSE_DIR).exists():
+            self.assertIn("mtime", wh["note"])
+            self.assertIn("WAL", wh["note"])
 
     def test_diag_upstream_degraded(self):
         """上游不可达 → 该检查标记 degraded 但 **ok=True**（网络受限不是系统不健康，

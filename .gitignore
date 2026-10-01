@@ -23,3 +23,23 @@ webui/static/assets/
 webui/static/index.html
 
 .tmp-ssh/
+
+# 飞牛 NAS SSH 密钥（含临时生成键）——绝不可入仓库
+nas_key
+nas_key.pub
+k_b
+k_b.pub
+
+# NAS SSH 一次性调试/生成脚本（含硬编码密码/本机路径）及本地 paramiko 拷贝——不入仓库
+.pparamiko/
+.debug_pub.py
+.diag2.py
+.diag3.py
+.diag_ssh.py
+.finalize.py
+.keygen.py
+.keygen_nas.py
+.ssh_keysetup.py
+.ssh_keysetup2.py
+.verify_key.py
+nas_ssh.py

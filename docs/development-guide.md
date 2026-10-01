@@ -106,3 +106,18 @@
   完全正常，极具迷惑性）。**判别**：`POST /api/auction/run {"task":"bogus"}` 回显
   `非法 task ''` = body 丢失，`非法 task 'bogus'` = 正常。**预防**：读 token 后一律
   `tr -d "\r\n"`；`.env` 已转 LF（备份 `.env.bak-crlf-20260919`）。
+- **DuckDB / SQLite 的 WAL 是数据库的一部分，不是日志**（2026-09-30 实测）：
+  `warehouse.duckdb` 的 `wal_autocheckpoint` 默认 **16 MiB**，而仓库日增量仅 ~0.1 MB
+  → 自动 checkpoint 日常**从不触发**，唯一时机是引擎干净关闭；实测主库文件 mtime
+  曾冻结在 09-23、此后 7 天写入全积在 `.wal`（749 KB）。**后果**：任何"只拷
+  `.duckdb`"的裸恢复/取证/演练会**静默退到上一次 checkpoint**（本次巡检即踩到：
+  读副本得 `watermark:daily=20260923`，实连读才是 `20260930`——差点误判成
+  "水位线停止推进"，而面板全绿）。**规矩**：
+  ① 裸拷一律 `.duckdb` + `.wal`（+ `-shm`）**成对**，单拷主库等于回到过去；
+  ② 离线读取副本时若发现水位/计数"停在某天"，先怀疑 WAL 未收口，**别当成业务故障**
+  （判别：主库 mtime 远旧于 `.wal` mtime）；
+  ③ 0.11.1 起沉淀收尾会自动 `CHECKPOINT`（`backup.checkpoint_duckdb`），`/api/diag`
+  的 `warehouse_db` 项透出主库/WAL 新鲜度（`stale` = WAL ≥ 主库 10%）；
+  ④ 手动收口只能**在应用进程内**发 `CHECKPOINT`（`duckdb.connect(路径)` 复用同进程
+  缓存实例）——独立进程（`docker exec python`）会被实例锁挡住："Conflicting lock
+  is held in ... (PID 59)"，0.01s 失败。同款语义见 `research.db` 的 `-wal/-shm`。
