@@ -69,6 +69,7 @@ from config import (  # noqa: E402 - 配置为纯 stdlib，无循环依赖
     AUCTION_CLOSE_TIME,
     AUCTION_COLLECT_TIME,
     DATA_DIR,
+    HK_SYNC_ENABLED,
     LISTEN_PORT,
     STOCKDB_HOST,
     STOCKDB_LOG_FILE,
@@ -128,6 +129,14 @@ from services.warehouse_tasks import (  # noqa: E402
     warehouse_run_async,
     warehouse_scheduler_loop,
     warehouse_status,
+)
+
+# 0.12.0 H1：港股自动同步编排（注入点绑定见 _wire_hk_tasks；handlers 经 app 取用）
+import services.hk_tasks as _hk_tasks  # noqa: E402
+from services.hk_tasks import (  # noqa: E402
+    hk_run_sync,
+    hk_scheduler_loop,
+    hk_status,
 )
 
 # ---- 0.9.2 批次 6：HTTP 路由表外置（interfaces/web/routes.py，0.9.8 收拢接口层） ----
@@ -2348,7 +2357,9 @@ def ops_watchdog_loop(interval: float = 60.0) -> None:
       晚间兜底（0.10.13）：交易日 21:00 后数据仍未到应至交易日 →
       evening_stale_alert 投递 warning；
       上游版本（0.10.37 D）：上游发新版 / 探针失败 / 版本号不可判定 →
-      upstream_release_alert 投递 warning（探针自带 1h TTL，不额外压 GitHub）。
+      upstream_release_alert 投递 warning（探针自带 1h TTL，不额外压 GitHub）；
+      港股新鲜度（0.12.0 H1）：港股 latest 落后期望 session ≥1 个交易日且
+      观察线（20:00）已过 → hk_freshness_alert 投递 warning（追平即撤）。
     看门狗自身异常绝不退出线程（stderr 提示后继续，与调度线程同级容错）。
     """
     time.sleep(30)  # 预热：等待首次数据探针/日历就绪，避免进程启动瞬间误报
@@ -2365,6 +2376,10 @@ def ops_watchdog_loop(interval: float = 60.0) -> None:
             upstream_release_alert()
         except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
             _warn("上游版本看门狗评估异常（已忽略）")
+        try:
+            _hk_tasks.hk_freshness_alert()  # 0.12.0 H1：港股数据新鲜度（滞后即告警、追平即撤）
+        except Exception:  # noqa: BLE001 - 单次评估异常不退出看门狗
+            _warn("港股新鲜度看门狗评估异常（已忽略）")
         time.sleep(interval)
 
 
@@ -2788,6 +2803,7 @@ def _wire_warehouse_tasks() -> None:
         _warehouse_tasks.warehouse_root = _wh_layout.root_dir
         _warehouse_tasks.availability = _wh_pkg.availability
         _warehouse_tasks.backup_duckdb = _wh_backup.backup_duckdb  # 0.10.8：warehouse.duckdb 日级备份
+        _warehouse_tasks.checkpoint_duckdb = _wh_backup.checkpoint_duckdb  # 0.11.1：WAL 日级收口
 
         def _wh_refresh_views():
             from storage.warehouse.engine import get_engine as _wh_get_engine
@@ -2796,6 +2812,48 @@ def _wire_warehouse_tasks() -> None:
         _warehouse_tasks.refresh_views = _wh_refresh_views
     except Exception:  # noqa: BLE001 - duckdb 缺失（ImportError）等：注入点留 None 降级
         pass
+
+    # 0.11.2：打板开盘溢价慢路径的取数源接线（仓库 Parquet 优先，缺则退回引擎逐码 HTTP）。
+    # 病灶（NAS 09-30 实测）：逐码 5200 次 HTTP + 8 并发 + 50ms 节流 → 68.9s；仓库等价
+    # 取数 0.05s 计数 / 1.36s 取 538572 行。审计：read_fullmarket_daily 只读 facts 分区。
+    #
+    # 0.11.2 修正（NAS 实测踩坑）：首版用 `sys.modules.get("interfaces.mcp.stockdb_mcp_server")`
+    # 找模块并静默 except——线上**从未注入成功却毫无痕迹**（0.11.2 首部署实测：60 交易日
+    # 区间仍 70.9s、SSE 仍发 slow-path 的 snapshot_start），排查代价极高。两处加固：
+    #   ① 不再依赖单一 sys.modules 键——改为**按模块名 import**（拿到真身后顺带把
+    #      sys.modules 里指向同一文件的所有别名都补上，兼容按裸名/带包名两种载入）；
+    #   ② 失败不再静默，warn 落 stderr（docker logs 可见）。
+    try:
+        import importlib as _importlib
+
+        _wh_daily_reader = _importlib.import_module(
+            "storage.warehouse.queries").read_fullmarket_daily
+        _mcp_mod = _importlib.import_module("interfaces.mcp.stockdb_mcp_server")
+        _mcp_mod.warehouse_daily_reader = _wh_daily_reader
+        # 同文件异名载入的别名一并补上（同一模块对象 → 幂等）
+        _mcp_file = getattr(_mcp_mod, "__file__", None)
+        for _name, _mod in list(sys.modules.items()):
+            if _mod is _mcp_mod or getattr(_mod, "__file__", None) == _mcp_file:
+                try:
+                    setattr(_mod, "warehouse_daily_reader", _wh_daily_reader)
+                except Exception:  # noqa: BLE001 - 只读模块对象等：跳过该别名
+                    pass
+    except Exception as _wh_src_exc:  # noqa: BLE001 - 未接线 = 沿用引擎逐码路径（可用性不变）
+        print(f"webui: 仓库取数源接线失败（打板慢路径将沿用引擎逐码 HTTP）: {_wh_src_exc}",
+              file=sys.stderr)
+
+
+def _wire_hk_tasks() -> None:
+    """组合根装配（0.12.0 H1）：港股同步依赖注入——hk_sync 执行体 + 港股日历。
+
+    日历必须用 calendar_market.HK（**不得复用 A 股 is_trading_day**：两市场
+    休市日年差 6+11 天，A 股休/港股开的日子（如国庆后半段）恰恰是港股同步日）。
+    hk_sync 定义在本模块（app.py 港股块），经注入点进服务层（层边界：services
+    不 import app）。
+    """
+    _hk_tasks.sync_fn = hk_sync
+    from core.calendar_market import HK as _HK
+    _hk_tasks.calendar = _HK
 
 
 class _BoundedHTTPServer(ThreadingHTTPServer):
@@ -2841,6 +2899,7 @@ def main():
         pass
     _wire_auction_tasks()  # 组合根：服务层依赖注入（0.9.2 批次 4）
     _wire_warehouse_tasks()  # 组合根：仓库层注入（0.10.0 W4）
+    _wire_hk_tasks()  # 组合根：港股同步注入（0.12.0 H1）
     print(f"webui listening on 0.0.0.0:{LISTEN_PORT}", file=sys.stderr)
     print(f"stockdb: {STOCKDB_HOST}:{STOCKDB_PORT}（同容器进程）| data: {DATA_DIR}", file=sys.stderr)
     threading.Thread(target=scheduler_loop, daemon=True).start()
@@ -2848,6 +2907,8 @@ def main():
     threading.Thread(target=auction_scheduler_loop, daemon=True).start()  # 打板竞价调度（2s 轮询，独立线程）
     if WAREHOUSE_ENABLED:  # 0.10.0：仓库沉淀调度（5s 轮询；回滚演练 = WAREHOUSE_ENABLED=0）
         threading.Thread(target=warehouse_scheduler_loop, daemon=True).start()
+    if HK_SYNC_ENABLED:  # 0.12.0 H1：港股自动同步调度（5s 轮询；回滚演练 = HK_SYNC_ENABLED=0）
+        threading.Thread(target=hk_scheduler_loop, daemon=True).start()
     # 0.9.11：Handler 延迟装配（app 模块已完整）——handlers.py 顶层 import app，
     # 脚本方式执行时必须在 app 完整后导入，否则循环重载 ImportError（0.9.10 实证）
     from interfaces.web.handlers import Handler  # noqa: E402 - 组合根装配（app 已完整）

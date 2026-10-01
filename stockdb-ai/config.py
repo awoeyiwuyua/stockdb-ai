@@ -53,7 +53,7 @@ STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"
 # 版本号（发布物标识，见 docs/release-policy.md）
 # 单源：webui（interfaces/web/handlers.py）与 MCP（interfaces/mcp/stockdb_mcp_server.py
 # 的 SERVER_VERSION，0.10.36 起）都读这里，禁止在他处硬编码版本串。
-WEBUI_VERSION: str = "0.11.0"
+WEBUI_VERSION: str = "0.12.0"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致
@@ -97,6 +97,17 @@ if os.name == "nt" and WAREHOUSE_DIR_EXPLICIT and DATA_DIR_EXPLICIT:
 WAREHOUSE_ROW_CAP: int = int(os.environ.get("WAREHOUSE_ROW_CAP", "5000"))
 # 单条语句执行超时（秒）
 WAREHOUSE_QUERY_TIMEOUT: int = int(os.environ.get("WAREHOUSE_QUERY_TIMEOUT", "30"))
+
+# ---- 港股自动同步（0.12.0 H1：每日港股收盘后定时同步重点标的） ----
+# 总开关（回滚演练用）：0 = 调度/手动运行口整体关闭；既有手动 /api/hk/sync 不受影响
+HK_SYNC_ENABLED: bool = os.environ.get("HK_SYNC_ENABLED", "1") not in ("0", "false", "no")
+# 触发点（HH:MM）：港股 16:00 收盘、收市竞价至 ~16:10，置于其后并与 A 股 16:30/16:40 任务错开；
+# 日历用 calendar_market.HK（台风/临时休市不入表，拉不到即跳过）
+HK_SYNC_TIME: str = auction_env_time("HK_SYNC_TIME", "16:15")
+# 重点标的清单（逗号分隔，5 位港股代码；ROADMAP 首批：hk00700 腾讯、hk00100 MiniMax）
+HK_SYNC_CODES: str = os.environ.get("HK_SYNC_CODES", "00700,00100")
+# 同步保留年限（透传 hk_sync 的 years，1-10）
+HK_SYNC_YEARS: int = _env_int("HK_SYNC_YEARS", 2)
 
 # ---- 上游访问闸门（并发上限，0.6.4 熔断器配套） ----
 STOCKDB_MAX_CONCURRENCY: int = _env_int("STOCKDB_MAX_CONCURRENCY", 8)

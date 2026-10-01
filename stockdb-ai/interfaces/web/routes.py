@@ -20,6 +20,7 @@ GET_ROUTES: dict[str, str] = {
     "/api/data/tables": "_data_tables",
     "/api/data/read": "_data_read",
     "/api/hk/sync": "_hk_sync",
+    "/api/hk/status": "_hk_status",
     "/api/overview": "_overview",
     "/api/auction/status": "_auction_status",
     "/api/auction/daily": "_auction_daily",
@@ -39,6 +40,7 @@ POST_ROUTES: dict[str, str] = {
     "/api/container/restart": "_container_restart",
     "/api/data/write": "_data_write",
     "/api/hk/sync": "_hk_sync",
+    "/api/hk/run": "_hk_run",  # 0.12.0 H1：清单同步手动触发（编排通道，含状态落盘）
     "/api/alerts/clear": "_alerts_clear",
     "/api/alerts/mute": "_alerts_mute",
     "/api/auction/run": "_auction_run",

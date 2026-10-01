@@ -64,6 +64,8 @@ from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），
     data_latest_date,
     disk_usage,
     health_status,
+    hk_run_sync,
+    hk_status,
     hk_sync,
     is_trading_day,
     last_sync_summary,
@@ -521,6 +523,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send(500, json.dumps({"error": str(exc)}, ensure_ascii=False))
 
+    def _hk_run(self):
+        """POST /api/hk/run {"task":"sync"}：手动触发清单同步（0.12.0 H1）。
+
+        与 /api/hk/sync 的区别：走 hk_tasks 编排（重点标的清单 + 状态落盘
+        hk_sync_state.json + 日检留痕），部署复验/补跑用；同步执行，返回任务
+        结果 dict（sync_fn 未装配 → {ok:False, reason}）。非法 task → 400。
+        """
+        body = self._read_json()
+        task = str(body.get("task") or "").strip()
+        if task != "sync":
+            self._send(400, json.dumps(
+                {"error": f"非法 task {task!r}；合法值：sync"}, ensure_ascii=False))
+            return
+        codes = body.get("codes") if isinstance(body.get("codes"), list) else None
+        self._send(200, json.dumps(hk_run_sync(codes), ensure_ascii=False))
+
+    def _hk_status(self):
+        """GET /api/hk/status：港股同步配置 + 运行态 + 最近状态 + 新鲜度（0.12.0）。"""
+        self._send(200, json.dumps(hk_status(), ensure_ascii=False))
+
     def _log(self):
         # 0.9.11：int 防护 + clamp（此前 n=abc → ValueError → 500；负数 tail 语义错乱）
         try:
@@ -724,8 +746,9 @@ class Handler(BaseHTTPRequestHandler):
     def _diag(self):
         """GET /api/diag：一键诊断 + 环境信息（只读聚合；单块失败只降级该块，整体 200）。
 
-        五项检查：上游 GitHub / stockdb 服务 / pybao 模块 / 磁盘 / 交易日历。
-        每项 {name,label,ok,note}；env 块含 python/架构/镜像 tag/启动时间/数据最新日。
+        七项检查：上游 GitHub / stockdb 服务 / pybao 模块 / 磁盘 / 仓库库文件 /
+        港股同步 / 交易日历。每项 {name,label,ok,note}（观测项恒 ok=True + degraded
+        承载降级语义）；env 块含 python/架构/镜像 tag/启动时间/数据最新日。
         诊断是"人点一下"的体检入口，允许真实网络探测（上游 TTL 缓存）。
         """
         import importlib.util as _ilu
@@ -777,6 +800,81 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             disk_ok, disk_note = False, str(exc)
 
+        # 0.11.1：主库/WAL 收口可见性——WAL 长期不 checkpoint 曾完全不可见，
+        # 巡检读到旧水位会误判成"水位线停止推进"（NAS 0929 真实误判）。纯 stat，不碰 DuckDB。
+        # 注：路径取 config.WAREHOUSE_DIR（= layout.root_dir()），**不是 app.WAREHOUSE_DIR**
+        # ——app.py 未把该常量暴露为模块属性（0.11.1 首版即栽于此：AttributeError 被本块
+        # except 吞成"状态不可用"，静默降级成假绿）。故降级时把异常摘要写进 note，不再无声。
+        wh_db_state = None
+        wh_db_err = None
+        try:
+            from storage.warehouse.backup import warehouse_db_state
+            wh_db_state = warehouse_db_state(config.WAREHOUSE_DIR)
+        except Exception as exc:  # noqa: BLE001 - 观测项失败不拖垮 diag，但要留痕
+            wh_db_err = f"{type(exc).__name__}: {exc}"
+        wh_note = (f"观测项异常：{wh_db_err}" if wh_db_err else "仓库库文件状态不可用")
+        if wh_db_state is not None:
+            if not wh_db_state["exists"]:
+                wh_note = "尚未生成（无沉淀）"
+            elif wh_db_state["stale"]:
+                wh_note = (f"⚠️ WAL 未收口：{wh_db_state['wal_size']} B"
+                           f"（主库 {wh_db_state['wal_ratio'] * 100:.1f}%），"
+                           f"主库 mtime {wh_db_state['mtime']}——裸拷主库会丢最新写入")
+            else:
+                wh_note = (f"主库 mtime {wh_db_state['mtime']}｜"
+                           f"WAL {wh_db_state['wal_size']} B（已收口）")
+        # 0.11.2：打板慢路径的取数源接线状态——**接线是否生效必须可查**。本版部署期
+        # 实测踩坑：接线代码在、启动无告警，但慢路径仍逐码 HTTP（70s），只能靠
+        # /api/diag 无法证伪 → 现把该事实透出（None = 未接线，走引擎逐码）。
+        try:
+            from interfaces.mcp import stockdb_mcp_server as _mcp_srv
+            _wh_wired = _mcp_srv.warehouse_daily_reader is not None
+            _wh_probe = dict(getattr(_mcp_srv, "_last_wh_probe", {}) or {})
+        except Exception:  # noqa: BLE001 - MCP 模块不可用等同于未接线
+            _wh_wired, _wh_probe = None, {}
+        wh_note += ("｜打板慢路径取数源：仓库 Parquet" if _wh_wired
+                    else "｜打板慢路径取数源：引擎逐码（未接线）" if _wh_wired is False
+                    else "｜打板慢路径取数源：MCP 模块不可用")
+        if _wh_probe:
+            wh_note += "｜最近取数：" + json.dumps(_wh_probe, ensure_ascii=False)
+
+        # 0.12.0 H1：港股同步新鲜度观测项——港股数据此前只有手动通道，陈化在面板上
+        # 完全不可见（00700 停在 09-11、diag 全绿的实证）。照 warehouse_db 纪律：
+        # 恒 ok=True 纯观测 + degraded（滞后置位）+ 异常写 note 不假绿。
+        # 路径必须取 services.hk_tasks 的注入点后状态（经 app._hk_tasks 动态解析，
+        # 测试 patch 才有效——同 app.WAREHOUSE_DIR 假绿教训）。
+        hk_state = None
+        hk_err = None
+        try:
+            hk_state = app._hk_tasks.hk_status()
+        except Exception as exc:  # noqa: BLE001 - 观测项失败不拖垮 diag，但要留痕
+            hk_err = f"{type(exc).__name__}: {exc}"
+        if hk_err:
+            hk_note = f"观测项异常：{hk_err}"
+            hk_degraded = True
+        elif hk_state is None:
+            hk_note = "港股同步状态不可用"
+            hk_degraded = True
+        else:
+            fresh = hk_state.get("freshness") or {}
+            lag = fresh.get("lag")
+            latest = fresh.get("latest") or {}
+            latest_txt = ("、".join(f"{c}:{d}" for c, d in sorted(latest.items()))
+                          or "无记录")
+            enabled = hk_state.get("enabled")
+            hk_note = (f"清单 {'、'.join(hk_state.get('codes') or [])}｜"
+                       f"调度 {'开' if enabled else '关'}"
+                       f"（{hk_state.get('sync_time')}）｜最新 {latest_txt}")
+            if lag is None:
+                hk_note += "｜新鲜度未知（日历未装配或未同步过）"
+                hk_degraded = not latest  # 从未同步过视为降级；日历缺失不算
+            elif lag >= 1:
+                hk_note += f"｜⚠️ 滞后 {lag} 个港股交易日（期望 {fresh.get('expected')}）"
+                hk_degraded = True
+            else:
+                hk_note += "｜新鲜度正常"
+                hk_degraded = False
+
         checks = [
             {"name": "upstream_github", "label": "上游 GitHub", "ok": True,
              "degraded": up_degraded, "note": up_note,
@@ -789,6 +887,10 @@ class Handler(BaseHTTPRequestHandler):
              "note": ("stockdb/zb_core/zhibiao 可导入" if pybao_ok
                       else "存在模块缺失（影响指标/板块/私有存储）")},
             {"name": "disk", "label": "磁盘", "ok": disk_ok, "note": disk_note},
+            {"name": "warehouse_db", "label": "仓库库文件", "ok": True,
+             "degraded": bool(wh_db_state and wh_db_state["stale"]), "note": wh_note},
+            {"name": "hk_sync", "label": "港股同步", "ok": True,
+             "degraded": hk_degraded, "note": hk_note},
             {"name": "calendar", "label": "交易日历", "ok": True,
              "note": f"覆盖至 {XSHG_HOLIDAYS_THROUGH}；今日{'是' if is_trading_day() else '非'}交易日"},
         ]
