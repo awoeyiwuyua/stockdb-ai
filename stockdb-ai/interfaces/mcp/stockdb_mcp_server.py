@@ -902,6 +902,151 @@ def _classify_empty_codes(empty_codes: list[str], end_compact: str) -> dict:
     return breakdown
 
 
+def _assemble_board_snapshot(    code_rows: list,
+    failed: list,
+    request_ctx: dict,
+    empty_codes: list,
+) -> tuple[dict, dict]:
+    """(code_rows, failed, empty_codes) → (snapshot, metadata) 的唯一装配实现。
+
+    0.11.2：原内联在 query_fullmarket_daily_snapshot 内。抽出动机——**两条取数源
+    （引擎逐码 HTTP / 仓库 Parquet）必须产出字节级同构的 snapshot 与 metadata**，
+    否则"换源"会悄悄改变信封字段（覆盖率、formal_usable、partial_reasons 等下游
+    与用户都依赖的判据）。共用一份装配逻辑即这条不变量本身。
+
+    `request_ctx` 需含：target_codes, requested_codes, raw_codes, limit_applied。
+    """
+    snapshot: dict[str, list[DailyBar]] = {}
+    raw_row_count = 0
+    point_in_time_state_unknown_codes: set[str] = set()
+
+    def parse_is_st(value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value or "").strip().lower()
+        if normalized in {"1", "true", "yes"}:
+            return True
+        if normalized in {"0", "false", "no"}:
+            return False
+        return None
+
+    for code, rows in sorted(code_rows):
+        history_close: float | None = None
+        for row in sorted(rows, key=_row_date_key):
+            try:
+                day = str(row.get("date"))
+                if len(day) != 8:
+                    continue
+                close = float(row.get("close"))
+                raw_prev_close = row.get("pre_close")
+                # 0.8.15 法定涨跌停参考价（验收修正：污染不均匀，禁止统一反推）：
+                #   - 普通日：上一实际成交日未复权收盘（history_close 逐日追踪）
+                #   - 除权日（因子表当日有事件）：当日 pre_close = 法定除权参考价（可信）
+                #   - 无历史（区间首行）/停牌跨日：pre_close 兜底
+                is_fq_event = bool(pybao_tools) and pybao_tools.is_fq_event_date(code, day)
+                if is_fq_event and raw_prev_close not in (None, "", 0, "0"):
+                    prev_close = float(raw_prev_close)  # 除权日法定参考价
+                elif history_close is not None:
+                    prev_close = history_close  # 普通日：上一实际成交日未复权收盘
+                elif raw_prev_close not in (None, "", 0, "0"):
+                    prev_close = float(raw_prev_close)  # 兜底：区间首行等
+                else:
+                    prev_close = history_close
+                is_st = parse_is_st(row.get("is_st"))
+                if is_st is None:
+                    point_in_time_state_unknown_codes.add(code)
+                bar = DailyBar(
+                    code=code,
+                    close=close,
+                    high=float(row.get("high")),
+                    low=float(row.get("low")),
+                    amount=float(row.get("amount") or 0.0),
+                    prev_close=prev_close,
+                    open=float(row.get("open")) if row.get("open") not in (None, "") else None,
+                    is_st=False if is_st is None else is_st,
+                )
+            except (TypeError, ValueError):
+                continue
+            date_str = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+            snapshot.setdefault(date_str, []).append(bar)
+            history_close = close
+            raw_row_count += 1
+
+    target_codes = request_ctx["target_codes"]
+    requested_codes = request_ctx["requested_codes"]
+    raw_codes = request_ctx["raw_codes"]
+    limit_applied = request_ctx["limit_applied"]
+
+    selected_set = set(requested_codes)
+    target_set = set(target_codes)
+    scope_is_partial = limit_applied or selected_set != target_set
+    coverage_is_complete = (
+        not failed
+        and not empty_codes
+        and {code for code, _ in code_rows} == selected_set
+    )
+    partial_reasons: list[str] = []
+    if limit_applied:
+        partial_reasons.append("LIMIT_APPLIED")
+    if request_ctx.get("explicit_codes") and selected_set != target_set:
+        partial_reasons.append("EXPLICIT_CODES_PARTIAL")
+    elif scope_is_partial and "LIMIT_APPLIED" not in partial_reasons:
+        partial_reasons.append("TARGET_UNIVERSE_MISMATCH")
+    if failed:
+        partial_reasons.append("SOURCE_REQUEST_FAILED")
+    # 0.9.10：空代码分类（停牌/退市未上市不否决；真实失败/未发布/无法分类才否决）
+    empty_breakdown: dict[str, list[str]] | None = None
+    fatal_empty_codes: list[str] = []
+    if empty_codes:
+        empty_breakdown = _classify_empty_codes(empty_codes, request_ctx["end"])
+        fatal_empty_codes = list(empty_breakdown["unclassified"]) + list(
+            empty_breakdown["not_published"])
+        if empty_breakdown["suspended"]:
+            partial_reasons.append("EMPTY_SUSPENDED")
+        if empty_breakdown["delisted_or_not_listed"]:
+            partial_reasons.append("EMPTY_DELISTED_OR_NOT_LISTED")
+        if fatal_empty_codes:
+            partial_reasons.append("EMPTY_CODE_UNCLASSIFIED")
+    if point_in_time_state_unknown_codes:
+        partial_reasons.append("POINT_IN_TIME_STATE_UNKNOWN")
+    # 双覆盖率拆分（P2）：候选识别覆盖率（failed + 致命空代码）决定正式可用性；
+    # 样本覆盖率（缺价）不否决，由 days 行 missing_open_count / 信封 sample_coverage 呈现
+    candidate_coverage_complete = not failed and not fatal_empty_codes
+    formal_usable = (
+        not scope_is_partial
+        and candidate_coverage_complete
+        and not point_in_time_state_unknown_codes
+    )
+    metadata = {
+        "raw_instrument_count": len(set(raw_codes)),
+        "universe_count": len(target_codes),
+        "requested_code_count": len(requested_codes),
+        "fetched_code_count": len(code_rows),
+        "empty_code_count": len(empty_codes),
+        "failed_code_count": len(failed),
+        "raw_row_count": raw_row_count,
+        "scope_is_partial": scope_is_partial,
+        "coverage_is_complete": coverage_is_complete,
+        "candidate_coverage": {
+            "complete": candidate_coverage_complete,
+            "failed_count": len(failed),
+            "empty_count": len(empty_codes),
+        },
+        "empty_code_breakdown": empty_breakdown or {},
+        "partial_reasons": partial_reasons,
+        "formal_usable": formal_usable,
+        "is_partial": scope_is_partial,
+        "failed_codes": failed[:100],
+        "empty_codes": empty_codes[:100],
+        "point_in_time_state_unknown_codes": sorted(
+            point_in_time_state_unknown_codes
+        )[:100],
+        "failed_codes_truncated": len(failed) > 100,
+        "empty_codes_truncated": len(empty_codes) > 100,
+    }
+    return snapshot, metadata
+
+
 def query_fullmarket_daily_snapshot(
     start: str,
     end: str,
@@ -912,6 +1057,10 @@ def query_fullmarket_daily_snapshot(
     warmup_days: int = 0,
 ) -> tuple[dict, dict]:
     """拉取日 K 并组装 DailyBar 快照，同时返回完整性诊断。"""
+    global _wh_calls, _last_wh_probe
+    _wh_calls += 1
+    _last_wh_probe["__calls"] = _wh_calls
+    _last_wh_probe["__reader_wired"] = warehouse_daily_reader is not None
     with _HEAVY_LOCK:
         start_dt = _parse_yyyymmdd(start, field="start")
         end_dt = _parse_yyyymmdd(end, field="end")
@@ -937,6 +1086,111 @@ def query_fullmarket_daily_snapshot(
         if limit > 0:
             requested_codes = requested_codes[:limit]
 
+        request_ctx = {"target_codes": target_codes, "requested_codes": requested_codes,
+                       "raw_codes": raw_codes, "limit_applied": limit_applied,
+                       "explicit_codes": codes is not None, "end": end}
+        # 0.11.2 仓库优先取数：facts/ 分区是同一批引擎日K 的列式落盘，DuckDB 本地读
+        # 远快于逐码 HTTP（NAS 实测 68.9s → 秒级）。守卫确保"换源不改语义"：
+        #   ① 仅全市场默认请求（显式 codes / limit 是调试小样本，引擎按需取更省）；
+        #   ② **缺码用引擎补，而不是整段退回**——停牌股窗口内本就无成交（NAS 实测
+        #      5196/5200，4 只停牌），首版要求"全码子集"于是一路退回引擎白跑 70s；
+        #      现改为引擎只拉缺口码（通常个位数）；
+        #   ③ 缺口过大（>1% 或 >50 码，例如区间早于仓库覆盖）→ 整段退回引擎，
+        #      避免把"逐码 HTTP"重新变成主路径；读数异常同理。
+        fetch_gap_codes: list[str] | None = None
+        wh_rows: list = []
+        # **"全市场默认请求"的判据不是 codes is None**（0.11.2 部署期实测踩坑）：
+        # 打板溢价慢路径自己就把 universe 展开成 5200 码传进来（codes 非 None），
+        # 世界面上"必须 codes is None"等于**恰好把要修的那个调用拦在外面**——
+        # 表现为接线成功、无异常、无告警，却仍逐码 HTTP 70s。改用与信封
+        # scope_is_partial 同口径的判据：请求集 == A 股 universe 即视为全市场。
+        full_market_request = set(requested_codes) == set(target_codes)
+        warehouse_eligible = (
+            warehouse_daily_reader is not None
+            and full_market_request
+            and not limit_applied
+            and bool(requested_codes)
+        )
+        # 守卫判定原样落探针（0.11.2 部署期排障：接线成功却未走仓库时，必须能一眼
+        # 看出是哪一条守卫没过——此前只能靠反复改代码+重建镜像盲试）
+        _last_wh_probe.update({
+            "eligible": warehouse_eligible,
+            "reader_is_none": warehouse_daily_reader is None,
+            "full_market": full_market_request,
+            "limit_applied": limit_applied,
+            "requested_n": len(requested_codes),
+        })
+        if not warehouse_eligible:
+            return _query_fullmarket_daily_engine(start, end, target_codes, requested_codes,
+                                                  raw_codes, limit_applied, codes, workers,
+                                                  warmup_start, request_ctx)
+        try:
+            import time as _time
+            _t0 = _time.time()
+            wh = warehouse_daily_reader(warmup_start, end) or {}
+            present = set(wh.get("codes_present") or ())
+            wh_missing = [c for c in requested_codes if c not in present]
+            # 缺口预算：>1% 或 >50 码 → 不逐码补，整段退回引擎（此时**不取仓库行**，
+            # 否则同一码两源重复行会污染 code_rows 与 raw_row_count）
+            within_budget = len(wh_missing) <= min(50, max(1, len(requested_codes) // 100))
+            _last_wh_probe.update({
+                "reader_sec": round(_time.time() - _t0, 2),
+                "row_count": wh.get("row_count"),
+                "codes_present": len(present),
+                "requested": len(requested_codes),
+                "missing": len(wh_missing),
+                "within_budget": within_budget,
+            })
+            if within_budget:
+                wh_rows = list(wh.get("code_rows") or [])
+                if not wh_missing and wh_rows:
+                    # 全覆盖：零 HTTP，直接装配返回
+                    snapshot, metadata = _assemble_board_snapshot(wh_rows, [], request_ctx, [])
+                    metadata["data_source"] = "warehouse"
+                    metadata["warehouse_watermark"] = wh.get("watermark")
+                    metadata["warehouse_codes"] = len(wh_rows)
+                    return snapshot, metadata
+                if wh_missing and wh_rows:
+                    # 缺口码交引擎按需取（沿用其空码分类，语义与纯引擎路径一致）。
+                    # **不动 requested_codes**：它是信封 requested_code_count /
+                    # coverage_is_complete 的口径依据，只能在取数循环里收窄。
+                    _notify_progress("warehouse_gap_fetch")
+                    fetch_gap_codes = list(wh_missing)
+                else:
+                    wh_rows = []  # 仓库无行：等同未命中，走纯引擎
+        except Exception as _wh_exc:  # noqa: BLE001 - 仓库通道异常：整段退回引擎
+            # 不静默：本版部署期实测，"接线成功但读数异常 → 静默退回引擎"会让面板
+            # 与日志都看不出打板慢路径其实还在逐码 HTTP（70s），排查代价极高。
+            print(f"stockdb: 仓库取数源不可用，回退引擎逐码: "
+                  f"{type(_wh_exc).__name__}: {_wh_exc}", file=sys.stderr, flush=True)
+            _last_wh_probe.update({"reader_error": "%s: %s" % (type(_wh_exc).__name__, _wh_exc)})
+            wh_rows, fetch_gap_codes = [], None
+        return _query_fullmarket_daily_engine(
+            start, end, target_codes, requested_codes, raw_codes, limit_applied, codes,
+            workers, warmup_start, request_ctx, fetch_gap_codes=fetch_gap_codes,
+            wh_rows=wh_rows)
+
+
+def _query_fullmarket_daily_engine(
+    start: str,
+    end: str,
+    target_codes: list,
+    requested_codes: list,
+    raw_codes: list,
+    limit_applied: bool,
+    codes: list | None,
+    workers: int,
+    warmup_start: str,
+    request_ctx: dict,
+    fetch_gap_codes: list[str] | None = None,
+    wh_rows: list | None = None,
+) -> tuple[dict, dict]:
+    """引擎逐码取数（0.11.2 抽为独立函数）：全量拉取，或只拉仓库缺口码后与之合并。
+
+    调用方（query_fullmarket_daily_snapshot）已持 _HEAVY_LOCK 并完成守卫判定。
+    """
+    if True:  # 保持 8 空格缩进层级（该函数体自 query_fullmarket_daily_snapshot
+        # 内联段落抽出，整段重排会放大 diff 与回归面；语义上此处无分支）
         # 连接卫生（0.8.5）：该路径同样全市场并发拉取，默认 16 线程无节流会耗尽
         # NAS 临时端口（与 query_point_snapshot 0.8.4 同因）。8 并发 + 每请求 50ms。
         workers = max(1, min(int(workers or 8), 8))
@@ -959,7 +1213,9 @@ def query_fullmarket_daily_snapshot(
         failed: list[dict[str, str]] = []
         empty_codes: list[str] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fetch_one, code): code for code in requested_codes}
+            # 0.11.2：仓库已供数时只拉缺口码（fetch_gap_codes），否则拉全量
+            _to_fetch = fetch_gap_codes if fetch_gap_codes is not None else requested_codes
+            futures = {pool.submit(fetch_one, code): code for code in _to_fetch}
             for future in as_completed(futures):
                 code, rows, error = future.result()
                 if error is not None:
@@ -969,129 +1225,19 @@ def query_fullmarket_daily_snapshot(
                 else:
                     code_rows.append((code, rows))
 
-        snapshot: dict[str, list[DailyBar]] = {}
-        raw_row_count = 0
-        point_in_time_state_unknown_codes: set[str] = set()
+        # 注：仓库未命中/覆盖不全**不记为 failed**——它只是内部取数源回退，计入会把
+        # 信封染成 SOURCE_REQUEST_FAILED / formal_usable=false（假降级）。来源由
+        # metadata.data_source 单独透出。
+        snapshot, metadata = _assemble_board_snapshot(
+            code_rows + list(wh_rows or []), failed, request_ctx, empty_codes)
 
-        def parse_is_st(value: object) -> bool | None:
-            if isinstance(value, bool):
-                return value
-            normalized = str(value or "").strip().lower()
-            if normalized in {"1", "true", "yes"}:
-                return True
-            if normalized in {"0", "false", "no"}:
-                return False
-            return None
-
-        for code, rows in sorted(code_rows):
-            history_close: float | None = None
-            for row in sorted(rows, key=_row_date_key):
-                try:
-                    day = str(row.get("date"))
-                    if len(day) != 8:
-                        continue
-                    close = float(row.get("close"))
-                    raw_prev_close = row.get("pre_close")
-                    # 0.8.15 法定涨跌停参考价（验收修正：污染不均匀，禁止统一反推）：
-                    #   - 普通日：上一实际成交日未复权收盘（history_close 逐日追踪）
-                    #   - 除权日（因子表当日有事件）：当日 pre_close = 法定除权参考价（可信）
-                    #   - 无历史（区间首行）/停牌跨日：pre_close 兜底
-                    is_fq_event = bool(pybao_tools) and pybao_tools.is_fq_event_date(code, day)
-                    if is_fq_event and raw_prev_close not in (None, "", 0, "0"):
-                        prev_close = float(raw_prev_close)  # 除权日法定参考价
-                    elif history_close is not None:
-                        prev_close = history_close  # 普通日：上一实际成交日未复权收盘
-                    elif raw_prev_close not in (None, "", 0, "0"):
-                        prev_close = float(raw_prev_close)  # 兜底：区间首行等
-                    else:
-                        prev_close = history_close
-                    is_st = parse_is_st(row.get("is_st"))
-                    if is_st is None:
-                        point_in_time_state_unknown_codes.add(code)
-                    bar = DailyBar(
-                        code=code,
-                        close=close,
-                        high=float(row.get("high")),
-                        low=float(row.get("low")),
-                        amount=float(row.get("amount") or 0.0),
-                        prev_close=prev_close,
-                        open=float(row.get("open")) if row.get("open") not in (None, "") else None,
-                        is_st=False if is_st is None else is_st,
-                    )
-                except (TypeError, ValueError):
-                    continue
-                date_str = f"{day[:4]}-{day[4:6]}-{day[6:]}"
-                snapshot.setdefault(date_str, []).append(bar)
-                history_close = close
-                raw_row_count += 1
-
-        selected_set = set(requested_codes)
-        target_set = set(target_codes)
-        scope_is_partial = limit_applied or selected_set != target_set
-        coverage_is_complete = (
-            not failed
-            and not empty_codes
-            and {code for code, _ in code_rows} == selected_set
-        )
-        partial_reasons: list[str] = []
-        if limit_applied:
-            partial_reasons.append("LIMIT_APPLIED")
-        if codes is not None and selected_set != target_set:
-            partial_reasons.append("EXPLICIT_CODES_PARTIAL")
-        elif scope_is_partial and "LIMIT_APPLIED" not in partial_reasons:
-            partial_reasons.append("TARGET_UNIVERSE_MISMATCH")
-        if failed:
-            partial_reasons.append("SOURCE_REQUEST_FAILED")
-        # 0.9.10：空代码分类（停牌/退市未上市不否决；真实失败/未发布/无法分类才否决）
-        empty_breakdown: dict[str, list[str]] | None = None
-        fatal_empty_codes: list[str] = []
-        if empty_codes:
-            empty_breakdown = _classify_empty_codes(empty_codes, end)
-            fatal_empty_codes = list(empty_breakdown["unclassified"]) + list(
-                empty_breakdown["not_published"])
-            if empty_breakdown["suspended"]:
-                partial_reasons.append("EMPTY_SUSPENDED")
-            if empty_breakdown["delisted_or_not_listed"]:
-                partial_reasons.append("EMPTY_DELISTED_OR_NOT_LISTED")
-            if fatal_empty_codes:
-                partial_reasons.append("EMPTY_CODE_UNCLASSIFIED")
-        if point_in_time_state_unknown_codes:
-            partial_reasons.append("POINT_IN_TIME_STATE_UNKNOWN")
-        # 双覆盖率拆分（P2）：候选识别覆盖率（failed + 致命空代码）决定正式可用性；
-        # 样本覆盖率（缺价）不否决，由 days 行 missing_open_count / 信封 sample_coverage 呈现
-        candidate_coverage_complete = not failed and not fatal_empty_codes
-        formal_usable = (
-            not scope_is_partial
-            and candidate_coverage_complete
-            and not point_in_time_state_unknown_codes
-        )
-        metadata = {
-            "raw_instrument_count": len(set(raw_codes)),
-            "universe_count": len(target_codes),
-            "requested_code_count": len(requested_codes),
-            "fetched_code_count": len(code_rows),
-            "empty_code_count": len(empty_codes),
-            "failed_code_count": len(failed),
-            "raw_row_count": raw_row_count,
-            "scope_is_partial": scope_is_partial,
-            "coverage_is_complete": coverage_is_complete,
-            "candidate_coverage": {
-                "complete": candidate_coverage_complete,
-                "failed_count": len(failed),
-                "empty_count": len(empty_codes),
-            },
-            "empty_code_breakdown": empty_breakdown or {},
-            "partial_reasons": partial_reasons,
-            "formal_usable": formal_usable,
-            "is_partial": scope_is_partial,
-            "failed_codes": failed[:100],
-            "empty_codes": empty_codes[:100],
-            "point_in_time_state_unknown_codes": sorted(
-                point_in_time_state_unknown_codes
-            )[:100],
-            "failed_codes_truncated": len(failed) > 100,
-            "empty_codes_truncated": len(empty_codes) > 100,
-        }
+        if wh_rows:
+            # 仓库供数 + 引擎补缺口（code_rows 即缺口码的取数结果）
+            metadata["data_source"] = "warehouse" if not code_rows else "warehouse+engine"
+            metadata["warehouse_codes"] = len(wh_rows)
+            metadata["warehouse_gap_codes"] = len(code_rows)
+        else:
+            metadata["data_source"] = "engine"
         return snapshot, metadata
 
 
@@ -1112,6 +1258,17 @@ _AUCTION_KNOWN_AT_DEFAULT_TIME = "09:26"  # 采集任务定时点（快照 times
 
 _store_cache: object | None = None  # research_store 惰性缓存（写端同源读取通道）
 
+# 0.11.2：全市场日K 的**仓库取数源**注入点（(start,end) -> storage.warehouse.queries
+# .read_fullmarket_daily 的返回）。组合根接线；None = 未接线，慢路径退回引擎逐码 HTTP。
+# 刻意用注入而非 import：接口层不静态依赖存储层实现（沿 services 的 C3 纪律），
+# 独立进程（stdio/--http）无组合根时自然为 None，行为与既有版本完全一致。
+warehouse_daily_reader = None
+
+# 0.11.2 诊断：最近一次仓库取数源的判定事实（None=尚未调用）。**接线是否真的在生效
+# 只能靠这个**——部署期实测踩坑：接线成功、无异常、无告警，但慢路径仍 70s，因为
+# reader 返回空 → 静默走引擎。把判定过程落成可查字段（/api/diag 透出）。
+_last_wh_probe: dict = {}
+_wh_calls: int = 0  # 执行计数：判定"运行进程跑的是哪份代码"（0.11.2 部署期排障用）
 
 def _get_research_store() -> object | None:
     """惰性获取写端同源的 ResearchStore（0.9.5 抽象）；不可用 → None（不抛异常）。

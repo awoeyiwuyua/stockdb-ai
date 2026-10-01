@@ -788,6 +788,155 @@ class WarehouseBackupTest(unittest.TestCase):
         finally:
             con.close()
 
+    def _open_engine_with_wal(self):
+        """真造 WAL：engine 持写连接 + 写一张表（WAL 模式下不 checkpoint 不落主库）。"""
+        eng = WarehouseEngine(self.root)
+        eng._con.execute("CREATE TABLE wal_probe (n INTEGER)")
+        eng._con.execute("INSERT INTO wal_probe VALUES (1)")
+        return eng
+
+    def test_checkpoint_flushes_wal_with_engine_open(self):
+        """0.11.1 回归（NAS 0929 实测缺陷）：engine 常驻连接下 CHECKPOINT 仍成功。
+
+        背景：wal_autocheckpoint 默认 16MiB 而日增 ~0.1MB → 主库文件曾冻结 7 天，
+        写入全积在 .wal，裸拷主库静默丢一周。本用例锁住"收口可用"这一事实。
+        """
+        wal = layout.duckdb_path(self.root).with_name(
+            layout.duckdb_path(self.root).name + ".wal")
+        eng = self._open_engine_with_wal()
+        try:
+            self.assertTrue(wal.exists())  # WAL 确有内容（前提成立）
+            self.assertGreater(wal.stat().st_size, 0)
+            self.assertTrue(backup.checkpoint_duckdb(self.root))  # 同进程复用缓存实例
+            self.assertFalse(wal.exists())  # 已收口：WAL 消失
+        finally:
+            eng.close()
+
+    def test_checkpoint_missing_source_returns_false(self):
+        """源库不存在 → False（静默，无异常）。"""
+        empty = pathlib.Path(self._tmp.name) / "empty-root"
+        self.assertFalse(backup.checkpoint_duckdb(empty))
+
+    def test_checkpoint_failure_is_silent(self):
+        """收口异常（路径不可连接）→ False，不外抛（沉淀主流程不受影响）。"""
+        bad = self.root / "not-a-dir"
+        bad.write_bytes(b"x")  # 同名文件占位 → duckdb.connect 必失败
+        self.assertFalse(backup.checkpoint_duckdb(bad))
+
+    def test_warehouse_db_state_probe_shape(self):
+        """新鲜度探针：字段齐全、WAL 存在时计入 wal_size 与占比。
+
+        判据刻意不依赖脆弱前提（"新库 WAL 占比必然高"不成立——取决于写多少），
+        只锁结构 + 事实字段的传递关系；stale 是纯阈值函数（WAL ≥ 主库 10%）。
+        """
+        eng = self._open_engine_with_wal()
+        try:
+            st = backup.warehouse_db_state(self.root)
+            self.assertTrue(st["exists"])
+            self.assertIsNotNone(st["mtime"])
+            self.assertGreater(st["size"], 0)
+            if st["wal_size"] > 0:  # 平台差异：WAL 可能随连接关闭被清理
+                self.assertAlmostEqual(st["wal_ratio"], st["wal_size"] / st["size"], places=6)
+                self.assertEqual(st["stale"], st["wal_size"] >= 0.10 * st["size"])
+        finally:
+            eng.close()
+        backup.checkpoint_duckdb(self.root)
+        st2 = backup.warehouse_db_state(self.root)
+        self.assertFalse(st2["stale"])  # 收口后 WAL 已并入主库 → 必然不 stale
+
+    def test_warehouse_db_state_missing_db(self):
+        """源库不存在 → exists=False 且不抛异常（diag 观测项不许拖垮体检）。"""
+        empty = pathlib.Path(self._tmp.name) / "no-db-root"
+        st = backup.warehouse_db_state(empty)
+        self.assertFalse(st["exists"])
+        self.assertIsNone(st["mtime"])
+        self.assertFalse(st["stale"])
+
+
+class WarehouseFullmarketDailyTest(unittest.TestCase):
+    """0.11.2：read_fullmarket_daily——打板开盘溢价慢路径的仓库取数源。
+
+    动机（NAS 实测）：慢路径逐码 HTTP 取 5200 码日K 需 68.9s，而同批日K 在
+    facts/ 已有 Parquet，等价取数 0.05s 计数 / 1.36s 取 538572 行。
+    本类锁住"行键形与引擎返回对齐"这一契约——调用侧装配逻辑据此零改动。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self._cm = mock.patch.multiple(config, WAREHOUSE_DIR=self.root)
+        self._cm.start()
+
+    def tearDown(self):
+        self._cm.stop()
+        self._tmp.cleanup()
+
+    def test_rows_align_with_engine_key_shape(self):
+        """行键形：pre_close（仓库列 prev_close 的引擎键名）、is_st 字符串字面量。"""
+        sink.write_daily(self.root, "20260105", [
+            {"code": "600000", "name": "浦发银行", "is_st": False,
+             "open": 9.04, "high": 9.06, "low": 8.91, "close": 9.01,
+             "prev_close": 9.07, "volume": 65906200.0, "amount": 593490000.0},
+            {"code": "300750", "name": "宁德时代", "is_st": True,
+             "open": 200.0, "high": 205.0, "low": 198.0, "close": 203.0,
+             "prev_close": 201.0, "volume": 1000.0, "amount": 200000.0},
+        ])
+        from storage.warehouse import queries as wh_queries
+        out = wh_queries.read_fullmarket_daily("20260105", "20260105")
+
+        self.assertEqual(out["row_count"], 2)
+        self.assertEqual([code for code, _ in out["code_rows"]], ["300750", "600000"])
+        self.assertEqual(out["codes_present"], {"300750", "600000"})
+        row = dict(out["code_rows"][1][1][0])
+        self.assertEqual(row["date"], "20260105")          # YYYYMMDD 串（引擎口径）
+        self.assertEqual(row["pre_close"], 9.07)           # 仓库列名 prev_close → 引擎键名
+        self.assertEqual(row["is_st"], "0")                # 引擎字符串字面量形态
+        st_row = dict(out["code_rows"][0][1][0])
+        self.assertEqual(st_row["is_st"], "1")
+        self.assertEqual(out["watermark"], "20260105")
+
+    def test_window_filter_and_codes_present(self):
+        """只取窗口内数据；窗口内有行的码才进 codes_present（缺码判定用）。
+
+        分区只写一次（write_daily 幂等：已存在分区跳过），故按目标分布一次铺满。
+        """
+        def _row(code, close, prev_close):
+            return {"code": code, "name": "样本", "is_st": False, "open": close,
+                    "high": close + 0.1, "low": close - 0.1, "close": close,
+                    "prev_close": prev_close, "volume": 100.0, "amount": 900.0}
+
+        sink.write_daily(self.root, "20260105", [_row("600000", 9.0, 8.9)])
+        # 0106：两只都有（600001 仅此日出现）
+        sink.write_daily(self.root, "20260106", [_row("600000", 9.05, 9.0),
+                                                 _row("600001", 5.05, 5.0)])
+        sink.write_daily(self.root, "20260107", [_row("600000", 9.1, 9.05)])
+
+        from storage.warehouse import queries as wh_queries
+        out = wh_queries.read_fullmarket_daily("20260106", "20260106")
+        self.assertEqual(out["row_count"], 2)
+        self.assertEqual(out["codes_present"], {"600000", "600001"})
+        self.assertEqual(len(out["code_rows"][0][1]), 1)  # 每码各 1 行（窗口外不进来）
+
+        # 全窗口：600001 只在 0106 有行 → 用于"窗口内缺码"判定
+        out2 = wh_queries.read_fullmarket_daily("20260105", "20260107")
+        self.assertEqual(out2["row_count"], 4)
+        self.assertEqual(out2["codes_present"], {"600000", "600001"})
+
+    def test_invalid_date_returns_empty_not_raise(self):
+        """非法日期 → 空结果（调用方回退引擎），不抛异常。"""
+        from storage.warehouse import queries as wh_queries
+        out = wh_queries.read_fullmarket_daily("2026-1-5", "20260105")
+        self.assertEqual(out["code_rows"], [])
+        self.assertEqual(out["row_count"], 0)
+        self.assertEqual(out["codes_present"], set())
+
+    def test_missing_partitions_returns_empty(self):
+        """无任何分区 → 空结果（调用方回退引擎），不抛异常。"""
+        from storage.warehouse import queries as wh_queries
+        out = wh_queries.read_fullmarket_daily("20260105", "20260105")
+        self.assertEqual(out["code_rows"], [])
+        self.assertEqual(out["codes_present"], set())
+
 
 class WarehouseQueriesFacadeTest(unittest.TestCase):
     """W3：queries 门面 availability 降级与 known_at。"""
@@ -896,7 +1045,8 @@ class WarehouseTasksTest(unittest.TestCase):
                        ("query_snapshot", "data_latest", "is_trading_day", "sink",
                         "reconcile_daily", "warehouse_root", "availability",
                         "refresh_views", "backup_duckdb", "adjust_provider",
-                        "record_adjust_events", "_get_alerts", "notify_alert")}
+                        "record_adjust_events", "_get_alerts", "notify_alert",
+                        "checkpoint_duckdb")}
         wt.query_snapshot = lambda q: {"points": _traded_points()}
         wt.data_latest = lambda force=False: "20260822"
         wt.is_trading_day = lambda d: True
@@ -906,6 +1056,7 @@ class WarehouseTasksTest(unittest.TestCase):
         wt.availability = lambda: (True, "ok")
         wt.refresh_views = lambda: None
         wt.backup_duckdb = lambda root, force=False: None  # 0.10.8：隔离备份副作用
+        wt.checkpoint_duckdb = lambda root: False  # 0.11.1：隔离 WAL 收口副作用
         wt.adjust_provider = None  # 0.11.0：(codes) -> events；未接线默认 NULL 物化
         wt.record_adjust_events = None
         # 0.11.0：告警单例/投递打桩（记录式，防真实落盘）；守卫模块态复位
@@ -1119,19 +1270,26 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertFalse(layout.month_partition(self.root, "20260831", "sh").exists())
         self.assertIsNone(self.wt.sink.catalog.get_watermark(self.root, "month"))
 
-    def test_sediment_triggers_backup(self):
-        """0.10.8：沉淀成功（有 results）后调用备份注入点；无沉淀时不调用。"""
-        calls = []
-        self.wt.backup_duckdb = lambda root, force=False: calls.append(root) or None
+    def test_sediment_triggers_backup_then_checkpoint(self):
+        """0.10.8 + 0.11.1：沉淀成功（有 results）后先备份、再收口 WAL；无沉淀则两者都不调。
+
+        顺序是硬约束——反序会让"checkpoint 失败/耗时"拖住备份，最坏留下
+        "备份停在旧水位"的窗口；本序最坏只是 WAL 多留一天。
+        """
+        seq = []
+        self.wt.backup_duckdb = lambda root, force=False: seq.append("backup") or None
+        self.wt.checkpoint_duckdb = lambda root: seq.append("checkpoint") or True
         res = self.wt.warehouse_run(days=1)
         self.assertTrue(res["ok"])
-        self.assertEqual(len(calls), 1)  # 有目标日 → 备份一次
+        self.assertEqual(seq, ["backup", "checkpoint"])  # 顺序 + 各一次
         self.wt.warehouse_run(days=1)  # 幂等：无新目标日
-        self.assertEqual(len(calls), 1)  # 不重复备份
-        # 备份异常不影响沉淀结论
+        self.assertEqual(seq, ["backup", "checkpoint"])  # 不重复
+        # 任一步异常都不影响沉淀结论
         self.wt.backup_duckdb = lambda root, force=False: (_ for _ in ()).throw(RuntimeError("boom"))
-        res2 = self.wt.warehouse_run(days=1)
-        self.assertTrue(res2["ok"])
+        self.assertTrue(self.wt.warehouse_run(days=1)["ok"])
+        self.wt.backup_duckdb = lambda root, force=False: seq.append("backup") or None
+        self.wt.checkpoint_duckdb = lambda root: (_ for _ in ()).throw(RuntimeError("boom"))
+        self.assertTrue(self.wt.warehouse_run(days=1)["ok"])
 
     # ---- 0.10.45 缺口自愈守卫（0915 场景回归：水位线越过中间日成永久洞） ----
 

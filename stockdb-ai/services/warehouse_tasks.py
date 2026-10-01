@@ -40,6 +40,7 @@ warehouse_root = None   # () -> Path（storage.warehouse.layout.root_dir）
 availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
 backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：日级备份）
+checkpoint_duckdb = None  # storage.warehouse.backup.checkpoint_duckdb（0.11.1：WAL 日级收口）
 
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
 _wh_run_state: dict = {"running": False, "started": None, "finished": None, "result": None}
@@ -242,6 +243,18 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
                     log(f"🗄️ warehouse.duckdb 备份完成：{path.name}")
             except Exception:  # noqa: BLE001 - 备份失败不影响沉淀结论
                 log("⚠️ warehouse.duckdb 备份失败（已静默，不影响沉淀）")
+        # 0.11.1：日级 WAL 收口（**必须在备份之后**——反序则 checkpoint 耗时/失败会
+        # 拖住备份，最坏留下"备份停在旧水位"的窗口；本序最坏只是 WAL 多留一天）。
+        # 起因 NAS 实测：wal_autocheckpoint 默认 16MiB 而日增 ~0.1MB → 主库文件曾
+        # 冻结 7 天、写入全积在 .wal，裸拷主库会静默丢一周。
+        if checkpoint_duckdb is not None and results:
+            try:
+                if checkpoint_duckdb(root):
+                    log("🧩 warehouse.duckdb WAL 收口完成（主库已与备份同步）")
+                else:
+                    log("⚠️ warehouse.duckdb WAL 收口未成功（WAL 保留，状态不丢）")
+            except Exception:  # noqa: BLE001 - 收口失败不影响沉淀结论
+                log("⚠️ warehouse.duckdb WAL 收口异常（已静默，不影响沉淀）")
         ok = all(r.get("reconcile", {}).get("ok", True) for r in results)
         return {"ok": ok, "days": results, "finished_at": _now_iso()}
     except Exception as exc:  # noqa: BLE001 - 单块降级

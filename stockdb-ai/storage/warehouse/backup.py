@@ -1,10 +1,12 @@
-"""storage.warehouse.backup — warehouse.duckdb 在线备份（0.10.8；ROADMAP C5 落地）。
+"""storage.warehouse.backup — warehouse.duckdb 在线备份 + WAL 收口（0.10.8；ROADMAP C5 落地）。
 
 沿 research_store（mydb）的备份模式：
   - 独立连接在线快照，不占 engine 业务锁（沿 0.9.12 教训：主连接内备份会
     锁死全部查询——DuckDB 同进程按路径缓存实例，COPY 期间其他连接被阻塞）
   - 秒级时间戳 + uuid 后缀防同名冲突（沿 0.9.11 教训）
   - 保留最近 BACKUP_KEEP 份；失败静默返回 None（不阻塞沉淀主流程）
+  - **调用必须在应用进程内（NAS 实测 2026-09-30）**：`duckdb.connect(路径)` 复用同进程
+    缓存实例——换独立进程（docker exec python）拿不到实例锁即失败
 
 DuckDB 等价物：`COPY FROM DATABASE`（1.5 语法）——ATTACH 源/目标后全库镜像
 （表/视图/宏/schema/元数据），备份文件独立可打开（沿"备份独立可读"断言模式）。
@@ -76,3 +78,70 @@ def backup_duckdb(root: Path, force: bool = False) -> Path | None:
         except Exception:  # noqa: BLE001
             pass
         return None
+
+
+def checkpoint_duckdb(root: Path) -> bool:
+    """把 WAL 收口进主库（0.11.1；NAS 2026-09-30 实测缺陷）。
+
+    背景（NAS 2026-09-30 定点实测）：DuckDB 1.5.5 的 `wal_autocheckpoint` 默认
+    16 MiB，而仓库日增量仅 ~0.1 MB → 自动 checkpoint 日常从不触发；唯一触发时机
+    是引擎干净关闭。于是 `warehouse.duckdb` 的 mtime 停在 09-23，此后 7 天写入
+    全留在 `.wal`——**任何"只拷 .duckdb"的裸恢复会静默退到 09-23**。备份路径本身
+    无恙（`COPY FROM DATABASE` 是逻辑快照），坏的是裸文件语义。
+
+    与 backup_duckdb 的差异（只有一处）：`duckdb.connect(str(src))` + `CHECKPOINT`
+    ——同一缓存实例、同一连接，因此调用纪律同 backup_duckdb：**必须在应用进程内**
+    （NAS 实测：独立进程 `docker exec python` 报 "Conflicting lock is held"，0.01s 失败）。
+
+    语义：只 flush 已提交事务，**不改逻辑状态**（NAS 实测：0.38s，主库 mtime 前移、
+    .wal 消失，三水位/adjust_events/各视图计数逐项一致）。幂等——重复调用无副作用。
+
+    失败静默返回 False（沿 backup_duckdb：不阻塞沉淀主流程；最坏只是 WAL 多留一天）。
+    """
+    import duckdb
+
+    root = Path(root)
+    src = layout.duckdb_path(root)
+    if not src.exists():
+        return False
+    try:
+        con = duckdb.connect(str(src))
+        try:
+            con.execute("CHECKPOINT")
+        finally:
+            con.close()
+        return True
+    except Exception:  # noqa: BLE001 - 收口失败不阻塞沉淀（WAL 仍在，状态不丢）
+        return False
+
+
+def warehouse_db_state(root: Path) -> dict:
+    """主库 / WAL 文件新鲜度（只读 stat，不碰 DuckDB；供 /api/diag 观测）。
+
+    0.11.1 起因：WAL 长期不 checkpoint 这件事**完全不可见**——本次巡检就曾把
+    "读到旧水位"误判成"水位线停止推进"。故把文件事实透出成一眼可辨的一项。
+
+    返回 {"exists", "mtime", "size", "wal_size", "wal_ratio", "stale"}；
+    `stale` = WAL 已达主库 10%（自校准阈值，不依赖业务日期——收口正常时每日
+    checkpoint 会让 WAL 归零，故任何显著占比都意味着"多日未收口"）。
+    """
+    root = Path(root)
+    src = layout.duckdb_path(root)
+    out = {"exists": False, "mtime": None, "size": 0,
+           "wal_size": 0, "wal_ratio": 0.0, "stale": False}
+    try:
+        if not src.exists():
+            return out
+        st = src.stat()
+        out["exists"] = True
+        out["size"] = st.st_size
+        out["mtime"] = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        wal = src.with_name(src.name + ".wal")
+        if wal.exists():
+            out["wal_size"] = wal.stat().st_size
+            if st.st_size > 0:
+                out["wal_ratio"] = out["wal_size"] / st.st_size
+            out["stale"] = out["wal_size"] >= 0.10 * st.st_size
+    except Exception:  # noqa: BLE001 - 观测项，任何异常都降级为"未知"
+        pass
+    return out
