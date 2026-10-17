@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## [0.12.2] — 2026-10-17（**驾驶舱"需处理"跨天追平即撤**：sync_history 历史失败条目在数据水位被他日成功推进后不再计入待处理）
+
+> 起因：0.12.1 上线当日实机复验发现：告警中心虽清零，驾驶舱顶部仍挂
+> **「需处理 27 项」**红色卡（10-09/10-12/10-13/10-14 的 auth failed 各
+> ×7/×7/×7/×6 条）——同为"故障已恢复但残留红点"，却走**另一条管线**：
+> 驾驶舱聚合的是 `sync_history` 的逐条分类（`sync_failure_class`，
+> 0.10.38），其 `has_later_success` 只看**当日**有无后续成功；10-15 16:24
+> 的追平是**跨日**救回，故 4 个失事日的失败条目结构上永远 needs_action=true
+> （`/api/alerts/clear` 与"静音"只作用于告警中心，均救不了这里）。
+
+**实现（1 处聚合 + 1 处纯函数，零 SPA 改动）**
+
+1. `app.load_timeline`：预扫全局成功点（exit=0 + verified=pass，按 ts 排序）；
+   当日无后续成功的失败条目，查其**之后**是否存在跨日成功且 `data_latest`
+   **严格前进**（双方均为 8 位日期才比较；失败时点水位缺失/非 8 位时，
+   以"之后有 pass 成功"为准——与同日自愈同权）→ 组装
+   `cross_day_catchup = "MM-DD HH:MM 追平至 YYYYMMDD"` 传入分类。
+2. `sync_failure_class` 新增可选参数 `cross_day_catchup`（纯函数，默认 None，
+   旧调用零影响）：非空时与 `has_later_success` 同权走规则 2 →
+   `self_healed`（label 已自愈、needs_action=False、SPA 色调 muted），
+   detail 落"<原故障>，MM-DD HH:MM 追平至 YYYYMMDD"。复用既有类名而非新设
+   class（新 class 串会被前端旧兜底误判为 err）。
+3. 语义拍板（与 0.12.1 对齐）：**"次日追平即撤"**——失败发生后，数据水位在他日
+   成功中前进 = 故障完案；水位未前进的同水位成功**不**消账（保守，不误销）。
+   打开事故回放：10-09~10-14 的 27 条失败本版起自动归 muted，"需处理"卡清空。
+4. `WEBUI_VERSION` 0.12.1 → **0.12.2**。
+
+**测试**（`test_ops.py` +4）
+- 纯函数：跨天证据 → self_healed/needs_action=False/detail 含追平时点与水位；
+  无证据 → 维持 data_source_error 待处理（不误销账）。
+- `TimelineExtrasTest` 集成（事故回放 + 保守分支）：
+  09-08 auth failed → 09-09 追平成功（水位前进）→ 09-08 needs_action=0、
+  classification self_healed、detail 含"追平至 20260909"、成功日照常 ok；
+  水位同值成功 → 不消账。
+
 ## [0.12.1] — 2026-10-16（**收口告警"次日追平即撤"**：就绪门/港股超时两族自动销账，修补上游 auth failed 长故障暴露的面板残留红点）
 
 > 起因：10-09~10-15 上游镜像（`ah.123128.xyz`）设备验证连续 4+ 交易日

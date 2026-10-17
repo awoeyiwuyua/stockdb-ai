@@ -1427,8 +1427,9 @@ class SyncFailureClassTest(unittest.TestCase):
     """sync_failure_class：纯函数分类（NAS 真身形态驱动），防止把"等上游/部署打断"
     误报成"需处理"（0.10.38 改版起因：09-07 被打断的手动重试被当成未决问题）。"""
 
-    def _cls(self, rec, later=False):
-        return app.sync_failure_class(rec, has_later_success=later)
+    def _cls(self, rec, later=False, cross=None):
+        return app.sync_failure_class(rec, has_later_success=later,
+                                      cross_day_catchup=cross)
 
     def test_ok_when_pass_without_warn(self):
         r = self._cls({"exit_code": 0, "verified": "pass", "duration_sec": 87.6,
@@ -1488,6 +1489,30 @@ class SyncFailureClassTest(unittest.TestCase):
         r = self._cls({"exit_code": 0, "verified": "fail", "duration_sec": 1660.7,
                        "data_latest": None, "reason": "数据完整性验证未通过"})
         self.assertEqual(r["class"], "verify_failed")
+        self.assertTrue(r["needs_action"])
+
+    def test_self_healed_by_cross_day_catchup(self):
+        """0.12.2 真身（NAS 10-09~10-14 事故）：exit=0/verified=skipped + auth failed，
+        当日无后续成功；次日 10-15 16:24 跨天追平（水位 20261008→20261016）→
+        历史失败不再计入"需处理"（与 0.12.1「次日追平即撤」同族）。"""
+        r = self._cls(
+            {"trigger": "scheduled", "exit_code": 0, "verified": "skipped",
+             "duration_sec": 30.6, "data_latest": "20261008",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            cross="10-15 16:24 追平至 20261016")
+        self.assertEqual(r["class"], "self_healed")
+        self.assertFalse(r["needs_action"])
+        self.assertIn("10-15 16:24", r["detail"])
+        self.assertIn("20261016", r["detail"])
+
+    def test_cross_day_catchup_absent_keeps_needs_action(self):
+        """无跨天证据（参数空）→ 维持 data_source_error 待处理（不误消账）。"""
+        r = self._cls(
+            {"trigger": "scheduled", "exit_code": 0, "verified": "skipped",
+             "duration_sec": 30.6, "data_latest": "20261008",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"})
+        self.assertEqual(r["class"], "data_source_error")
         self.assertTrue(r["needs_action"])
 
     def test_run_interrupted_for_manual_short_failure(self):
@@ -1911,6 +1936,43 @@ class TimelineExtrasTest(_OpsTestCase):
         self.assertTrue(day["needs_action"])
         self.assertEqual(day["needs_action_count"], 1)
         self.assertIn("验证未通过", day["action_hint"])
+
+    def test_cross_day_catchup_resolves_historical_failure(self):
+        """0.12.2 事故回放：09-08 auth failed 当日无自愈；09-09 跨天追平成功
+        （水位前进）→ 09-08 需处理清零、分类 self_healed；成功日本身照常 ok。"""
+        self._write_history([
+            {"ts": "2026-09-08 15:54:22", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 30.6, "data_latest": "20260904",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权",
+             "warn": "同步未生效：下载 0 文件且数据未更新（镜像清单可能已变更）"},
+            {"ts": "2026-09-09 17:50:38", "trigger": "scheduled-stale-retry",
+             "exit_code": 0, "verified": "pass", "duration_sec": 140.5,
+             "data_latest": "20260909"},
+        ])
+        day8 = self._day("20260908")
+        self.assertEqual(day8["sync"][0]["class"], "self_healed")
+        self.assertFalse(day8["sync"][0]["needs_action"])
+        self.assertFalse(day8["needs_action"])
+        self.assertEqual(day8["needs_action_count"], 0)
+        # 追平证据落在条目 detail（面板可读"何时追平至何处"；无待处理 → hint 空）
+        self.assertIn("追平至 20260909", day8["sync"][0]["detail"] or "")
+        self.assertIsNone(day8["action_hint"])
+        day9 = self._day("20260909")
+        self.assertEqual(day9["sync"][0]["class"], "ok")
+        self.assertFalse(day9["needs_action"])
+
+    def test_cross_day_catchup_requires_data_advance(self):
+        """后续成功但水位**未**前进（同水位 pass）→ 不消账，维持待处理。"""
+        self._write_history([
+            {"ts": "2026-09-08 15:54:22", "trigger": "scheduled", "exit_code": 0,
+             "verified": "skipped", "duration_sec": 30.6, "data_latest": "20260908",
+             "reason": "数据源失败：认证失败（auth failed），请检查数据源授权"},
+            {"ts": "2026-09-09 15:52:00", "trigger": "scheduled", "exit_code": 0,
+             "verified": "pass", "duration_sec": 120.0, "data_latest": "20260908"},
+        ])
+        day8 = self._day("20260908")
+        self.assertTrue(day8["needs_action"])
+        self.assertEqual(day8["needs_action_count"], 1)
 
     def test_interrupted_manual_run_does_not_flag_day(self):
         """09-07 场景：pass → pass → 手动被打断 ⇒ 日级不标需处理（改版核心）。"""
