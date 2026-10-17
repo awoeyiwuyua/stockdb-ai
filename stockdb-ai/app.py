@@ -274,6 +274,19 @@ def load_timeline(days: int = 7) -> list[dict]:
         #    手动重试因此被误判成需处理）；② 语义是「该条**之后**还有成功运行」，
         #    即 ts < 当日最新成功时刻（写成 last_success > ts 方向就反了——
         #    21:54 > 21:58 == False，会把 09-07 与 09-11 两种情况全判错）。
+        # 0.12.2：另备跨天追平证据——失败条目之后**跨日**存在成功运行且 data_latest
+        # 前进（失败时点水位缺失/非 8 位时，只要求"之后有 pass 成功"）→ 交
+        # sync_failure_class 判 self_healed，与同日自愈同权（"次日追平即撤"）。
+        success_points = sorted(
+            ((str(e.get("ts") or ""), str(e.get("data_latest") or ""))
+             for items_ in sync_by_day.values() for e in items_
+             if e.get("exit_code") == 0 and e.get("verified") == "pass"
+             and str(e.get("data_latest") or "")),
+            key=lambda p: p[0])
+
+        def _is_d8(v: str) -> bool:
+            return len(v) == 8 and v.isdigit()
+
         for day, items in sync_by_day.items():
             items.sort(key=lambda e: str(e.get("ts") or ""))
             last_success_ts = None
@@ -284,9 +297,21 @@ def load_timeline(days: int = 7) -> list[dict]:
             for idx, entry in enumerate(items):
                 ts = str(entry.get("ts") or "")
                 later = bool(last_success_ts and ts < last_success_ts)
+                cross_catchup = None
+                if not later:
+                    this_latest = str(entry.get("data_latest") or "")
+                    for succ_ts, succ_latest in success_points:
+                        if succ_ts <= ts:
+                            continue
+                        if (_is_d8(succ_latest)
+                                and ((_is_d8(this_latest) and succ_latest > this_latest)
+                                     or not _is_d8(this_latest))):
+                            cross_catchup = f"{succ_ts[5:16]} 追平至 {succ_latest}"
+                            break
                 entry.update(sync_failure_class(
                     entry, has_later_success=later, day_has_success=day_has_success,
-                    is_last_of_day=(idx == len(items) - 1)))
+                    is_last_of_day=(idx == len(items) - 1),
+                    cross_day_catchup=cross_catchup))
     except Exception:
         pass
 
@@ -393,7 +418,8 @@ def _reason_nature(reason) -> str:
 
 def sync_failure_class(record: dict, *, has_later_success: bool = False,
                        day_has_success: bool = False,
-                       is_last_of_day: bool = False) -> dict:
+                       is_last_of_day: bool = False,
+                       cross_day_catchup: str | None = None) -> dict:
     """单条同步记录的分类（纯函数，零 IO）。
 
     返回 {"class", "label", "needs_action", "detail"}。
@@ -402,6 +428,11 @@ def sync_failure_class(record: dict, *, has_later_success: bool = False,
       has_later_success  该条**之后**当日还有成功运行（→ 已自愈）
       day_has_success    当日**存在**成功运行（含更早的；用于识别"当日以手动实验失败收尾"）
       is_last_of_day     该条是当日最后一条记录
+      cross_day_catchup  （0.12.2，可空）跨天追平证据："MM-DD HH:MM 追平至 YYYYMMDD"。
+                         失败条目**之后跨日**存在成功运行且数据水位前进 → 与"次日
+                         追平即撤"（0.12.1 告警族）同族语义：故障已被后续成功覆盖，
+                         历史记录不再计入"需处理"。避免 10-09~10-14 式残留——失败
+                         当日无自愈，追平日（10-15 16:24）才是终点。
 
     判定顺序（NAS 真身数据驱动，最容易被误报的先判）：
       1) ok                exit=0 且 verified=pass 且无 warn
@@ -444,11 +475,16 @@ def sync_failure_class(record: dict, *, has_later_success: bool = False,
     #    触发条件含 reason 非空：NAS 09-07 真身前两条是 exit=0/verified=skipped 但
     #    reason=「数据源失败：认证失败」——它们确实是当时的真故障，而 16:51 的
     #    stale-retry 已成功 → 属于"已自愈"，不该留在待处理里。
-    if has_later_success and (verified == "fail" or exit_code not in (0, None)
-                              or _reason_nature(reason) in ("fatal", "interrupt")):
+    #    0.12.2：跨天追平证据（cross_day_catchup）与同日 has_later_success 同权——
+    #    当日无自愈不代表"永远待处理"，数据在他日追上即完案。
+    if (has_later_success or cross_day_catchup) and (
+            verified == "fail" or exit_code not in (0, None)
+            or _reason_nature(reason) in ("fatal", "interrupt")):
         kind = str(reason or "").strip() or ("数据完整性验证未通过"
                                              if verified == "fail" else f"退出码 {exit_code}")
-        return _out("self_healed", False, f"{kind}，后续重试已成功")
+        detail = (f"{kind}，{cross_day_catchup}" if cross_day_catchup
+                  else f"{kind}，后续重试已成功")
+        return _out("self_healed", False, detail)
     # 3) 打断：手动短失败 + 当日有成功；或验证未通过 + 当日有成功
     #    （NAS 09-07 21:58：22:00 部署重启打断的手动重试，当日 21:54 已有成功）
     if day_has_success and (short_manual or _reason_nature(reason) == "interrupt"):
