@@ -1079,8 +1079,8 @@ class WarehouseTasksTest(unittest.TestCase):
         def __init__(self):
             self.resolved: list = []
 
-        def resolve(self, source, prefix):
-            self.resolved.append((source, prefix))
+        def resolve(self, source, prefix, before=None):
+            self.resolved.append((source, prefix, before))
             return 1
 
     def _fill_days(self, dates):
@@ -1133,6 +1133,23 @@ class WarehouseTasksTest(unittest.TestCase):
             self.wt.data_latest = original
         self.assertFalse(res["ok"])
         self.assertTrue(str(res["reason"]).startswith("未就绪："))
+
+    def test_readiness_recover_resolves_stale_night_alerts(self):
+        """0.12.1：调度路径就绪门通过 + 沉淀全绿 → 撤此前各日「沉淀就绪门未过」
+        收口告警（次日追平即撤——before=今天，当日新挂的条目保留）。"""
+        self.wt.data_latest = lambda force=False: datetime.datetime.now().strftime("%Y%m%d")
+        res = self.wt.warehouse_run(days=1, require_today=True)
+        self.assertTrue(res["ok"], res)
+        self.assertIn(("warehouse", "沉淀就绪门未过",
+                       datetime.datetime.now().isoformat()[:10]),
+                      self._fake_alerts.resolved)
+
+    def test_manual_sediment_does_not_resolve_night_alerts(self):
+        """0.12.1：手动路径（require_today=False）沉淀成功不销账——数据面未确认
+        当日追平，收口告警仍属有效记录；调度全绿日才撤。"""
+        res = self.wt.warehouse_run(days=1)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self._fake_alerts.resolved, [])
 
     def test_unavailable_degrades_without_exceptions(self):
         self.wt.availability = lambda: (False, "duckdb unavailable: test")
@@ -1312,7 +1329,7 @@ class WarehouseTasksTest(unittest.TestCase):
         # 水位线不回退
         self.assertEqual(self.wt.sink.catalog.get_watermark(self.root, "daily"), "20260822")
         # 回填落盘对账通过 → 条件恢复 → 撤警（前缀匹配）
-        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+        self.assertIn(("仓库", "缺口自愈：", None), self._fake_alerts.resolved)
 
     def test_gap_guard_no_holes_no_probe(self):
         """无洞：零引擎往返（有界性），撤旧警，无回填。"""
@@ -1326,7 +1343,7 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertEqual(res["holes"], [])
         self.assertEqual(len(probes), 0)  # 无洞 → 零引擎往返
         self.assertFalse(res["triggered"])
-        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+        self.assertIn(("仓库", "缺口自愈：", None), self._fake_alerts.resolved)
 
     def test_gap_guard_engine_missing_waits_without_mark(self):
         """引擎侧也无数据：不回填、不写 empty 标记（0908 教训——标记会挡住
@@ -1352,7 +1369,7 @@ class WarehouseTasksTest(unittest.TestCase):
         self.wt.query_snapshot = lambda q: {"points": _traded_points()}
         res3 = self.wt.maybe_backfill_gaps()
         self.assertEqual(res3["filled"], ["20260821"])
-        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+        self.assertIn(("仓库", "缺口自愈：", None), self._fake_alerts.resolved)
 
     def test_gap_guard_window_bounded(self):
         """窗口有界：洞多于窗口只报窗口内 _GAP_WINDOW_TRADING_DAYS 个，
@@ -1400,12 +1417,12 @@ class WarehouseTasksTest(unittest.TestCase):
         self.assertEqual(res["filled"], [])               # 写入空 → 未完成
         self.assertEqual(len(self._alert_added), 1)
         self.assertIn("回填未完成", self._alert_added[0][2])
-        self.assertNotIn(("仓库", "缺口自愈："),
+        self.assertNotIn(("仓库", "缺口自愈：", None),
                          self._fake_alerts.resolved)      # 条件未恢复不撤警
         # backfill 空交易日分支写了 empty 标记 → 次轮守卫不再视其为洞 → 撤警
         res2 = self.wt.maybe_backfill_gaps()
         self.assertEqual(res2["holes"], [])
-        self.assertIn(("仓库", "缺口自愈："), self._fake_alerts.resolved)
+        self.assertIn(("仓库", "缺口自愈：", None), self._fake_alerts.resolved)
 
     # ---- 0.11.0 复权因子通道（日期维度接线；v_daily 复权 5 列从 NULL 变可用） ----
 

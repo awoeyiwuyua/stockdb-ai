@@ -42,6 +42,9 @@ class Alerts:
 
     0.10.36 自愈：resolve(source, message_prefix) 撤回「条件已恢复」的告警——
     告警是条件式投影，条件恢复后条目即作废（否则面板红点长期失真）。
+    0.12.1：可选 before=ISO 日期——只撤**产生于该日期之前**的条目（次日追平
+    即撤）：夜间收口类告警（就绪门超时/港股同步超时）非当轮条件复核，当日
+    新挂的条目仍在演进窗口内，留给次日任务全绿时再撤，避免过早销撤证据。
     """
 
     def __init__(self, path: str):
@@ -141,11 +144,15 @@ class Alerts:
         with self._lock:
             return len(self._items)
 
-    def resolve(self, source: str, message_prefix: str) -> int:
+    def resolve(self, source: str, message_prefix: str,
+                *, before: str | None = None) -> int:
         """撤回已恢复条件下的告警（0.10.36 自愈）。
 
         匹配 (source 精确相等, message 以 message_prefix 开头) 的条目并移除；
-        返回移除条数。设计要点：
+        返回移除条数。给 before（ISO 日期串）时只移除 ts 日期严格早于 before
+        的条目（0.12.1「次日追平即撤」——当日条目保留）。
+
+        设计要点：
 
         - **前缀匹配**：滞后告警文案含天数（"行情数据已滞后 35 天（最新 D）"），
           滞后天数变化会改文案 → 精确匹配会漏撤（NAS 实证：数据 17:50 追平后
@@ -155,14 +162,26 @@ class Alerts:
         - 条件是「当前快照」而非历史事件（探针失败/滞后），故撤回不产生新条目，
           也不进当日去重逻辑；条件再次恶化时 add 会重新投递。
         - 无匹配 → 返回 0、不落盘（看门狗 60s 一轮，避免无谓 IO）。
+        - **before 日期门槛（0.12.1）**：夜间收口类告警（沉淀就绪门超时/港股
+          同步超时）不是条件式复核，add 后挂到有人接手为止；用「任务全绿日
+          撤任务全绿日以前」。before 空串非法（与 source/prefix 同规）。
         """
         src = str(source).strip()
         prefix = str(message_prefix)
         if not src or not prefix:
             raise ValueError("resolve 需要非空 source 与 message 前缀")
+        if before is not None:
+            before = str(before).strip()
+            if not before:
+                raise ValueError("resolve 的 before 需为非空 ISO 日期串（或传 None 撤全部）")
         with self._lock:
-            kept = [e for e in self._items
-                    if not (e["source"] == src and e["message"].startswith(prefix))]
+            def _doomed(e: dict) -> bool:
+                if e["source"] != src or not e["message"].startswith(prefix):
+                    return False
+                if before is not None and e["ts"][:10] >= before:
+                    return False
+                return True
+            kept = [e for e in self._items if not _doomed(e)]
             removed = len(self._items) - len(kept)
             if removed:
                 self._items = kept

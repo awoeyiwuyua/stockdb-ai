@@ -52,8 +52,8 @@ class _FakeAlerts:
         self.added.append((level, source, message))
         return True
 
-    def resolve(self, source, prefix):
-        self.resolved.append((source, prefix))
+    def resolve(self, source, prefix, before=None):
+        self.resolved.append((source, prefix, before))
         return 1
 
 
@@ -154,6 +154,9 @@ class HkRunSyncTest(_HkTasksBase):
         self.assertTrue(self.ht._hk_run_state["result"]["ok"])
         # 任务本体不投告警（调度层统一处理）
         self.assertEqual(self.alerts.added, [])
+        # 0.12.1：全绿收口 → 撤此前各日的同步超时告警（before=今天，当日保留）
+        self.assertIn(("港股", "港股同步重试至", datetime.now().isoformat()[:10]),
+                      self.alerts.resolved)
 
     def test_partial_failure_recorded(self):
         self.ht.sync_fn = lambda codes, years: {
@@ -166,6 +169,10 @@ class HkRunSyncTest(_HkTasksBase):
         state = self.ht.hk_state()
         self.assertEqual(state["latest"], {"00700": 20260930})  # 只记成功码
         self.assertFalse(self.records[0]["ok"])
+        # 0.12.1：部分失败 ≠ 清单全绿，不销账（超时收口告警须全绿日再撤）
+        self.assertNotIn(
+            "港股同步重试至",
+            [src for src, _prefix, _before in self.alerts.resolved])
 
     def test_sync_fn_raise_degrades(self):
         def _boom(codes, years):
@@ -242,7 +249,7 @@ class HkFreshnessAlertTest(_HkTasksBase):
         fired = self.ht.hk_freshness_alert(datetime(2026, 10, 2, 17, 0), alerts=self.alerts)
         self.assertFalse(fired)
         self.assertEqual(self.alerts.added, [])
-        self.assertIn(("港股", "港股数据滞后"), self.alerts.resolved)
+        self.assertIn(("港股", "港股数据滞后", None), self.alerts.resolved)
 
     def test_stale_on_trading_day_after_2000_alerts(self):
         self.ht.calendar = _FakeHKCalendar()
@@ -258,7 +265,7 @@ class HkFreshnessAlertTest(_HkTasksBase):
         fired = self.ht.hk_freshness_alert(datetime(2026, 10, 1, 10, 0), alerts=self.alerts)
         self.assertFalse(fired)
         self.assertEqual(self.alerts.added, [])
-        self.assertIn(("港股", "港股数据滞后"), self.alerts.resolved)
+        self.assertIn(("港股", "港股数据滞后", None), self.alerts.resolved)
 
     def test_no_calendar_resolves(self):
         self.ht.calendar = None

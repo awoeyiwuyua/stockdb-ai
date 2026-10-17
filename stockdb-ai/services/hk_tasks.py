@@ -104,6 +104,9 @@ def hk_run_sync(codes: list[str] | None = None, years: int | None = None) -> dic
     不投递告警（调度层统一处理，避免手动路径刷告警）；失败原因在返回值
     failed/results 里。sync_fn 未装配 → {ok: False, reason}。任意单码失败不
     中断批次（hk_sync 逐码独立 try 的语义沿用）。
+    0.12.1：全绿收口时撤回此前各日的「港股同步重试至」超时告警（次日追平
+    即撤——收口告警非条件式复核，待清单全绿日统一销账；消息前缀契约：
+    新超时告警文案以「港股同步重试至」开头）。
     """
     if sync_fn is None:
         return {"ok": False, "reason": "sync_fn 未装配（组合根未接线）"}
@@ -136,6 +139,15 @@ def hk_run_sync(codes: list[str] | None = None, years: int | None = None) -> dic
             pass
         _hk_run_state.update(running=False, finished=_now_iso(),
                              result={"ok": ok, "failed": failed, "latest": latest})
+        if ok:
+            # 0.12.1：清单全绿 = 「同步未成功」症状已解除 → 撤此前各日的同步
+            # 超时收口告警（次日追平即撤，before=今天保留当日条目）。覆盖调度
+            # 与手动 /api/hk/run 两条通路；部分失败（ok=False）不销账。
+            try:
+                _get_alerts().resolve("港股", "港股同步重试至",
+                                      before=_now_iso()[:10])
+            except Exception:  # noqa: BLE001 - 告警通道异常不影响任务结论
+                pass
     return {"ok": not failed, "failed": failed, "latest": latest, "results": results}
 
 
@@ -234,7 +246,7 @@ def hk_scheduler_loop() -> None:
                             try:
                                 _get_alerts().add(
                                     "error", "港股",
-                                    f"{today} 港股同步重试至 {_RETRIED_UNTIL} 未成功："
+                                    f"港股同步重试至 {_RETRIED_UNTIL} 未成功（{today}）："
                                     f"{'、'.join(res.get('failed') or [])}")
                             except Exception:  # noqa: BLE001 - 告警通道异常不阻塞调度
                                 pass
