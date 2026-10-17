@@ -118,6 +118,9 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
     就绪门：require_today=True（调度路径）时要求 data_latest >= 今日（当日 K 线
     已同步——与打板收口同判定），未就绪返回 reason 以"未就绪："开头（调度层重试）；
     手动路径（HTTP 运维口）不设此门，沉淀到最新已同步日为止。
+    0.12.1：require_today=True 且沉淀全绿时，撤回此前各日的「沉淀就绪门未过」
+    收口告警（次日追平即撤——收口告警非条件式复核，待任务全绿日统一销账；
+    消息前缀契约：新告警文案以「沉淀就绪门未过」开头）。
     backfill=True（0.10.3）：历史回填模式——向 watermark 之前回看 days 个交易日
     （跳过非交易日；已有分区幂等跳过；watermark 不回退）。
     对账：行数 + 同源字段回读 + （有异源行时）异源开盘/昨收；issues 非空 → 告警 + 日检记录。
@@ -256,6 +259,15 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
             except Exception:  # noqa: BLE001 - 收口失败不影响沉淀结论
                 log("⚠️ warehouse.duckdb WAL 收口异常（已静默，不影响沉淀）")
         ok = all(r.get("reconcile", {}).get("ok", True) for r in results)
+        if ok and require_today:
+            # 0.12.1：就绪门通过 + 沉淀全绿 = 「数据未同步」症状已解除 → 撤
+            # 此前各日的收口告警（次日追平即撤，before=今天保留当日条目）。
+            # 手动回填路径（require_today=False）不撤：数据面未确认追平。
+            try:
+                _get_alerts().resolve("warehouse", "沉淀就绪门未过",
+                                      before=datetime.now().isoformat()[:10])
+            except Exception:  # noqa: BLE001 - 告警通道异常不影响沉淀结论
+                pass
         return {"ok": ok, "days": results, "finished_at": _now_iso()}
     except Exception as exc:  # noqa: BLE001 - 单块降级
         log(f"⚠️ 仓库沉淀失败：{exc}")
@@ -609,7 +621,8 @@ def warehouse_scheduler_loop() -> None:
                         if now_hm >= _RETRY_UNTIL:
                             guard["fired"] = True
                             notify_alert("error", "warehouse",
-                                         f"{today} 沉淀就绪门至 {_RETRY_UNTIL} 未过：{res.get('reason')}")
+                                         f"沉淀就绪门未过（{today} 至 {_RETRY_UNTIL}）："
+                                         f"{res.get('reason')}")
                     else:
                         guard["fired"] = True  # 硬失败：告警已发（warehouse_run 内），当日收口
                         log(f"⚠️ 仓库沉淀失败（当日收口）：{res.get('reason')}")

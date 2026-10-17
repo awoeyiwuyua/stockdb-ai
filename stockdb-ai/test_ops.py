@@ -992,6 +992,49 @@ class AlertsTest(_OpsTestCase):
         with self.assertRaises(ValueError):
             a.resolve("数据", "")
 
+    def test_resolve_before_keeps_today_removes_older(self):
+        """0.12.1 before 门槛：只撤 ts 日期严格早于 before 的条目，当日条目保留
+        （次日追平即撤——收口告警当日仍在演进窗口，留给次日全绿时统一销账）。"""
+        today = datetime.datetime.now().isoformat(timespec="seconds")[:10]
+        path = os.path.join(self.tmp, "alerts_before.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([
+                {"ts": "2026-10-09T20:00:01", "level": "error", "source": "warehouse",
+                 "message": "沉淀就绪门未过（20261009 至 20:00）：未就绪：数据未同步"},
+                {"ts": "2026-10-13T20:05:03", "level": "error", "source": "港股",
+                 "message": "港股同步重试至 20:00 未成功（20261013）：00100、00700"},
+                {"ts": f"{today}T09:00:00", "level": "error", "source": "warehouse",
+                 "message": "沉淀就绪门未过（当日留置条目）"},
+            ], f, ensure_ascii=False)
+        a = app.Alerts.init(path)
+        removed = a.resolve("warehouse", "沉淀就绪门未过", before=today)
+        self.assertEqual(removed, 1)                       # 只撤此前各日
+        messages = [e["message"] for e in a.list()]
+        self.assertIn("沉淀就绪门未过（当日留置条目）", messages)      # 当日保留
+        self.assertIn("港股同步重试至 20:00 未成功（20261013）：00100、00700",
+                      messages)                            # 源不同保留
+        self.assertNotIn("沉淀就绪门未过（20261009 至 20:00）：未就绪：数据未同步",
+                         messages)
+        # 落盘生效：新实例读回一致
+        a2 = app.Alerts.init(a.path)
+        self.assertEqual([e["message"] for e in a2.list()], messages)
+
+    def test_resolve_before_nothing_older_no_write(self):
+        """before 只留当日 → 无可撤条目，返回 0、不落盘。"""
+        a = self._alerts()
+        a.add("info", "系统", "保留条目")
+        stamp = os.path.getmtime(a.path)
+        self.assertEqual(a.resolve("系统", "保留条目",
+                                   before=datetime.datetime.now().isoformat()[:10]), 0)
+        self.assertEqual(a.count(), 1)
+        self.assertEqual(os.path.getmtime(a.path), stamp)
+
+    def test_resolve_rejects_empty_before(self):
+        """before 显式给出但为空串 → ValueError（区别于 None=撤全部的历史语义）。"""
+        a = self._alerts()
+        with self.assertRaises(ValueError):
+            a.resolve("数据", "行情", before="   ")
+
     def test_notify_alert_lazy_singleton(self):
         """notify_alert 惰性单例：首次调用创建、绑定 DATA_DIR、复用同一实例。"""
         ops_alerts._alerts_singleton = None
