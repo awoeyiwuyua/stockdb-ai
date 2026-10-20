@@ -39,6 +39,10 @@ services:
       # 0.10.27 token 门禁：宿主侧 .env 写 WEBUI_TOKEN=... 即启用（空 = 关闭，纯内网）。
       # 启用后浏览器首次访问需输入一次令牌（webui 登录卡片）；/mcp 豁免见 docs/design/webui-from-zero.md
       WEBUI_TOKEN: ${WEBUI_TOKEN:-}
+      # 2026-10-20（上游 10-08 公告）：镜像页探针**不得**指向 a.123128.xyz——
+      # 它 302 → dns.novapi.cc，而 novapi 已被上游禁止直接用于更新（会把源站拉满）。
+      # 官方更新入口 = http://ad.123128.xyz（见 docs/ops/runbook.md §2.8）
+      MIRROR_PAGE_URL: ${MIRROR_PAGE_URL:-http://ad.123128.xyz}
     healthcheck:
       # 0.5.0 amd64 运行时是 Debian slim，无 wget → 用镜像内置 curl；
       # 中文表名必须 URL 编码（%E8%82%A1...=股票代码），与 webui 内部 quote 一致

@@ -1274,10 +1274,18 @@ _mirror_refresh_lock = threading.Lock()  # 防重入：镜像刷新后台线程�
 
 
 def mirror_latest_date() -> str | None:
-    """镜像源（a.123128.xyz 网页）标注的最新数据日期（10 分钟缓存）。
+    """镜像源网页标注的最新数据日期（10 分钟缓存）。
 
-    镜像源是 LevelDB 文件镜像（HTTP + manifest），无行情 API，但它首页明文标注
+    镜像源是 LevelDB 文件镜像（HTTP + manifest），无行情 API，但其网页明文标注
     「数据更新至:YYYY-MM-DD」。抓该日期可判断「本地落后是同步未跑 vs 镜像未发布」。
+
+    > **2026-10-20（上游 10-08 公告）**：**禁止直接用 `dns.novapi.cc` 更新**——
+    > 会被所有客户端反复打到、把源站拉满；上游已改回 `http://ad.123128.xyz`。
+    > 而 `a.123128.xyz` 现在 **302 → `dns.novapi.cc`**，所以默认镜像页**不能**再用
+    > 它（否则每次心跳都在打被禁的源站），已改为 `http://ad.123128.xyz`。
+    > 该主机目前不再标注日期文本 → `mirror` 字段为 `null`，
+    > **健康判定不依赖它**（0.10.13 起改用本地探针自检，见 §2.8）。
+
     可配置 MIRROR_PAGE_URL 覆盖（内网映射/镜像源变更时）。
 
     镜像抓取是公网请求且可能很慢（最多 12s）：/api/status 4s 心跳里不能同步等它。
@@ -1291,13 +1299,13 @@ def mirror_latest_date() -> str | None:
     def _refresh():
         try:
             import urllib.request, re
-            url = os.environ.get("MIRROR_PAGE_URL", "https://a.123128.xyz/")
+            url = os.environ.get("MIRROR_PAGE_URL", "http://ad.123128.xyz")
             result = None
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(req, timeout=12) as resp:
                     html = resp.read().decode("utf-8", "replace")
-                m = re.search(r"数据更新至:(\d{4}-\d{2}-\d{2})", html)
+                m = re.search(r"数据更新至[:：]?\s*(\d{4}-\d{2}-\d{2})", html)
                 result = m.group(1) if m else None
             except Exception:
                 result = None
