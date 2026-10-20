@@ -5,6 +5,38 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.12.11] — 2026-10-20（**网卡换 USB 口后的完整修复**：path 同步 + radio0 抢占 + rc.local 位置 + hotplug 匹配 + 重启）
+
+> 起因：0.12.10 判定为 USB 物理层故障、需换口。用户把网卡换到另一 USB 口后，
+> 暴露出一批**配置不会自动跟上**的坑——AP 起不来（hostapd 报 694 次 beacon 错误）。
+> 本条记录完整修复过程与那五个坑。
+
+- **换口后必须改的五处（漏一处就起不来）**：
+  1. **`radio1.path`** 要改成新路径，且**不能带前导 `/`**（带了 netifd 静默不认）；
+  2. **自动探测生成的 `radio0` 会抢占同一个 path**（`band=6g`、`country=00`）→
+     hostapd 报 `Invalid country_code '00'` + `hostapd.add_iface failed` → 删掉它；
+  3. **`rc.local` 的追加内容必须在 `exit 0` 之前**（OpenWrt 模板自带 `exit 0`，
+     追加在其后**永不执行**——本次的 autosuspend 持久化就这样静默失效）；
+  4. **`hotplug.d` 脚本不能硬编码端口号**（路径随 USB 口变化，`2-1` → `4-1`）
+     → 改按 vid:pid 匹配（MT7921U = `0e8d:7961`）；
+  5. **`/etc/hotplug.d` 目录可能不存在**（被清理过的系统）→ 先 `mkdir -p`。
+- **换口后必须重启设备**：旧设备的 `page_pool` 卡死会**污染新设备初始化**
+  （实测 `phy5-ap0` 存在但 hostapd 仍报 694 次错误，直到重启才清零）。
+  **rmmod/modprobe 清不掉。**
+  - ⚠️ **必须用 `setsid` 脱离 SSH 会话**：`setsid sh -c 'sleep 2; reboot' &`。
+    先用了 `(sleep 2; reboot) &`，结果 **uptime 没变**（设备根本没重启）却以为
+    重启过了——**验证重启是否真的发生，看 `uptime` 和
+    `/proc/sys/kernel/random/boot_id`**，别看 dmesg（内核 ring buffer 会保留）。
+- **当前状态（已验证）**：`page_pool` 0 条、beacon 错误 0 条、USB disconnect 0 次、
+  `br-proxyap` UP carrier=1、`channel 36 / width 40 MHz / center1 5190 MHz`、
+  3 台客户端关联、NAS 的 22/7899/8081 全部恢复。
+- **手册新增 §9「网卡换 USB 口后」**（五个坑 + 完整操作顺序 + 验证清单），
+  §8.5 硬件信息更新为新口 `4-1`（`xhci-hcd.7.auto/usb4`），环境速查表同步。
+- **runbook §9 第 16 条**状态更新为「已换 USB 口，当前正常，待观察」，
+  并保留「给 NAS 接网线」的建议（解除生产环境 WiFi 单点）。
+- **教训**：设备「换个口」不是插上就能用——OpenWrt 的 `option path` 是硬编码，
+  **配置不会跟随硬件位置变化**；且旧设备的驱动状态会污染新设备。
+
 ## [0.12.10] — 2026-10-20（**iStoreOS WiFi 掉线最终结论：USB 物理层故障**；autosuspend 与 HE80 两个假设均已证伪）
 
 > 起因：0.12.9 把 5G 降到 40MHz 后，**网卡仍反复掉线**——该假设亦被证伪。
