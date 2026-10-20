@@ -5,6 +5,39 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线的软件侧根因：USB autosuspend**；首次修复只清了 page_pool，没解决掉线本身）
+
+> 起因：0.12.6 部署后重启 iStoreOS 清掉 `page_pool_release_retry() stalled`
+> （4222 秒 → 0 条），但**重启后 55 分钟（uptime 3337 秒）网卡再次无征兆
+> disconnect**，同样的驱动 oops + page_pool 卡死复现 → NAS（走 WiFi）再次掉线。
+
+- **根因定位（此前漏掉的一层）**：USB 无线网卡（MT7921U）在 **USB autosuspend**
+  下会掉线——内核 `usbcore.autosuspend=2` + 设备 `autosuspend_delay_ms=2000`
+  （**2 秒无活动即挂起**）。挂起/恢复过程中驱动出问题 → 设备 disconnect →
+  驱动 oops → `page_pool` 卡死 → AP 起不来 → NAS 掉线。
+- **已排除的因素**（都不是原因）：供电不足（`bMaxPower=160mA`，无 over-current
+  记录）、内存不足（3G 可用）、过热（CPU 58°C）、xhci 控制器错误（无记录）、
+  定时任务碰 USB（crontab 只有 tailscale / geo-update）。
+- **已实施**：禁用该设备 autosuspend（设备级 `delay=0` + `usbcore autosuspend=-1`），
+  并用 `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local` **双写持久化**
+  （hotplug 不保证触发）。修复后 WiFi 保持 `channel 36/80MHz`、carrier=1、
+  4 台客户端、NAS 恢复（`192.168.50.146:22` 与 `:7899` 均通）。
+- **手册补强**（`docs/ops/istoreos-wifi-troubleshooting.md`）：
+  - 新增**步骤 0：关掉 USB autosuspend**（含判据 + 处置 + 持久化脚本）——
+    明确「这是无征兆掉线的软件侧根因，必须先做，否则修完还会再掉」；
+  - 新增**步骤 4：重启设备**，并记下 `echo 3 > /proc/sysrq-trigger` 在 OpenWrt
+    上**不生效**（`kernel.sysrq=1` 但触发被拦，uptime 不变）——必须用 `reboot`；
+  - 「三个容易踩的坑」→ **四个**（+ sysrq 不生效）；
+  - 新增 **§8 复发模式与硬件层排查**：复发间隔（55 分钟）、已排除因素对照表、
+    硬件信息（Lunzn FastRhino R68S + MT7921U 挂 USB 3.0）、
+    仍掉线时的硬件排查顺序（换 USB 口 → 换网卡 → 检查接头）、长期解法
+    （给 NAS 接网线，解除生产环境的 WiFi 单点）。
+- **runbook §9 第 16 条**改写：从「page_pool 未修」改为「WiFi 无征兆掉线——
+  软件侧已处置、硬件侧待观察」，并注明复发过一次。
+- **教训**：**第一次修复只清了症状（page_pool），没找到掉线的原因（autosuspend）**
+  ——重启之所以「有效」，只是因为它重置了驱动状态，**下一次 autosuspend 照样触发**。
+  → 排障要问「为什么会掉」，而不是「怎么把它弄好」。
+
 ## [0.12.7] — 2026-10-20（**发现引擎行情已陈旧 2 个月 + 所有上游源不可达**；修正一处口径混淆的复验结论）
 
 > 起因：重启 iStoreOS 后做应用层复查，发现**引擎行情只到 2026-08-07**（滞后 52 个
