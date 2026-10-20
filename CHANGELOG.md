@@ -5,212 +5,70 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
-## [0.12.12] — 2026-10-20（**WiFi 掉线真根因：内核 bug `ieee80211_get_vht_max_nss` 崩溃 → 驱动注销 → 网卡脱落**；三层自愈已装并验证）
+## [0.12.13] — 2026-10-20（**范围修正：iStoreOS WiFi 排障不是本项目内容，已迁出仓库**）
 
-> 承接 0.12.11：换 USB 口未根治，掉线仍复现。本次拿到**完整 Call Trace**，
-> 定位到内核 bug，并装上三层自愈机制（治标）+ 给出根治路径。
+> **起因**：用户明确指出「iStoreOS 的相关不是本项目的内容」——iStoreOS 设备与
+> USB 网卡驱动属于**家庭网络基础设施**，与 stockdb-ai 无关。此前 0.12.8~0.12.12
+> 五个版本全是这个主题（**零代码改动**，只改 CHANGELOG + WiFi 手册 + runbook
+> 两行 + 版本号），把项目的 `WEBUI_VERSION` 为路由器问题连推了 5 次。
 
-- **根因 = 内核 bug**（完整 Call Trace，见手册 §8.2）：
-  ```
-  WARNING: CPU: 0 PID: 56 at ieee80211_get_vht_max_nss+0x448/0x49c [cfg80211]
-    ieee80211_get_vht_max_nss → cfg80211_calculate_bitrate → nl80211_put_sta_rate
-    → cfg80211_del_sta_sinfo → sta_set_sinfo → __sta_info_flush
-    → ieee80211_nan_func_terminated → cfg80211_stop_ap → mt76_unregister_device
-  ```
-  `ieee80211_get_vht_max_nss()` 在**停止 AP** 的 STA 速率计算路径空指针崩溃 →
-  **`mt76_unregister_device` 主动注销驱动** → 网卡从 USB 总线脱落。
-  - MT7921U 在 OpenWrt 6.12 上有大量同类崩溃报告（`sta_set_sinfo` 路径，社区已知）；
-  - 内核 6.12.94 + `backports.git 6ecbb44` 的 mac80211 回移；
-  - `minstrel_vht_only=Y` 强制速率算法只走 VHT 路径，但该参数**只读**、改不了
-    （需升级内核，本机不为此升级）；
-  - **触发条件需要客户端关联**（`sta_set_sinfo` 要处理 STA）→ 空载时不崩。
-- **换 USB 口无效**（已在 0.12.11 记）：`2-1` 与 `4-1` 两条 USB 3.0 控制器
-  复现同一模式 → 与单个 USB 口的供电无关。
-- **三层自愈已装并验证**（手册 §8.3）：
-  1. **看门狗** `/etc/wifi-watchdog.sh` + crontab（每分钟）——检测 AP 接口消失或
-     carrier=0 → unbind/bind 驱动 + 清 hostapd 残留 + 重启 netifd → 恢复 AP
-     （实测约 60 秒含 NAS 重连）；幂等，AP 正常时立即退出；
-  2. **端口自动适配** `/etc/hotplug.d/11-wifi-path-detect`——网卡插入/换口时
-     **自动更新 `radio1.path`** 并 reload 无线（不必再手工改路径）；
-  3. **autosuspend 禁用** `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local`
-     （按 **vid:pid** `0e8d:7961` 匹配，设备路径随端口变化不能硬编码）。
-- **当前状态（已验证）**：`br-proxyap` UP carrier=1、`channel 36 / width 40 MHz`、
-  2 台客户端关联、NAS webui 401 / 引擎 200、**`get_vht_max_nss` 0 次 /
-  `USB disconnect` 0 次 / `page_pool` 0 条**（修复后未再崩）。
-- **根治路径**（手册 §8.7，按实际有效性排序）：① **给 NAS 接网线**（对本项目
-  最高优先——直接消除生产环境 WiFi 单点）② 换网卡（RTL8812AU / MT7612U）
-  ③ 带独立供电的 USB 集线器 ④ ~~换 USB 口~~（实测无效）。
-- **手册更新**：§8.1 结论改为「内核 bug 触发的驱动崩溃」；新增 §8.2（完整
-  Call Trace 与已知问题对照）、§8.3（三层自愈机制）；后续节号顺延；§9 增补
-  「换口后必须重启设备」与「重启必须 `setsid` 脱离 SSH 会话」（否则 uptime 不变、
-  误以为重启过）。
-- **本次踩的坑**：`HT40`（纯 802.11n）在 **5G 上不被支持**（netifd
-  `retry_setup_failed`）→ 试该方案失败，已回退 `HE40`。
+- **迁出**：25 KB 的 `docs/ops/istoreos-wifi-troubleshooting.md` 移到仓库外
+  `C:\Users\75393\Desktop\home-ops\istoreos-wifi-troubleshooting.md`；
+  仓库侧只留**指针**（runbook 开头姊妹文档、§1 症状索引、§3.13、§9 第 16 条、
+  `docs/README.md` 索引表）。
+- **CHANGELOG**：0.12.8~0.12.12 五条**压缩为一行 + 指针**（内容与过程见
+  `git show v0.12.12` 等，或迁出后的手册）。**tag 全部保留不动**——已发布的
+  不撤回（tag 审计要求每个 CHANGELOG 版本都有同名 tag，压缩后仍 106/106）。
+- **runbook §9 第 16 条改写**：从「内核 bug + 三层自愈 + 根治优先级」的大段
+  排障细节，压到**项目真正关心的两点**——NAS 挂在 5G 网段上（断了就是 NAS 断联）、
+  项目侧该做什么（部署走 Tailscale `100.66.1.5`；长期给 NAS 接网线）。
+  **§3.13 环境拓扑依赖与第 17 条保留**——那是项目内容（NAS 的网络路径会断）。
+- **连带纠正 0.12.12 的错误结论**：0.12.12 写「**修复后未再崩** /
+  `get_vht_max_nss` 0 次 / `USB disconnect` 0 次」——**这是错的**。那只是
+  **设备重启后 dmesg 被清空**的短暂窗口，不是修复效果。继续观测（20:02 重启后
+  到 20:18）实测：**`USB disconnect` 2 次、`ieee80211_get_vht_max_nss` 3 次**，
+  **内核 bug 未消除、掉线仍复现**，只有看门狗在兜底（把中断从 3 分多钟压到约 60 秒）。
+  - **正确的因果顺序**（0.12.12 写反了）：**USB 掉线（`USB disconnect`）在前 →
+    掉线清理路径崩溃在后（晚 1.07 秒）**。栈底是
+    `usb_disconnect → usb_unbind_interface → mt792xu_disconnect → mt76_unregister_device
+    → ieee80211_unregister_hw → cfg80211_stop_ap → ieee80211_get_vht_max_nss` 崩溃。
+    **内核 bug 是 USB 物理层掉线的次生 bug，不是掉线的起因**；
+  - **另一处误判**：把 `reset SuperSpeed` 当故障指标——**紧跟 `new SuperSpeed`
+    的那次是正常 USB 3.0 链路训练**，真正的故障标记是 `USB disconnect`；
+  - **方法论**：判断「改完是否真的好了」要看**跨足够长时间的复发计数**，
+    不能「重启后立刻数一遍」——这与连续 3 次误判根因是同一种错误。
+- **设备侧不动**：路由器上的三层自愈（看门狗 `/etc/wifi-watchdog.sh` + 端口自动适配
+  + autosuspend 禁用）**保持安装**（它让 NAS 少断联，属设备侧，不属项目侧）。
 
-## [0.12.11] — 2026-10-20（**网卡换 USB 口后的完整修复**：path 同步 + radio0 抢占 + rc.local 位置 + hotplug 匹配 + 重启）
+## [0.12.12] — 2026-10-20（**非项目发布**：iStoreOS WiFi 排障专题 v5）
 
-> 起因：0.12.10 判定为 USB 物理层故障、需换口。用户把网卡换到另一 USB 口后，
-> 暴露出一批**配置不会自动跟上**的坑——AP 起不来（hostapd 报 694 次 beacon 错误）。
-> 本条记录完整修复过程与那五个坑。
+> 非项目内容（家庭网络基础设施，零代码改动）；**v0.12.13 已迁出仓库**，正文见
+> `git show v0.12.12` 或 `~/Desktop/home-ops/istoreos-wifi-troubleshooting.md`。
+> 当时记录：内核 `ieee80211_get_vht_max_nss` 崩溃 Call Trace + 三层自愈机制
+> （看门狗 / 端口自动适配 / autosuspend 禁用）。**注意其结论已被 0.12.13 纠正。**
 
-- **换口后必须改的五处（漏一处就起不来）**：
-  1. **`radio1.path`** 要改成新路径，且**不能带前导 `/`**（带了 netifd 静默不认）；
-  2. **自动探测生成的 `radio0` 会抢占同一个 path**（`band=6g`、`country=00`）→
-     hostapd 报 `Invalid country_code '00'` + `hostapd.add_iface failed` → 删掉它；
-  3. **`rc.local` 的追加内容必须在 `exit 0` 之前**（OpenWrt 模板自带 `exit 0`，
-     追加在其后**永不执行**——本次的 autosuspend 持久化就这样静默失效）；
-  4. **`hotplug.d` 脚本不能硬编码端口号**（路径随 USB 口变化，`2-1` → `4-1`）
-     → 改按 vid:pid 匹配（MT7921U = `0e8d:7961`）；
-  5. **`/etc/hotplug.d` 目录可能不存在**（被清理过的系统）→ 先 `mkdir -p`。
-- **换口后必须重启设备**：旧设备的 `page_pool` 卡死会**污染新设备初始化**
-  （实测 `phy5-ap0` 存在但 hostapd 仍报 694 次错误，直到重启才清零）。
-  **rmmod/modprobe 清不掉。**
-  - ⚠️ **必须用 `setsid` 脱离 SSH 会话**：`setsid sh -c 'sleep 2; reboot' &`。
-    先用了 `(sleep 2; reboot) &`，结果 **uptime 没变**（设备根本没重启）却以为
-    重启过了——**验证重启是否真的发生，看 `uptime` 和
-    `/proc/sys/kernel/random/boot_id`**，别看 dmesg（内核 ring buffer 会保留）。
-- **当前状态（已验证）**：`page_pool` 0 条、beacon 错误 0 条、USB disconnect 0 次、
-  `br-proxyap` UP carrier=1、`channel 36 / width 40 MHz / center1 5190 MHz`、
-  3 台客户端关联、NAS 的 22/7899/8081 全部恢复。
-- **手册新增 §9「网卡换 USB 口后」**（五个坑 + 完整操作顺序 + 验证清单），
-  §8.5 硬件信息更新为新口 `4-1`（`xhci-hcd.7.auto/usb4`），环境速查表同步。
-- **runbook §9 第 16 条**状态更新为「已换 USB 口，当前正常，待观察」，
-  并保留「给 NAS 接网线」的建议（解除生产环境 WiFi 单点）。
-- **教训**：设备「换个口」不是插上就能用——OpenWrt 的 `option path` 是硬编码，
-  **配置不会跟随硬件位置变化**；且旧设备的驱动状态会污染新设备。
+## [0.12.11] — 2026-10-20（**非项目发布**：iStoreOS WiFi 排障专题 v4）
 
-- **换口后的实测结果（最终补记）——换口未根治**：
-  ```
-  [   17.487] usb 4-1: reset SuperSpeed USB device number 2   ← 上电
-  [  510.351] usb 4-1: reset SuperSpeed USB device number 2   ← 8.5 分钟后
-  [ 1177.189] usb 4-1: USB disconnect, device number 2        ← 19.6 分钟后脱落
-  [ 1190.185] usb 4-1: new SuperSpeed USB device number 3
-  [ 1201.606] usb 4-1: USB disconnect, device number 3        ← 11 秒后又掉
-  [ 1202.014] usb 4-1: new SuperSpeed USB device number 4
-  ```
-  **两条不同的 USB 3.0 控制器（`2-1` 与 `4-1`）复现同一模式** → 不是某一个口的
-  供电问题，而是**网卡本身 / 该 USB 控制器链路 / 供电总路**。
-  **已做到（自愈）**：设备未脱落时按手册步骤 1~2（unbind/bind + netifd 重启）
-  可恢复 AP，NAS 随即重连，**实测约 60 秒**。
-  **根治优先级**：① **给 NAS 接网线**（对本项目最高优先，直接消除 WiFi 单点）
-  ② 换网卡（RTL8812AU/MT7612U）③ 带独立供电的 USB 集线器
-  ④ ~~换 USB 口~~（**实测无效**）。
-  **NAS 服务侧验证全部正常**：WiFi 关联 authorized/authenticated/associated = yes
-  （信号 -75dBm）、ping 0% 丢包、webui `/api/version` 与 `/api/health` 返回 401
-  （活着、需 token）、引擎 `?cmd=get&t=股票代码` 返回真实代码列表。
-- **新增方法论：探测工具本身可能不可靠**（§「七个容易踩的坑」第 7 条）——
-  本次两次踩坑：① **busybox ash 不支持 `/dev/tcp`**，
-  `(echo > /dev/tcp/HOST/PORT)` 恒失败，被误读成「NAS 端口全 closed」，
-  实际用 `curl` 探是 401/400（服务正常）；② **`Test-NetConnection` 报端口通
-  但实际连不上**（中间设备响应了 TCP 探测），被误读成「Tailscale 通道正常」，
-  实际本机根本没装 Tailscale。
-  → **判据：端口探测只作参考，服务是否活着看应用层响应码**
-  （401/400 = 活着；连接被重置 = 真有问题）。
+> 非项目内容（零代码改动）；**v0.12.13 已迁出仓库**，正文见 `git show v0.12.11`。
+> 当时记录：网卡换 USB 口后的完整修复（`radio1.path` 同步 / 误探测的 `radio0`
+> 抢占 / `rc.local` 追加位置 / hotplug 按 vid:pid 匹配 / 换口后必须重启设备），
+> 以及**换口未根治**的实测结论。
 
-## [0.12.10] — 2026-10-20（**iStoreOS WiFi 掉线最终结论：USB 物理层故障**；autosuspend 与 HE80 两个假设均已证伪）
+## [0.12.10] — 2026-10-20（**非项目发布**：iStoreOS WiFi 排障专题 v3）
 
-> 起因：0.12.9 把 5G 降到 40MHz 后，**网卡仍反复掉线**——该假设亦被证伪。
-> 第四次排查追到最底层：**是 USB 物理层故障，不是任何软件配置问题。**
+> 非项目内容（零代码改动）；**v0.12.13 已迁出仓库**，正文见 `git show v0.12.10`。
+> 当时记录：USB 物理层故障结论 + autosuspend 与 HE80 两个假设均被证伪。
 
-- **最终结论：USB 物理层故障——网卡反复 reset 后彻底脱落**
-  - dmesg 模式（每次循环一致）：`reset SuperSpeed` → **165~384 秒后** →
-    `USB disconnect` → 重新枚举 → 再 reset → 再脱落，**循环往复**；
-  - 最终 `2-1` 设备路径**整个消失**（`/sys/bus/usb/devices/2-1` 不存在），
-    `mt7921u` 驱动下**无设备绑定** → **网卡已物理脱落，不在 USB 总线上**；
-  - `br-proxyap` 的 MAC 从 `90:de:80:88:71:09` 变为 `9e:2b:ee:3e:07:0e`
-    → 桥接口现在绑的不是无线网卡（是残留）；
-  - **无 over-current / not enough power 记录、无 xhci 控制器错误**；
-  - **判据：`reset SuperSpeed` 周期出现 = USB 链路不稳**（供电/接触/信号质量），
-    **不是驱动问题**。
-- **两次被证伪的假设**（保留记录，见手册 §8.3）：
-  1. **USB autosuspend**（0.12.8）：禁用后仍掉线（429 秒后再次 disconnect）；
-  2. **HE80 固件 tx timeout**（0.12.9）：降 40MHz 后仍掉线。
-     `timed out waiting for pending tx` 每次 disconnect 前都出现，但那是**症状不是
-     原因**——USB 链路 reset 时驱动自然等不到 tx 完成。
-  - **共同教训**：**每个假设都必须用「改完是否还复现」验证**，不能靠「改了之后
-    看起来好了」下结论；**前兆 ≠ 原因**。
-- **软件侧能做的（已实施，减轻症状但不能根治）**：`htmode='HE40'`、
-  禁用 USB autosuspend、掉线后 unbind/bind + netifd 重启自动恢复。
-- **根治须动硬件（按优先级）**：
-  1. **给 NAS 接网线**（`br-lan` 侧）——**对本项目最重要**：生产环境不应依赖
-     WiFi 单点（runbook §3.13）；
-  2. 换 USB 口（避 USB 3.0）或用带独立供电的 USB 集线器；
-  3. 换网卡（MT7921U 在 OpenWrt 6.12 不稳 → RTL8812AU / MT7612U）；
-  4. 检查接头接触。
-- **本设备只有 5G 无 2.4G**（仅 radio1）→ 5G 掉了，5G 网段（NAS 在此）
-  **整体不可达**，只能走 Tailscale（`100.66.1.5`）。
-- **手册重写**（`docs/ops/istoreos-wifi-troubleshooting.md`）：§5 步骤 0 改为
-  「这是硬件问题，软件无法根治」；§8 重写为定稿版（8.1 最终结论 / 8.2 处置 /
-  8.3 两次被证伪的假设 / 8.4 已排除因素对照表 / 8.5 硬件信息 / 8.6 根治路径）；
-  「四个容易踩的坑」→ **六个**（+「`reset SuperSpeed` 周期出现 = USB 链路不稳，
-  不是驱动问题」）；环境速查表标注网卡已脱落。
-- **runbook §9 第 16 条**改写为「USB 物理层故障 / 软件侧无法根治，待硬件动作」。
-- **CHANGELOG 0.12.8 / 0.12.9 两条均保留**（记录完整过程，不静默改历史）。
+## [0.12.9] — 2026-10-20（**非项目发布**：iStoreOS WiFi 排障专题 v2）
 
-## [0.12.9] — 2026-10-20（**iStoreOS WiFi 掉线真根因：MT7921U 固件 tx timeout（HE80）**；更正 0.12.8 被证伪的 autosuspend 假设）
+> 非项目内容（零代码改动）；**v0.12.13 已迁出仓库**，正文见 `git show v0.12.9`。
+> 当时记录：MT7921U 固件 tx timeout（HE80）假设 + 更正 0.12.8 的 autosuspend 判断
+> （该修正结论本身后续也被证伪，见 0.12.10）。
 
-> > 本条更正 **[0.12.8](#0128)** 的根因判断。
+## [0.12.8] — 2026-10-20（**非项目发布**：iStoreOS WiFi 排障专题 v1）
 
-起因：0.12.8 禁用 USB autosuspend 后，**网卡仍无征兆掉线**（禁用后 429 秒再次
-> disconnect）→ **0.12.8 的根因判断被证伪**。第三次排查定位到真根因。
-
-- **真根因：`mt76` 驱动的 tx timeout（HE80 固件缺陷）**
-  - **决定性前兆**：每次 disconnect 前**必有** `mt7921u: timed out waiting for
-    pending tx`（发送队列超时）→ 驱动放弃 → 设备重枚举 → 驱动 oops →
-    `page_pool_release_retry() stalled` → AP 起不来 → NAS（走 WiFi）掉线。
-  - 掉线间隔 **429 秒**（3337s → 3766s）——负载相关规律，非随机、非物理拔插。
-  - 固件 `Build Time: 20231109190959`（2023-11，mt76 驱动的 tx timeout 是已知问题）；
-    配置为 `htmode='HE80'`（WiFi 6 80MHz）——MT7921U 在 80MHz 模式下固件易卡 tx 队列。
-- **已实施（治本）**：5G `htmode` 由 `HE80` 降为 **`HE40`**（`uci set` + `commit`
-  持久化，备份 `/etc/config/wireless.bak-<date>`）。实测 `width: 40 MHz,
-  center1: 5190 MHz`、carrier=1、NAS 恢复（`:22` 与 `:7899` 均通）。
-  **代价**：5G 峰值速率下降；若 40MHz 仍不稳 → 下一候选 `VHT80`（关 WiFi 6 保留 80MHz）。
-- **0.12.8 的 autosuspend 处置保留但降级定位**：禁用 autosuspend 本身有益
-  （避免无谓挂起/恢复开销），但**实测禁用后仍掉线** → 不是根因。手册中已从
-  「步骤 0 = 根因对策」降为「步骤 0b = 可选，本身有益但不是根因」。
-- **手册重构**（`docs/ops/istoreos-wifi-troubleshooting.md`）：
-  - §5 步骤 0 改为「5G 降到 40MHz = 根因对策」，autosuspend 移入 0b；
-  - §8 重写为定稿版：8.1 真根因（tx timeout 证据链）/ 8.2 降 40MHz 处置 /
-    8.3 **被证伪的假设**（autosuspend，明确写「相关性不是因果」）/
-    8.4 已排除因素对照表（新增「物理拔插」「autosuspend」两项排除）/
-    8.5 硬件信息 / 8.6 仍不稳时的排查顺序；
-  - 「四个容易踩的坑」→ **五个**（+ 「`timed out waiting for pending tx` 是判别
-    驱动超时与物理拔插的决定性前兆」）；
-  - 环境速查表的 `htmode` 更新为 `HE40`。
-- **runbook §9 第 16 条**改写：根因由「autosuspend」更正为「mt76 固件 tx timeout
-  （HE80）」，处置由「禁用 autosuspend」更正为「降 40MHz」，并注明 autosuspend
-  假设已证伪。
-- **教训（两层）**：
-  1. **第一次修复只清了症状**（page_pool），没找到掉线的原因——重启「有效」只是
-     因为它重置了驱动状态；
-  2. **第二次修复把相关性当成了因果**——autosuspend 与掉线同时存在，但不是原因；
-     若当时先验证「禁用后是否还掉」，就能省掉一轮误判。
-     → **排障要问「为什么会掉」，且每个假设都要用「改完是否还复现」验证。**
-
-## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线：定位到 USB autosuspend**；⚠️ 此版本的根因判断随后被证伪，见 0.12.9）
-
-> ⚠️ **本条目的根因判断是错的**——当时把 `usbcore.autosuspend=2` + 设备
-> `autosuspend_delay_ms=2000` 判为「无征兆掉线的软件侧根因」并实施禁用。
-> **禁用后网卡仍掉线**（429 秒后再次 disconnect）→ **假设被证伪**。
-> 真根因是 **mt76 驱动的 tx timeout（HE80 固件缺陷）**，见 0.12.9。
-> 本条目保留以记录**「先清症状、再找原因、最后证伪假设」的过程**——
-> 其中「禁用 autosuspend」这一处置本身仍保留（对该设备有益，只是非根因）。
-
-- **当时的处置**：禁用该设备 USB autosuspend（设备级 `delay=0` +
-  `usbcore autosuspend=-1`），并用 `/etc/hotplug.d/10-usb-nosuspend` +
-  `/etc/rc.local` 双写持久化。**这一步本身有效**（WiFi 保持 channel 36/80MHz、
-  carrier=1、客户端正常）——但**没有解决掉线**。
-- **当时的判断（错）**：认为「无征兆掉线 = autosuspend 导致」。
-- **手册当时的结构**：`docs/ops/istoreos-wifi-troubleshooting.md` 新增
-  「步骤 0：关掉 USB autosuspend」+ §8 复发模式，并把 autosuspend 列为
-  「最可能」因素。**该定位已在 0.12.9 更正。**
-- 附带记录的两个有效发现（保留）：
-  - `echo 3 > /proc/sysrq-trigger` 在 OpenWrt 上**不生效**（`kernel.sysrq=1`
-    但触发被拦，uptime 不变）——必须用 `reboot` 命令；
-  - 重启会清掉 `page_pool_release_retry() stalled`（4222 秒 → 0 条）。
-
-验证：节号引用 0 缺失；跨文档 .md 链接 0 破损；Python 全量 618 例全绿；
-CI Python + SPA 双 job 全绿。PR #190。
+> 非项目内容（零代码改动）；**v0.12.13 已迁出仓库**，正文见 `git show v0.12.8`。
+> 当时记录：USB autosuspend 假设与处置（该根因判断随后被证伪，处置本身保留）。
 
 ## [0.12.7] — 2026-10-20（**发现引擎行情已陈旧 2 个月 + 所有上游源不可达**；修正一处口径混淆的复验结论）
 
