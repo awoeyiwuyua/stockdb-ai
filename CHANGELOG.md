@@ -5,38 +5,43 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
-## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线的软件侧根因：USB autosuspend**；首次修复只清了 page_pool，没解决掉线本身）
+## [0.12.9] — 2026-10-20（**iStoreOS WiFi 掉线真根因：MT7921U 固件 tx timeout（HE80）**；0.12.8 的 autosuspend 假设被证伪并更正）
 
-> 起因：0.12.6 部署后重启 iStoreOS 清掉 `page_pool_release_retry() stalled`
-> （4222 秒 → 0 条），但**重启后 55 分钟（uptime 3337 秒）网卡再次无征兆
-> disconnect**，同样的驱动 oops + page_pool 卡死复现 → NAS（走 WiFi）再次掉线。
+> 起因：0.12.8 禁用 USB autosuspend 后，**网卡仍无征兆掉线**（禁用后 429 秒再次
+> disconnect）→ **0.12.8 的根因判断被证伪**。第三次排查定位到真根因。
 
-- **根因定位（此前漏掉的一层）**：USB 无线网卡（MT7921U）在 **USB autosuspend**
-  下会掉线——内核 `usbcore.autosuspend=2` + 设备 `autosuspend_delay_ms=2000`
-  （**2 秒无活动即挂起**）。挂起/恢复过程中驱动出问题 → 设备 disconnect →
-  驱动 oops → `page_pool` 卡死 → AP 起不来 → NAS 掉线。
-- **已排除的因素**（都不是原因）：供电不足（`bMaxPower=160mA`，无 over-current
-  记录）、内存不足（3G 可用）、过热（CPU 58°C）、xhci 控制器错误（无记录）、
-  定时任务碰 USB（crontab 只有 tailscale / geo-update）。
-- **已实施**：禁用该设备 autosuspend（设备级 `delay=0` + `usbcore autosuspend=-1`），
-  并用 `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local` **双写持久化**
-  （hotplug 不保证触发）。修复后 WiFi 保持 `channel 36/80MHz`、carrier=1、
-  4 台客户端、NAS 恢复（`192.168.50.146:22` 与 `:7899` 均通）。
-- **手册补强**（`docs/ops/istoreos-wifi-troubleshooting.md`）：
-  - 新增**步骤 0：关掉 USB autosuspend**（含判据 + 处置 + 持久化脚本）——
-    明确「这是无征兆掉线的软件侧根因，必须先做，否则修完还会再掉」；
-  - 新增**步骤 4：重启设备**，并记下 `echo 3 > /proc/sysrq-trigger` 在 OpenWrt
-    上**不生效**（`kernel.sysrq=1` 但触发被拦，uptime 不变）——必须用 `reboot`；
-  - 「三个容易踩的坑」→ **四个**（+ sysrq 不生效）；
-  - 新增 **§8 复发模式与硬件层排查**：复发间隔（55 分钟）、已排除因素对照表、
-    硬件信息（Lunzn FastRhino R68S + MT7921U 挂 USB 3.0）、
-    仍掉线时的硬件排查顺序（换 USB 口 → 换网卡 → 检查接头）、长期解法
-    （给 NAS 接网线，解除生产环境的 WiFi 单点）。
-- **runbook §9 第 16 条**改写：从「page_pool 未修」改为「WiFi 无征兆掉线——
-  软件侧已处置、硬件侧待观察」，并注明复发过一次。
-- **教训**：**第一次修复只清了症状（page_pool），没找到掉线的原因（autosuspend）**
-  ——重启之所以「有效」，只是因为它重置了驱动状态，**下一次 autosuspend 照样触发**。
-  → 排障要问「为什么会掉」，而不是「怎么把它弄好」。
+- **真根因：`mt76` 驱动的 tx timeout（HE80 固件缺陷）**
+  - **决定性前兆**：每次 disconnect 前**必有** `mt7921u: timed out waiting for
+    pending tx`（发送队列超时）→ 驱动放弃 → 设备重枚举 → 驱动 oops →
+    `page_pool_release_retry() stalled` → AP 起不来 → NAS（走 WiFi）掉线。
+  - 掉线间隔 **429 秒**（3337s → 3766s）——负载相关规律，非随机、非物理拔插。
+  - 固件 `Build Time: 20231109190959`（2023-11，mt76 驱动的 tx timeout 是已知问题）；
+    配置为 `htmode='HE80'`（WiFi 6 80MHz）——MT7921U 在 80MHz 模式下固件易卡 tx 队列。
+- **已实施（治本）**：5G `htmode` 由 `HE80` 降为 **`HE40`**（`uci set` + `commit`
+  持久化，备份 `/etc/config/wireless.bak-<date>`）。实测 `width: 40 MHz,
+  center1: 5190 MHz`、carrier=1、NAS 恢复（`:22` 与 `:7899` 均通）。
+  **代价**：5G 峰值速率下降；若 40MHz 仍不稳 → 下一候选 `VHT80`（关 WiFi 6 保留 80MHz）。
+- **0.12.8 的 autosuspend 处置保留但降级定位**：禁用 autosuspend 本身有益
+  （避免无谓挂起/恢复开销），但**实测禁用后仍掉线** → 不是根因。手册中已从
+  「步骤 0 = 根因对策」降为「步骤 0b = 可选，本身有益但不是根因」。
+- **手册重构**（`docs/ops/istoreos-wifi-troubleshooting.md`）：
+  - §5 步骤 0 改为「5G 降到 40MHz = 根因对策」，autosuspend 移入 0b；
+  - §8 重写为定稿版：8.1 真根因（tx timeout 证据链）/ 8.2 降 40MHz 处置 /
+    8.3 **被证伪的假设**（autosuspend，明确写「相关性不是因果」）/
+    8.4 已排除因素对照表（新增「物理拔插」「autosuspend」两项排除）/
+    8.5 硬件信息 / 8.6 仍不稳时的排查顺序；
+  - 「四个容易踩的坑」→ **五个**（+ 「`timed out waiting for pending tx` 是判别
+    驱动超时与物理拔插的决定性前兆」）；
+  - 环境速查表的 `htmode` 更新为 `HE40`。
+- **runbook §9 第 16 条**改写：根因由「autosuspend」更正为「mt76 固件 tx timeout
+  （HE80）」，处置由「禁用 autosuspend」更正为「降 40MHz」，并注明 autosuspend
+  假设已证伪。
+- **教训（两层）**：
+  1. **第一次修复只清了症状**（page_pool），没找到掉线的原因——重启「有效」只是
+     因为它重置了驱动状态；
+  2. **第二次修复把相关性当成了因果**——autosuspend 与掉线同时存在，但不是原因；
+     若当时先验证「禁用后是否还掉」，就能省掉一轮误判。
+     → **排障要问「为什么会掉」，且每个假设都要用「改完是否还复现」验证。**
 
 ## [0.12.7] — 2026-10-20（**发现引擎行情已陈旧 2 个月 + 所有上游源不可达**；修正一处口径混淆的复验结论）
 
