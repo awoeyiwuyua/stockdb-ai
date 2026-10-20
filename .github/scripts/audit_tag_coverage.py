@@ -69,6 +69,11 @@ def _repo_has_history() -> bool:
     return (REPO / "CHANGELOG.md").exists()
 
 
+def _is_git_repo() -> bool:
+    """当前目录是否是 git 仓库。"""
+    return bool(_git("rev-parse", "--git-dir").strip())
+
+
 def _tags_available() -> bool:
     """tag 是否已拉到本地。
 
@@ -120,6 +125,18 @@ def main() -> int:
     versions = changelog_versions()
     if not versions:
         print("ERROR: 未从 CHANGELOG.md 解析出任何版本条目", file=sys.stderr)
+        return 2
+
+    if not _is_git_repo():
+        msg = (
+            "ERROR: 当前目录不是 git 仓库——无法审计 tag 覆盖。\n"
+            "  本脚本只对本仓库的克隆有效（NAS 的 src/ 是构建用源树，不是仓库）。\n"
+            "  要审计请在本仓库根目录运行。"
+        )
+        if not quiet:
+            print(msg, file=sys.stderr)
+        else:
+            print("ERROR: not a git repository", file=sys.stderr)
         return 2
 
     if not _tags_available():

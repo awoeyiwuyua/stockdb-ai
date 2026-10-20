@@ -61,6 +61,8 @@
 | 启动时 env 改一下就崩 | §6.7 环境变量坏值 | 开发 |
 | 某版本发布后找不到对应 tag | §8.7 制度写了≠执行了 | 发布 |
 | 回滚时不知道该退到哪个 commit | §8.7 同上（tag = 唯一发布物） | 发布 |
+| 旧版本镜像查不到了（回滚点没了？） | §3.10 旧镜像是缓存产物，回滚点是 src-backup tgz | 部署 |
+| `docker images` 里的回滚点时隐时现 | §3.10 同上（层共享 + GC） | 部署 |
 | 打板溢价计算特别慢 | §7.1 取数源而非算法 | 采集 |
 | 打板清单只有十几只（权威是六十多） | §7.2 兜底覆盖率 | 采集 |
 | 采集到的开盘价其实是收盘价 | §7.3 采集时间窗 | 采集 |
@@ -289,10 +291,48 @@ CRLF 无副作用——已实证同版本两次构建产物 digest 不同但行�
 
 **根因**：compose 写 `:latest` 时，若新镜像未真正构建/推送，up 会继续用旧镜像。
 
-**处置**：compose 用**精确 tag**（`image: stockdb-ai:0.12.2`），改动后改 tag 再
-`build` → `up -d`。回滚点会被 `docker rmi` 清理掉时注意：**层缓存共享会让回滚点
-"在某一时刻不可见"，`docker images` 重建后可能又重新出现**——判断回滚点是否存在
-要重新 `docker images` 确认，不要凭历史印象。
+**处置**：compose 用**精确 tag**（`image: stockdb-ai:0.12.5`），改动后改 tag 再
+`build` → `up -d`。
+
+### 3.10 旧本地镜像会自行消失——**回滚点不是镜像**（2026-10-20 实测修正）
+
+> **本条修正了此前 runbook 里「回滚点会被 `docker rmi` 清理掉」的旧说法**——
+> 那个说法不准确。真实机制见下。
+
+**实测（2026-10-20）**：NAS 上 `stockdb-ai` 的旧版本镜像（0.11.0~0.12.4 共 7 个）
+**全部查不到**（`docker image inspect` 报 MISSING）。但：
+
+| 假设 | 核查结果 |
+|---|---|
+| 是 `docker image prune -f` 删的 | ❌ 排除——prune 前（15:20 盘点）旧镜像**已经**不在；12:58 探测时 0.11.1/0.11.0 就已消失 |
+| 是 `docker compose up -d` 删的 | ❌ 排除——受控实验（probe:v1/v2/v3 + compose up 换 tag）中 v1 全程幸存 |
+| 是别的项目共享层被回收导致 | ⚠️ **最可能**——build 输出显示 37 步全命中缓存（0.2s），旧镜像的层被新镜像复用；Docker 28.x + overlay2/btrfs 下旧 tag 的 manifest 引用关系被打断 → tag 镜像查不到 |
+
+**结论**：**本地构建的旧镜像是缓存产物，会随新构建/GC 自行消失，不能当回滚点。**
+
+**真正的回滚点（两个，都已验证）**：
+
+| 载体 | 验证 |
+|---|---|
+| **`src-backup-<date>-<ver>.tgz`** | ✅ 完整（548 文件；`docker/` 7 项、`stockdb-ai/app.py`+`config.py` 各 1、`webui/` 99 项；内含 config.py 版本号正确） |
+| **git tag `vX.Y.Z`**（99 个） | ✅ 完整——发布物标记，回滚的版本锚点 |
+
+**回滚路径（可行，已验证前提）**：
+
+```bash
+# 1) 恢复源树
+tar xzf /vol1/stockdb/src-backup-<date>-<ver>.tgz -C /vol1/stockdb
+# 2) 改 compose tag
+sed -i 's|image: stockdb-ai:X|image: stockdb-ai:Y|' /vol1/stockdb/compose.yaml
+# 3) 重建 + 起
+cd /vol1/stockdb && docker compose build && docker compose up -d
+```
+
+**纪律**：**`src-backup-*.tgz` 要按「保留最近 N 个」策略管理**（N≥3）——
+它们是唯一的本地回滚载体。旧镜像不必刻意保留（会自行消失，留着也没用）。
+**清理镜像时别用 `docker image prune -a`**（会删无容器引用的所有镜像）。
+
+
 
 ### 3.10 镜像构建进度条刷爆 SSH 缓冲（0.12.1）
 
