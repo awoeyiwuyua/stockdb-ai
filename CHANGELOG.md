@@ -5,30 +5,45 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
-## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线：定位到 USB autosuspend**；⚠️ 此版本的根因判断随后被证伪，见 0.12.9）
+## [0.12.10] — 2026-10-20（**iStoreOS WiFi 掉线最终结论：USB 物理层故障**；autosuspend 与 HE80 两个假设均已证伪）
 
-> ⚠️ **本条目的根因判断是错的**——当时把 `usbcore.autosuspend=2` + 设备
-> `autosuspend_delay_ms=2000` 判为「无征兆掉线的软件侧根因」并实施禁用。
-> **禁用后网卡仍掉线**（429 秒后再次 disconnect）→ **假设被证伪**。
-> 真根因是 **mt76 驱动的 tx timeout（HE80 固件缺陷）**，见 0.12.9。
-> 本条目保留以记录**「先清症状、再找原因、最后证伪假设」的过程**——
-> 其中「禁用 autosuspend」这一处置本身仍保留（对该设备有益，只是非根因）。
+> 起因：0.12.9 把 5G 降到 40MHz 后，**网卡仍反复掉线**——该假设亦被证伪。
+> 第四次排查追到最底层：**是 USB 物理层故障，不是任何软件配置问题。**
 
-- **当时的处置**：禁用该设备 USB autosuspend（设备级 `delay=0` +
-  `usbcore autosuspend=-1`），并用 `/etc/hotplug.d/10-usb-nosuspend` +
-  `/etc/rc.local` 双写持久化。**这一步本身有效**（WiFi 保持 channel 36/80MHz、
-  carrier=1、客户端正常）——但**没有解决掉线**。
-- **当时的判断（错）**：认为「无征兆掉线 = autosuspend 导致」。
-- **手册当时的结构**：`docs/ops/istoreos-wifi-troubleshooting.md` 新增
-  「步骤 0：关掉 USB autosuspend」+ §8 复发模式，并把 autosuspend 列为
-  「最可能」因素。**该定位已在 0.12.9 更正。**
-- 附带记录的两个有效发现（保留）：
-  - `echo 3 > /proc/sysrq-trigger` 在 OpenWrt 上**不生效**（`kernel.sysrq=1`
-    但触发被拦，uptime 不变）——必须用 `reboot` 命令；
-  - 重启会清掉 `page_pool_release_retry() stalled`（4222 秒 → 0 条）。
-
-验证：节号引用 0 缺失；跨文档 .md 链接 0 破损；Python 全量 618 例全绿；
-CI Python + SPA 双 job 全绿。PR #190。
+- **最终结论：USB 物理层故障——网卡反复 reset 后彻底脱落**
+  - dmesg 模式（每次循环一致）：`reset SuperSpeed` → **165~384 秒后** →
+    `USB disconnect` → 重新枚举 → 再 reset → 再脱落，**循环往复**；
+  - 最终 `2-1` 设备路径**整个消失**（`/sys/bus/usb/devices/2-1` 不存在），
+    `mt7921u` 驱动下**无设备绑定** → **网卡已物理脱落，不在 USB 总线上**；
+  - `br-proxyap` 的 MAC 从 `90:de:80:88:71:09` 变为 `9e:2b:ee:3e:07:0e`
+    → 桥接口现在绑的不是无线网卡（是残留）；
+  - **无 over-current / not enough power 记录、无 xhci 控制器错误**；
+  - **判据：`reset SuperSpeed` 周期出现 = USB 链路不稳**（供电/接触/信号质量），
+    **不是驱动问题**。
+- **两次被证伪的假设**（保留记录，见手册 §8.3）：
+  1. **USB autosuspend**（0.12.8）：禁用后仍掉线（429 秒后再次 disconnect）；
+  2. **HE80 固件 tx timeout**（0.12.9）：降 40MHz 后仍掉线。
+     `timed out waiting for pending tx` 每次 disconnect 前都出现，但那是**症状不是
+     原因**——USB 链路 reset 时驱动自然等不到 tx 完成。
+  - **共同教训**：**每个假设都必须用「改完是否还复现」验证**，不能靠「改了之后
+    看起来好了」下结论；**前兆 ≠ 原因**。
+- **软件侧能做的（已实施，减轻症状但不能根治）**：`htmode='HE40'`、
+  禁用 USB autosuspend、掉线后 unbind/bind + netifd 重启自动恢复。
+- **根治须动硬件（按优先级）**：
+  1. **给 NAS 接网线**（`br-lan` 侧）——**对本项目最重要**：生产环境不应依赖
+     WiFi 单点（runbook §3.13）；
+  2. 换 USB 口（避 USB 3.0）或用带独立供电的 USB 集线器；
+  3. 换网卡（MT7921U 在 OpenWrt 6.12 不稳 → RTL8812AU / MT7612U）；
+  4. 检查接头接触。
+- **本设备只有 5G 无 2.4G**（仅 radio1）→ 5G 掉了，5G 网段（NAS 在此）
+  **整体不可达**，只能走 Tailscale（`100.66.1.5`）。
+- **手册重写**（`docs/ops/istoreos-wifi-troubleshooting.md`）：§5 步骤 0 改为
+  「这是硬件问题，软件无法根治」；§8 重写为定稿版（8.1 最终结论 / 8.2 处置 /
+  8.3 两次被证伪的假设 / 8.4 已排除因素对照表 / 8.5 硬件信息 / 8.6 根治路径）；
+  「四个容易踩的坑」→ **六个**（+「`reset SuperSpeed` 周期出现 = USB 链路不稳，
+  不是驱动问题」）；环境速查表标注网卡已脱落。
+- **runbook §9 第 16 条**改写为「USB 物理层故障 / 软件侧无法根治，待硬件动作」。
+- **CHANGELOG 0.12.8 / 0.12.9 两条均保留**（记录完整过程，不静默改历史）。
 
 ## [0.12.9] — 2026-10-20（**iStoreOS WiFi 掉线真根因：MT7921U 固件 tx timeout（HE80）**；更正 0.12.8 被证伪的 autosuspend 假设）
 
@@ -69,6 +84,31 @@ CI Python + SPA 双 job 全绿。PR #190。
   2. **第二次修复把相关性当成了因果**——autosuspend 与掉线同时存在，但不是原因；
      若当时先验证「禁用后是否还掉」，就能省掉一轮误判。
      → **排障要问「为什么会掉」，且每个假设都要用「改完是否还复现」验证。**
+
+## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线：定位到 USB autosuspend**；⚠️ 此版本的根因判断随后被证伪，见 0.12.9）
+
+> ⚠️ **本条目的根因判断是错的**——当时把 `usbcore.autosuspend=2` + 设备
+> `autosuspend_delay_ms=2000` 判为「无征兆掉线的软件侧根因」并实施禁用。
+> **禁用后网卡仍掉线**（429 秒后再次 disconnect）→ **假设被证伪**。
+> 真根因是 **mt76 驱动的 tx timeout（HE80 固件缺陷）**，见 0.12.9。
+> 本条目保留以记录**「先清症状、再找原因、最后证伪假设」的过程**——
+> 其中「禁用 autosuspend」这一处置本身仍保留（对该设备有益，只是非根因）。
+
+- **当时的处置**：禁用该设备 USB autosuspend（设备级 `delay=0` +
+  `usbcore autosuspend=-1`），并用 `/etc/hotplug.d/10-usb-nosuspend` +
+  `/etc/rc.local` 双写持久化。**这一步本身有效**（WiFi 保持 channel 36/80MHz、
+  carrier=1、客户端正常）——但**没有解决掉线**。
+- **当时的判断（错）**：认为「无征兆掉线 = autosuspend 导致」。
+- **手册当时的结构**：`docs/ops/istoreos-wifi-troubleshooting.md` 新增
+  「步骤 0：关掉 USB autosuspend」+ §8 复发模式，并把 autosuspend 列为
+  「最可能」因素。**该定位已在 0.12.9 更正。**
+- 附带记录的两个有效发现（保留）：
+  - `echo 3 > /proc/sysrq-trigger` 在 OpenWrt 上**不生效**（`kernel.sysrq=1`
+    但触发被拦，uptime 不变）——必须用 `reboot` 命令；
+  - 重启会清掉 `page_pool_release_retry() stalled`（4222 秒 → 0 条）。
+
+验证：节号引用 0 缺失；跨文档 .md 链接 0 破损；Python 全量 618 例全绿；
+CI Python + SPA 双 job 全绿。PR #190。
 
 ## [0.12.7] — 2026-10-20（**发现引擎行情已陈旧 2 个月 + 所有上游源不可达**；修正一处口径混淆的复验结论）
 
@@ -662,6 +702,29 @@ CI Python + SPA 双 job 全绿。PR #190。
 - ⏸️ **台风休市缺口巡检**：未做（接受"数据即事实" + 事后补拉；如需告警属独立需求）。
 - ⏸️ H1 定时同步 / H3 一票一档：功能本体未动。
 
+## [0.10.42] — 2026-09-13（打板兜底覆盖率护栏：09-09 采集异常的定性收口）
+
+> 0.10.41 合并后继续清遗留，把 09-09 那条「竞价只采到 13 只、权威口径 66 只」
+> 查到了根因并加护栏。**同一版本不二次发布**（发布纪律），故单独一版。
+> 交付面只有 `services/auction_tasks.py` 的兜底护栏 + 用例，风险面最小。
+
+- **定性（NAS 实机只读取证）**：09-09 的清单来自**兜底现算**——09-08 的 16:30 清单为空
+  （`research_store.read_list("20260908")` → codes=0），于是 09-09 09:26 走
+  「前一日快照兜底现算」，而那份 09-08 快照是**部分快照**（当日引擎区间语义退化，
+  全市场只有 ~13 只有 bar）。**关键盲区**：`coverage.formal_usable` 当时仍为 `True`
+  ——批量通道不报错，只是多数代码无 bar 被归入 `suspended`，于是没有任何告警，
+  13 只清单被当成正常结果采了一天。
+- **护栏 `_auction_fallback_coverage_check()`**：兜底清单 < 前一日权威 `n_samples` ×
+  `_AUCTION_FALLBACK_MIN_RATIO`（0.5）→ `warning` 告警（source=打板兜底）+ 日志；
+  采集记录新增 `list_source`（`stored`/`fallback`）与 `fallback_coverage`
+  （`checked`/`prev_n_samples`/`ratio`/`suspicious`）。**不阻断采集**（宁可偏少也别当天
+  完全没数据），也**不自动改写**清单——人工据告警处置。前日无权威值/读失败 → 保守放行不告警。
+- **验证**：NAS 实机只读演练（真实 09-08 权威 88 只）——`fallback=13` → `ratio=0.1477`
+  `suspicious=true` 且投递 1 条 warning；`fallback=66` → `ratio=0.75` 不告警。
+  本地 4 例新用例（可疑/正常/无前值保守放行/告警通道异常不炸）。**Python 全量 458 全绿**。
+- **数据面**：09-09 指标行此前已由 60 日回填以权威 kline 口径覆写（`daily.matched_count=66`），
+  13 条快照作为证据保留；本版不改数据。
+
 ## [0.10.41] — 2026-09-13（**港股日K 读路径打通**：pybao 惰性 QueryResult + 键形态）
 
 > 清 ROADMAP 主线 H1/H2（港股入仓库 / 自动同步）之前的前置故障。开工前先验现状，
@@ -713,29 +776,6 @@ CI Python + SPA 双 job 全绿。PR #190。
   不阻塞其余 rd，但面板点一次要等）。MCP 侧 `query_mydb` 已有 `limit`/`cursor`；
   HTTP 侧还没分页，未修。
 - ⏸️ **H1 港股自动同步 / H2 港股入仓库**：前置故障本版已清，功能本身未动（ROADMAP 保持未勾选）。
-
-## [0.10.42] — 2026-09-13（打板兜底覆盖率护栏：09-09 采集异常的定性收口）
-
-> 0.10.41 合并后继续清遗留，把 09-09 那条「竞价只采到 13 只、权威口径 66 只」
-> 查到了根因并加护栏。**同一版本不二次发布**（发布纪律），故单独一版。
-> 交付面只有 `services/auction_tasks.py` 的兜底护栏 + 用例，风险面最小。
-
-- **定性（NAS 实机只读取证）**：09-09 的清单来自**兜底现算**——09-08 的 16:30 清单为空
-  （`research_store.read_list("20260908")` → codes=0），于是 09-09 09:26 走
-  「前一日快照兜底现算」，而那份 09-08 快照是**部分快照**（当日引擎区间语义退化，
-  全市场只有 ~13 只有 bar）。**关键盲区**：`coverage.formal_usable` 当时仍为 `True`
-  ——批量通道不报错，只是多数代码无 bar 被归入 `suspended`，于是没有任何告警，
-  13 只清单被当成正常结果采了一天。
-- **护栏 `_auction_fallback_coverage_check()`**：兜底清单 < 前一日权威 `n_samples` ×
-  `_AUCTION_FALLBACK_MIN_RATIO`（0.5）→ `warning` 告警（source=打板兜底）+ 日志；
-  采集记录新增 `list_source`（`stored`/`fallback`）与 `fallback_coverage`
-  （`checked`/`prev_n_samples`/`ratio`/`suspicious`）。**不阻断采集**（宁可偏少也别当天
-  完全没数据），也**不自动改写**清单——人工据告警处置。前日无权威值/读失败 → 保守放行不告警。
-- **验证**：NAS 实机只读演练（真实 09-08 权威 88 只）——`fallback=13` → `ratio=0.1477`
-  `suspicious=true` 且投递 1 条 warning；`fallback=66` → `ratio=0.75` 不告警。
-  本地 4 例新用例（可疑/正常/无前值保守放行/告警通道异常不炸）。**Python 全量 458 全绿**。
-- **数据面**：09-09 指标行此前已由 60 日回填以权威 kline 口径覆写（`daily.matched_count=66`），
-  13 条快照作为证据保留；本版不改数据。
 
 ## [0.10.40] — 2026-09-13（遗留收口：上游资产指纹——同名 tag 重传可主动发现）
 

@@ -11,7 +11,7 @@
 | 设备 | iStoreOS 25.12.5（OpenWrt 6.12.94，aarch64），硬件 **Lunzn FastRhino R68S** |
 | 管理地址 | `192.168.31.100`（**走有线时**；LAN 侧是 `192.168.50.1`） |
 | SSH | `ssh root@192.168.31.100`（密钥 `~/.ssh/id_ed25519` 可直接登录，无需密码） |
-| 无线网卡 | **MT7921U**（MediaTek 0e8d:7961，USB dongle），驱动 `mt7921u`，挂 `xhci-hcd.6.auto/usb2`（USB 3.0） |
+| 无线网卡 | **MT7921U**（MediaTek 0e8d:7961，USB dongle），驱动 `mt7921u`，挂 `xhci-hcd.6.auto/usb2`（USB 3.0）。**2026-10-20 状态：已从 USB 总线脱落（`2-1` 设备路径消失），待重新插入/换口** |
 | USB autosuspend | **已禁用**（`usbcore.autosuspend=-1` + 设备 `autosuspend_delay_ms=0`），持久化在 `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local` |
 | 5G AP | `ssid=Pandora_passwall`，`channel=36`，**`htmode=HE40`**（原 HE80，因固件 tx timeout 缺陷降级，见 §8.1），`sae-mixed` |
 | AP 网桥 | `br-proxyap` = `192.168.50.1/24`（**5G 客户端在此网段**，NAS 在 `.146`） |
@@ -57,24 +57,27 @@ ubus call network.wireless status | grep ifname
 
 ## 处置（分步，每步都验证）
 
-### 步骤 0（2026-10-20 第三次排查定稿）：5G 降到 40MHz —— **这才是根因对策**
+### 步骤 0（2026-10-20 第四次排查定稿）：**这是硬件问题，软件无法根治**
 
-> ⚠️ 本节曾被误判为「根因」过一次（autosuspend 假设，**已被证伪**——见 §8.3）。
-> 真正的根因是 **mt76 驱动的 tx timeout（HE80 固件缺陷）**，见 §8.1。
+> ⚠️ 本节先后被误判过两次（autosuspend → 已证伪；HE80/HE40 → 亦已证伪），
+> 详见 §8.3。**最终结论见 §8.1：USB 物理层故障，网卡反复脱落。**
 
-**先降带宽**（治本，优先级最高）：
+**先做软件侧能做的（减轻症状，不能根治）**：
 
 ```sh
+# 1) 5G 降到 40MHz（减轻固件 tx 压力，单独用无效但配合硬件修复有好处）
 cp /etc/config/wireless /etc/config/wireless.bak-$(date +%Y%m%d-%H%M)
-uci set wireless.radio1.htmode='HE40'      # 原 HE80
+uci set wireless.radio1.htmode='HE40'
 uci commit wireless
-wifi down && sleep 3 && wifi up
+
+# 2) 禁用 USB autosuspend（避免无谓挂起/恢复开销）
+echo on > /sys/bus/usb/devices/2-1/power/control
+echo 0  > /sys/bus/usb/devices/2-1/power/autosuspend_delay_ms
+echo -1 > /sys/module/usbcore/parameters/autosuspend
 ```
 
-**验证**：`iw dev <phy>-ap0 info | grep width` → 应为 `width: 40 MHz`。
-
-> 代价：5G 峰值速率下降。若 40MHz 仍不稳 → 换 `VHT80`（关 WiFi 6，保留 80MHz）。
-> 可选值：`HE80 / HE40 / VHT80 / VHT40 / HT40`
+**但真正要做的是硬件动作**（见 §8.6）：换 USB 口 / 换网卡 / 换供电。
+**软件侧只能保证「掉线后能自动恢复」，不能保证「不掉线」。**
 
 ### 步骤 0b（可选，本身有益但**不是**根因）：关掉 USB autosuspend
 
@@ -184,7 +187,7 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 **本例最终状态**：`channel 36 (5180 MHz), width: 80 MHz, center1: 5210 MHz`（与配置
 一致，beacon 其实已生效）、`carrier=1`、station 4 台、ping NAS **0% 丢包**。
 
-## 四个容易踩的坑
+## 六个容易踩的坑
 
 1. **「Failed to set beacon parameters」不代表 beacon 没生效**——本例中驱动实际
    已按 `channel 36 / 80MHz / center1 5210MHz` 正确工作，该错误是重载期间的残留。
@@ -200,103 +203,123 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 4. **`echo 3 > /proc/sysrq-trigger` 在 OpenWrt 上不生效**——`kernel.sysrq=1` 已开，
    但触发被拦，**uptime 不变**（会误以为已重启）。用 `reboot` 命令。
 
-5. **每次 disconnect 前必有 `timed out waiting for pending tx`**——这是**判别
-   「驱动超时」与「物理拔插」的决定性前兆**（§8.1）。只看到 `USB disconnect`
-   就下结论「网卡被拔了」会误判方向——本次就因此先误判成 autosuspend。
+5. **每次 disconnect 前必有 `timed out waiting for pending tx`**——但这是**症状不是
+   原因**（§8.3 假设二）。**判别物理层问题的决定性前兆是 `reset SuperSpeed`
+   周期出现**——那才是 USB 链路不稳的信号（§8.1）。
 
-## 8. 复发模式与根因（2026-10-20 三次排查定稿）
+6. **`reset SuperSpeed` 周期出现 = USB 链路不稳**（供电/接触/信号质量），
+   **不是驱动问题**。本次先后误判成 autosuspend 与 HE80 固件，**两次都是因为
+   没往下追到「设备最终从 USB 总线消失」这个事实**。
 
-**第一次修复只清了 `page_pool`，没解决掉线本身**——重启后 **55 分钟**（uptime 3337 秒）
-网卡再次无征兆 disconnect，同样的 oops + page_pool 卡死复现。
+## 8. 复发模式与根因（2026-10-20 四次排查定稿）
 
-### 8.1 真正的根因：`mt76` 驱动的 tx timeout（HE80 固件 bug）
+### 8.1 最终结论：USB 物理层故障——网卡反复 reset 后彻底脱落
 
-**每次掉线前的必然前兆**（dmesg 逐行）：
+**dmesg 完整模式**（每次循环都一样）：
 
 ```
-[3339.890569] mt7921u 2-1:1.0: timed out waiting for pending tx   ← 发送队列超时
-[3339.897638] br-proxyap: port 1(phy0-ap0) entered disabled state
-...
-[3766.559402] usb 2-1: USB disconnect, device number 3             ← 驱动放弃，设备重枚举
-[3769.413928] mt7921u 2-1:1.0: timed out waiting for pending tx   ← 下一轮重复
+[   17.907453] usb 2-1: reset SuperSpeed USB device number 2   ← 上电
+[ 3337.004278] usb 2-1: USB disconnect, device number 2       ← 脱落
+[ 3340.340657] usb 2-1: new SuperSpeed USB device number 3
+[ 3505.081197] usb 2-1: reset SuperSpeed USB device number 3   ← 165 秒后又被 reset
+[ 3766.559402] usb 2-1: USB disconnect, device number 3       ← 再脱落
+[ 3770.534028] usb 2-1: new SuperSpeed USB device number 4
+[ 4153.914584] usb 2-1: reset SuperSpeed USB device number 4   ← 384 秒后又被 reset
+[ 4373.214142] usb 2-1: USB disconnect, device number 4       ← 再脱落
 ```
 
-**掉线间隔**：3337s → 3766s（**相隔 429 秒**）——不是随机，是负载相关的规律。
+**决定性证据**：
+- `reset SuperSpeed` → **165~384 秒后** → `USB disconnect` → 重新枚举，**循环往复**；
+- 最终 `2-1` 设备路径**整个消失**（`/sys/bus/usb/devices/2-1` 不存在），
+  `mt7921u` 驱动下**无设备绑定** → **网卡已物理脱落，不在 USB 总线上**；
+- `br-proxyap` 的 MAC 从 `90:de:80:88:71:09` 变成 `9e:2b:ee:3e:07:0e`
+  → 桥接口现在绑的不是无线网卡（是残留）；
+- **无 over-current / not enough power 记录**（不是明确的过流告警）；
+- **无 xhci 控制器错误**（不是控制器挂死）。
 
-**判定依据**：
-- 固件版本 `Build Time: 20231109190959`（2023-11，mt76 驱动的 tx timeout 是**已知问题**）
-- 配置为 `htmode='HE80'`（WiFi 6 80MHz）——**MT7921U 在 80MHz 模式下固件易卡 tx 队列**
-- 每次 disconnect 前**必定**有 `timed out waiting for pending tx`（不是物理拔插）
+**判据：`reset SuperSpeed` 周期出现 = USB 链路不稳**（供电/接触/信号质量），
+**不是驱动问题**。
 
-### 8.2 处置：降到 40MHz（已实施）
+### 8.2 处置：软件侧只能自愈，根治要动硬件
 
-```sh
-cp /etc/config/wireless /etc/config/wireless.bak-$(date +%Y%m%d-%H%M)
-uci set wireless.radio1.htmode='HE40'
-uci commit wireless
-wifi down && sleep 3 && wifi up
-```
+**软件侧（已实施，减轻症状）**：
+- `htmode` 降 `HE40`（减轻固件 tx 压力）
+- 禁用 USB autosuspend
+- **掉线自动恢复**：本手册的 unbind/bind + netifd 重启流程（§5 步骤 1~2）
 
-**实测结果**：`width: 40 MHz, center1: 5190 MHz`（原 `80 MHz / 5210 MHz`），
-carrier=1，NAS 恢复（`192.168.50.146:22` 与 `:7899` 均通）。**配置已持久化。**
+**根治（必须动手，按优先级）**：
+1. **给 NAS 接网线**（`br-lan` 侧）——**这是对本项目最重要的一条**：
+   让生产环境不再依赖 WiFi 单点（见 `docs/ops/runbook.md` §3.13）；
+2. **换 USB 口**：避开 USB 3.0 口（供 500mA），或用**带独立供电**的 USB 集线器；
+3. **换网卡**：MT7921U 在 OpenWrt 6.12 上不稳；可考虑 RTL8812AU / MT7612U；
+4. **检查接头接触**：`reset SuperSpeed` 周期出现最常见的原因就是接头松动。
 
-> 代价：5G 峰值速率下降（80MHz→40MHz）。若 40MHz 仍不稳，下一候选是
-> **`VHT80`**（关掉 WiFi 6，保留 80MHz 带宽）——两者只能二选一。
-> 可选值：`HE80 / HE40 / VHT80 / VHT40 / HT40`
+### 8.3 两次被证伪的假设（记录以免重蹈）
 
-### 8.3 被证伪的假设：USB autosuspend
+> **这是本篇最有价值的部分**——两次误判的共同教训：
+> **每个假设都必须用「改完是否还复现」验证，不能靠「改了之后看起来好了」下结论。**
 
-> ⚠️ **这一条曾经被误判为根因，记录在此以免重蹈。**
+#### 假设一：USB autosuspend（0.12.8）
 
 当时观察到 `usbcore.autosuspend=2` + 设备 `autosuspend_delay_ms=2000`（2 秒即挂起），
-且 MT7921U 在 autosuspend 下掉线是**已知问题**——于是禁用之（设备级 `delay=0` +
-`usbcore autosuspend=-1`，并用 `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local`
-双写持久化）。
+且 MT7921U 在 autosuspend 下掉线是**已知问题** → 禁用之。
 
-**结果：仍然掉线**（禁用后 429 秒再次 disconnect）→ **假设被证伪**。
+**结果：仍然掉线**（禁用后 429 秒再次 disconnect）→ **证伪**。
 
-**但禁用 autosuspend 仍保留**——它对该设备有益（避免无谓的挂起/恢复开销），
-只是**不是掉线的原因**。
+**误判原因**：autosuspend 与掉线**同时存在**，但**不是因果**。真正的因果链是
+「USB 链路不稳 → 控制器 reset → 驱动放弃 → 设备脱落」。
 
-**教训**：**相关性不是因果**。`autosuspend` 与掉线同时存在，但它不是原因；
-真正的因果链是「HE80 固件 → tx 队列超时 → 驱动放弃 → 设备重枚举」。
-若当时先验证「禁用后是否还掉」，就能省掉一轮误判。
+#### 假设二：HE80 固件 tx timeout（0.12.9）
 
-### 8.4 其他已排除的因素
+`mt7921u: timed out waiting for pending tx` 确实**每次 disconnect 前都出现**，
+且 MT7921U 在 80MHz 下固件易卡 tx 队列（固件 `Build Time: 20231109190959`）→ 降 40MHz。
+
+**结果：仍然掉线**（40MHz 下继续 reset + disconnect）→ **部分证伪**。
+
+**修正**：tx timeout 是**症状不是原因**——USB 链路 reset 时驱动自然等不到 tx 完成。
+降 40MHz 本身无害（带宽换稳定），保留。
+
+**教训**：**前兆 ≠ 原因**。`tx timeout` 与 `disconnect` 的时序关系只能说明
+「驱动在最后时刻放弃了」，不能说明「带宽导致了放弃」。
+
+### 8.4 已排除的因素
 
 | 因素 | 实测 | 结论 |
 |---|---|---|
-| 供电不足 | `bMaxPower=160mA`，dmesg 无 over-current / not enough power | ❌ 排除 |
+| 物理拔插 | 每次 disconnect 前都有 `reset SuperSpeed`（非人为） | ❌ 排除 |
+| USB autosuspend | 禁用后仍掉线 | ❌ **证伪** |
+| HE80 固件 | 降 40MHz 后仍掉线 | ❌ **证伪**（tx timeout 是症状） |
+| 供电过流告警 | dmesg 无 over-current / not enough power | ❌ 排除（但供电不足仍是主嫌） |
 | 内存不足 | 3G 可用（总 4G） | ❌ 排除 |
 | 过热 | CPU 58°C / GPU 54°C | ❌ 排除 |
 | xhci 控制器错误 | dmesg 无 xhci error/timeout/stall | ❌ 排除 |
 | 定时任务碰 USB | crontab 只有 tailscale / geo-update | ❌ 排除 |
-| 物理拔插 | 每次 disconnect 前都有 `timed out waiting for pending tx` | ❌ 排除 |
-| USB autosuspend | 禁用后仍掉线 | ❌ **证伪** |
+| USB 链路物理不稳 | **`reset SuperSpeed` 周期出现 → 设备最终从总线消失** | ⚠️ **主嫌** |
 
 ### 8.5 硬件信息（供后续判断）
 
 - 软路由：**Lunzn FastRhino R68S**（国产 ARM，aarch64）
 - 网卡：MT7921U（0e8d:7961）挂在 `xhci-hcd.6.auto/usb2`（USB 3.0 SuperSpeed）
 - 驱动：`mt7921u.ko`（内核 6.12.94）
+- **只有一个射频**（radio1 = 5G，**无 2.4G**）→ 5G 挂了就没有备选频段
 
-### 8.6 若 40MHz 仍不稳，按此顺序查
+### 8.6 若要根治
 
-1. **换 `htmode`** → `VHT80`（保留带宽，关 WiFi 6）
-2. **换网卡** → RTL8812AU / MT7612U（避开 mt76 系列的 tx timeout 缺陷）
-3. **换 USB 口** → 避开 USB 3.0（供 500mA），或用带独立供电的 USB 集线器
-4. **检查接头接触** → 「无征兆 disconnect」的常见原因
+见 §8.2 的四条（接网线 / 换 USB 口 / 换网卡 / 检查接头）。
 
-**长期解法**：给 NAS 接**网线**（`br-lan` 侧）——让生产环境不再依赖 WiFi 单点
-（这条对**本项目**尤其重要，见 `docs/ops/runbook.md` §3.13）。
+**注意**：本设备**只有 5G**，没有 2.4G 备选——所以一旦 5G 掉线，
+5G 网段（`192.168.50.0/24`，NAS 在此）**整体不可达**，
+只能走 Tailscale（`100.66.1.5`）。
 
 ## 预防
 
-- **5G 用 40MHz（`htmode='HE40'`）**——这是本设备掉线的**真根因对策**
-- **禁用 USB autosuspend**（见步骤 0）——本身有益，但不是根因
-- **别频繁插拔 USB 无线网卡**——oops 就发生在拔插瞬间
+- **给 NAS 接网线**——**对本项目最重要的一条**：生产环境不应依赖 WiFi 单点
+  （见 `docs/ops/runbook.md` §3.13）
+- **换 USB 口 / 换带独立供电的集线器**——`reset SuperSpeed` 周期出现是主嫌
+- 软件侧缓解措施（保留）：`htmode='HE40'` + 禁用 USB autosuspend
+- **掉线自动恢复**：本手册 §5 步骤 1~2 可在掉线后恢复 AP（**但修不了掉线本身**）
+- 别频繁插拔 USB 无线网卡——oops 就发生在拔插瞬间
   （`ieee80211_get_vht_max_nss` 空指针）
-- 掉线后按本篇处置走一遍（步骤 0 → 1 → 2 → 5）
 - 长期：`page_pool` 卡死累积到一定程度可能影响转发能力；
   建议在方便的时间重启一次设备清干净（5G 网段会断约 1-2 分钟）
 
