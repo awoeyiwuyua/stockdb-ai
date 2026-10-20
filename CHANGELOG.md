@@ -5,9 +5,36 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
-## [0.12.9] — 2026-10-20（**iStoreOS WiFi 掉线真根因：MT7921U 固件 tx timeout（HE80）**；0.12.8 的 autosuspend 假设被证伪并更正）
+## [0.12.8] — 2026-10-20（**iStoreOS WiFi 掉线：定位到 USB autosuspend**；⚠️ 此版本的根因判断随后被证伪，见 0.12.9）
 
-> 起因：0.12.8 禁用 USB autosuspend 后，**网卡仍无征兆掉线**（禁用后 429 秒再次
+> ⚠️ **本条目的根因判断是错的**——当时把 `usbcore.autosuspend=2` + 设备
+> `autosuspend_delay_ms=2000` 判为「无征兆掉线的软件侧根因」并实施禁用。
+> **禁用后网卡仍掉线**（429 秒后再次 disconnect）→ **假设被证伪**。
+> 真根因是 **mt76 驱动的 tx timeout（HE80 固件缺陷）**，见 0.12.9。
+> 本条目保留以记录**「先清症状、再找原因、最后证伪假设」的过程**——
+> 其中「禁用 autosuspend」这一处置本身仍保留（对该设备有益，只是非根因）。
+
+- **当时的处置**：禁用该设备 USB autosuspend（设备级 `delay=0` +
+  `usbcore autosuspend=-1`），并用 `/etc/hotplug.d/10-usb-nosuspend` +
+  `/etc/rc.local` 双写持久化。**这一步本身有效**（WiFi 保持 channel 36/80MHz、
+  carrier=1、客户端正常）——但**没有解决掉线**。
+- **当时的判断（错）**：认为「无征兆掉线 = autosuspend 导致」。
+- **手册当时的结构**：`docs/ops/istoreos-wifi-troubleshooting.md` 新增
+  「步骤 0：关掉 USB autosuspend」+ §8 复发模式，并把 autosuspend 列为
+  「最可能」因素。**该定位已在 0.12.9 更正。**
+- 附带记录的两个有效发现（保留）：
+  - `echo 3 > /proc/sysrq-trigger` 在 OpenWrt 上**不生效**（`kernel.sysrq=1`
+    但触发被拦，uptime 不变）——必须用 `reboot` 命令；
+  - 重启会清掉 `page_pool_release_retry() stalled`（4222 秒 → 0 条）。
+
+验证：节号引用 0 缺失；跨文档 .md 链接 0 破损；Python 全量 618 例全绿；
+CI Python + SPA 双 job 全绿。PR #190。
+
+## [0.12.9] — 2026-10-20（**iStoreOS WiFi 掉线真根因：MT7921U 固件 tx timeout（HE80）**；更正 0.12.8 被证伪的 autosuspend 假设）
+
+> > 本条更正 **[0.12.8](#0128)** 的根因判断。
+
+起因：0.12.8 禁用 USB autosuspend 后，**网卡仍无征兆掉线**（禁用后 429 秒再次
 > disconnect）→ **0.12.8 的根因判断被证伪**。第三次排查定位到真根因。
 
 - **真根因：`mt76` 驱动的 tx timeout（HE80 固件缺陷）**
