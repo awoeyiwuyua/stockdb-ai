@@ -8,6 +8,9 @@
 > pin 会让镜像构建卡在 `sha256sum -c`；重 pin 见 CHANGELOG 0.10.31，构建前务必
 > 用最新 pin（上游 `.SHA256.txt` + GitHub API digest 双核对）。
 > 本文保留为极空间 Q4 时代的部署指南存档。
+>
+> **部署踩坑（症状/判据/处置）见 [`docs/ops/runbook.md`](../docs/ops/runbook.md) §3；
+> 上游雷区见同书 §2 与 `docs/release-policy.md` §6。**
 
 free-stockdb 官方发行包是**静态链接的独立二进制**（服务端 `stockdb` + 更新器 `数据更新`），
 本目录把它容器化到 Linux Docker（极空间 Q4），多架构镜像（amd64 + arm64）一次构建，

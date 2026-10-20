@@ -3,6 +3,9 @@
 > 用户决策：① 数据源参考 [simonlin1212/a-stock-data](https://github.com/simonlin1212/a-stock-data)
 > （免费零鉴权、腾讯/mootdx 优先不封 IP、东财独有+限流、备源降级）；
 > ② 9:25 集合竞价价 = 当日开盘价（业务口径）；③ 采集器通用化，重点是业务数据存储+读取逻辑。
+>
+> **本文件记「口径与设计」；运维现象（症状/判据/处置）见
+> [`docs/ops/runbook.md`](../ops/runbook.md) §7（采集链与打板）。**
 
 ## 1. 数据源选型
 
