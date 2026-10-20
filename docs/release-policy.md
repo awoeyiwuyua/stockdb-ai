@@ -14,7 +14,8 @@
 - `0.7.0`：功能里程碑——新增一个完整能力（如回测引擎、备份/恢复）
 - `1.0.0`：正式版——60 天模拟盘验收通过 + 数据契约冻结评审通过
 - 版本号 `stockdb-ai/config.py` 的 `WEBUI_VERSION`；tag `vX.Y.Z` 打在本仓库（原生模式
-  下 tag 即发布物，无需镜像）
+  下 tag 即发布物，无需镜像）——**tag 与版本号一一对应，是回滚的唯一依据**
+  （见 §3.1 判据；2026-10-20 已补齐历史上 17 个漏打的版本）
 
 ## 2. 发布节奏
 
@@ -31,8 +32,58 @@
 - [ ] 本机原生模式验证：引擎连通 + 必要回填/采集冒烟（离线单测不覆盖的路径）
 - [ ] 功能清单回归表对应页勾选（docs/history/m2-regression-checklist.md）
 - [ ] CHANGELOG.md 更新（本版一行说明）
-- [ ] 合并 main → 打 tag `vX.Y.Z`；**若本版同时出镜像**：手动触发 build-image.yml → CI 四 job 绿
+- [ ] **打 tag `vX.Y.Z`（见下方细则）**；**若本版同时出镜像**：手动触发 build-image.yml → CI 四 job 绿
 - [ ] 部署/验证记录更新 docs/deployments.md（镜像部署时）或本机验证记录（原生模式）
+
+### 3.1 打 tag 的细则（2026-10-20 补——连续 17 版漏打的直接对策）
+
+> **为什么补这段**：09-19~10-17 连续 **9 版**未打 tag（另加两段更早的缺口，
+> 共 **17 个版本**，最远可回溯到 0.5.0）。根因不是"忘了"——是本检查单把
+> 「打 tag」写成一句 checkbox，与「合并 PR」分属**两个工具**
+> （浏览器 UI vs 本地终端），每次发版都要跨工具切换，跨 17 次全漏。
+> 补这段是为了把判据写死，让打 tag 不再依赖记忆。
+
+**tag 目标 = 该版本 `WEBUI_VERSION` 首次出现的 commit**（版本号单源 =
+`stockdb-ai/config.py`），**不是 PR 合并 commit**——一个版本可能跨多个 PR，
+也可能多个版本共用一个 commit。
+
+| 情形 | tag 指向 |
+|---|---|
+| 常规（0.10.45 / 0.12.0 等） | 该版本 `WEBUI_VERSION` 首次出现的那个 commit |
+| 一版跨多个 PR（0.12.3） | 版本号首次出现的 commit（非最后一个 PR 的 merge commit） |
+| 多版共用一个 commit（0.11.1 / 0.11.2） | 同一个 commit，两个 tag 各带自己的版本说明 |
+
+**操作**：
+
+```bash
+# 1) 找该版本版本号首次出现的 commit
+git log --format=%H -- stockdb-ai/config.py          # 逐个看
+git show <sha>:stockdb-ai/config.py | grep WEBUI_VERSION   # 确认该 commit 的版本值
+
+# 2) 打 annotated tag（带说明：版本要点 + PR 号 + 是否事后补打）
+git tag -a vX.Y.Z -F <message-file> <sha>
+
+# 3) 推送
+git push origin vX.Y.Z
+```
+
+**核对（必做）**——仓库内已有审计脚本，一条命令验证「无版本漏打」：
+
+```bash
+python .github/scripts/audit_tag_coverage.py
+# 输出 "OK: N 个版本全部有对应 tag（缺 0）" = 通过
+# 有缺口时列出 MISSING 版本 + 处置步骤，退出码 1
+```
+
+**发版后自检**（可直接放进合并后的收尾动作）：
+
+```bash
+python .github/scripts/audit_tag_coverage.py --quiet && echo "tag 覆盖完整"
+```
+
+> **注**：CI 侧目前**没有**自动 tag / 自动审计 job——按 ROADMAP §0 的判断，
+> 「防复发」的基建排在研究闭环之后（见 ROADMAP §0-5 候选项）。
+> 在那之前，**这一条 checklist 是唯一的防线**，所以它必须被执行，不能只是"写着"。
 
 **分支纪律（2026-08-22 起）**：PR 合入 main 后功能分支即删（仓库已开启 GitHub
 "自动删除 head 分支"；历史堆积的 53 个陈旧分支已于 0.10.0 后清理，仅保留
@@ -44,7 +95,7 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 |---|---|---|
 | 版本号 | `stockdb-ai/config.py` 的 WEBUI_VERSION | 每版必更 |
 | 变更说明 | CHANGELOG.md | 每版必更 |
-| Git 标记 | tag `vX.Y.Z` | 每版必打（原生模式下即最终发布物） |
+| Git 标记 | tag `vX.Y.Z` | 每版必打（原生模式下即最终发布物）；**判据与操作见 §3.1** |
 | 镜像 | `ghcr.io/awoeyiwuyua/stockdb-ai` | **可选**：仅成熟版本手动构建（+ 上游版本 tag） |
 | 部署记录 | docs/deployments.md | 镜像部署时更新
 
