@@ -5,6 +5,49 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.12.15] — 2026-10-20（**0.12.14 实机部署到 NAS**（0.12.6 → 0.12.14）；顺手修掉 NAS 源树的 CRLF 漂移）
+
+> 起因：用户要求做一次部署。**部署前的全量核验发现 NAS 源树早已漂移**——
+> 188 个文件里 **115 个与仓库不一致**（多为 CRLF），且源树里躺着 **122 个 `.pyc`**
+> （`.dockerignore` 没排除它们，而 Dockerfile 是整目录 COPY → 会打进镜像）。
+> 本版把这四个坑写进 runbook §3.14，并顺手修了**既有的节号重复**。
+
+- **部署动作**（`/vol1/stockdb`）：
+  1. **全量对齐源树**（不再只补「与上个版本有差异的文件」）：
+     `git -c core.autocrlf=false -c core.eol=lf archive` 出包（LF），
+     NAS 侧先备份 `src-backup-20261020-0.12.6.tgz`（776K）→ 解包 →
+     删 122 个 `__pycache__`/`.pyc` → **逐文件 sha256 核验 188/188 字节级一致**；
+  2. compose tag `0.12.6` → `0.12.14`（`MIRROR_PAGE_URL` env 已在 0.12.14 那步写入）；
+  3. `docker compose build` → `BUILD_EXIT=0`（构建日志落 `/tmp/build_01214.log`，
+     只回传结果行——见 §3.11），镜像 `stockdb-ai:0.12.14`（007853fd81f4，217 MB）；
+     **0.12.6 旧镜像保留**（回滚点，**别 prune**——见 §3.10）；
+  4. `up -d` → 容器 `Up (healthy)`。
+- **复验（release-policy §6.3 七项）全绿**：
+  - `/api/version` webui=**0.12.14**（与 config.py 一致）；
+  - `/api/diag` **7/7 ok，all_ok=true**（upstream_github / stockdb_service / pybao /
+    disk / warehouse_db / hk_sync / calendar）；
+  - `/api/warehouse/status` watermark_daily=**20261020**；
+  - MCP **57 个工具**注册；`warehouse_list_tables` + `warehouse_run_sql` 返回
+    known_at=20261020、errors=[]；`get_kline` 000001/600000 取到 20261016+ 真实 K 线；
+  - `/api/alerts` **0 条**；`/api/health` latest=**20261020**、lag_days=**0**、status=ok；
+  - `/api/warehouse/run` ok=true（异步沉淀跑通）。
+- **本版专有**：`MIRROR_PAGE_URL=http://ad.123128.xyz` 在容器内生效，
+  **启动后无任何 `a.123128.xyz` / `dns.novapi.cc` 外呼**（0.12.14 的规则真正生效）。
+- **数据零损伤**：`data/` 25G 不变、`research.db` 2,281,472 B 未动、仓库 facts 在位。
+- **runbook 新增 §3.14**「NAS 源树会漂移——部署前必须全量对齐 + 逐文件 sha256 核验」：
+  - **坑一 CRLF 漂移（115 个文件）**：源树从 Windows 工作区同步来的，带 `\r`；
+    **运行不报错**（Python 吃得下 CRLF），但镜像内容与仓库不一致 → 复现对不齐；
+  - **坑二 `git archive` 跟着 `core.autocrlf=true` 转 CRLF**：必须显式
+    `-c core.autocrlf=false`；且 **PowerShell 里 `tar -xOf` 会把行尾规整掉、测不出 CR**，
+    要字节级校验（`tarfile.read().count(13)`）；
+  - **坑三 `tar -czf -C dir file` 的条目名相对 `-C` 目录** → NAS 解到**上一次残留的旧包**，
+    **两次解包结果完全一样**极具迷惑性（本次连续两次都是 CRLF 才暴露）；
+    处置：解包前先删残留 + 打印 tar 的 sha256 核对，别用 `find` 猜；
+  - **坑四 `.dockerignore` 没排除 `__pycache__`** → Dockerfile 整目录 COPY
+    把 122 个 `.pyc` 打进镜像（镜像内运行时生成的 `.pyc` 另说，在容器可写层）。
+- **顺手修既有节号重复**：runbook 原有两个 `§3.10`（旧镜像 / 构建进度条）且**缺 §3.12**
+  → 顺延为 §3.11 / §3.12，新增 §3.14；索引表与 `development-guide.md` 的引用同步更新。
+
 ## [0.12.14] — 2026-10-20（**上游 10-08 规则：禁 `dns.novapi.cc`、改回 `http://ad.123128.xyz`**；连带纠正「源全挂」的过强结论）
 
 > 起因：上游 10-08 公告——**禁止直接用 `dns.novapi.cc` 更新**（所有客户端都打它，
