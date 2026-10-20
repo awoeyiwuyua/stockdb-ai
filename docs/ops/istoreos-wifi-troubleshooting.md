@@ -221,7 +221,11 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 
 ## 8. 复发模式与根因（2026-10-20 四次排查定稿）
 
-### 8.1 最终结论：USB 物理层故障——旧口网卡反复 reset 后彻底脱落
+### 8.1 最终结论：内核 bug 触发的驱动崩溃，网卡随之脱落
+
+**根因 = 内核 bug**（§8.2 有完整 Call Trace）：
+`ieee80211_get_vht_max_nss()` 在**停止 AP** 的 STA 速率计算路径上空指针崩溃
+→ `mt76_unregister_device` **主动注销驱动** → 网卡从 USB 总线脱落。
 
 **dmesg 完整模式**（旧口 `2-1`，每次循环都一样）：
 
@@ -242,11 +246,7 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
   `mt7921u` 驱动下**无设备绑定** → **网卡已物理脱落，不在 USB 总线上**；
 - `br-proxyap` 的 MAC 从 `90:de:80:88:71:09` 变成 `9e:2b:ee:3e:07:0e`
   → 桥接口现在绑的不是无线网卡（是残留）；
-- **无 over-current / not enough power 记录**（不是明确的过流告警）；
-- **无 xhci 控制器错误**（不是控制器挂死）。
-
-**判据：`reset SuperSpeed` 周期出现 = USB 链路不稳**（供电/接触/信号质量），
-**不是驱动问题**。
+- **无 over-current / not enough power 记录**；**无 xhci 控制器错误**。
 
 **换口后的实测（2026-10-20，最终）**：换到 `4-1`（另一条 USB 3.0 控制器
 `xhci-hcd.7.auto/usb4`）**没有根治**——
@@ -260,30 +260,75 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 [ 1202.014] usb 4-1: new SuperSpeed USB device number 4
 ```
 
-**两条不同的 USB 3.0 控制器都复现同一模式**（旧口 `2-1` 与新口 `4-1`），
-说明**不是某一个口的供电问题，而是网卡本身 / 该 USB 控制器链路 / 供电总路**。
+**两条不同的 USB 3.0 控制器复现同一模式** → 与单个 USB 口的供电无关。
 
-**可自愈的部分（已经做到）**：设备不脱落时，按 §5 步骤 1~2（unbind/bind + netifd
-重启）可恢复 AP，NAS 随即重连。实测恢复耗时约 60 秒（含 NAS 侧重连）。
+**恢复**：见 §8.3 的三层自愈机制（看门狗 + 端口自动适配 + autosuspend 禁用），
+**已装并验证**。
 
-**根因未消**。真正的解法只剩 §8.6 的硬件动作，**其中优先级最高的是给 NAS 接网线**
-（对本项目：直接消除生产环境的 WiFi 单点，与本卡的根因无关但同样解决问题）。
+**根治**：§8.7 的硬件动作，**其中优先级最高的是给 NAS 接网线**
+（对本项目：直接消除生产环境的 WiFi 单点——与本卡的根因无关但同样解决问题）。
 
-### 8.2 处置：软件侧只能自愈，根治要动硬件
+### 8.2 真正的崩溃点（内核 bug，2026-10-20 定位到 Call Trace）
 
-**软件侧（已实施，减轻症状）**：
-- `htmode` 降 `HE40`（减轻固件 tx 压力）
-- 禁用 USB autosuspend
-- **掉线自动恢复**：本手册的 unbind/bind + netifd 重启流程（§5 步骤 1~2）
+**完整崩溃栈**（`dmesg`，`WARNING: CPU: 0 PID: 56`）：
 
-**根治（必须动手，按优先级）**：
-1. **给 NAS 接网线**（`br-lan` 侧）——**这是对本项目最重要的一条**：
-   让生产环境不再依赖 WiFi 单点（见 `docs/ops/runbook.md` §3.13）；
-2. **换 USB 口**：避开 USB 3.0 口（供 500mA），或用**带独立供电**的 USB 集线器；
-3. **换网卡**：MT7921U 在 OpenWrt 6.12 上不稳；可考虑 RTL8812AU / MT7612U；
-4. **检查接头接触**：`reset SuperSpeed` 周期出现最常见的原因就是接头松动。
+```
+WARNING: CPU: 0 PID: 56 at ../mac80211-regular/backports-6.18.26/net/wireless/util.c:1521
+                ieee80211_get_vht_max_nss+0x448/0x49c [cfg80211]
+  ieee80211_get_vht_max_nss
+  cfg80211_calculate_bitrate
+  nl80211_put_sta_rate              ← 设置 STA 速率
+  cfg80211_del_sta_sinfo
+  sta_set_sinfo
+  __sta_info_flush
+  ieee80211_nan_func_terminated
+  cfg80211_stop_ap                 ← 停止 AP
+  cfg80211_register_netdevice
+  call_netdevice_notifiers_info
+  __dev_close_many
+  cfg80211_shutdown_all_interfaces
+  ieee80211_unregister_hw
+  mt76_unregister_device          ← 驱动被注销 → 网卡脱落
+```
 
-### 8.3 两次被证伪的假设（记录以免重蹈）
+**这是内核 bug，不是配置问题**：
+- `ieee80211_get_vht_max_nss()` 在 **停止 AP** 时计算 STA 速率路径上解引用空指针；
+- 崩溃 → `mt76_unregister_device` → **驱动主动注销设备** → 网卡从 USB 总线脱落
+  （所以是 `mt76_unregister_device` 而非 `usb_hub` 踢人）；
+- **已知问题**：MT7921U 在 OpenWrt 6.12 上有大量同类崩溃报告
+  （`sta_set_sinfo` / `ieee80211_get_vht_max_nss` 路径，社区已知）；
+- 内核版本 6.12.94 + `backports.git 6ecbb44` 的 mac80211 回移。
+
+**与 `minstrel_vht_only = Y` 有关**（该内核参数强制速率算法只走 VHT 路径）。
+**注意**：该参数**只读**，运行时改不了（`echo 0 > .../minstrel_vht_only` 无效），
+只能靠内核升级——本机不打算为此升级内核。
+
+**触发条件**：需要 **有客户端关联**（`sta_set_sinfo` 要处理 STA），
+所以「AP 空载时不会崩，有设备连着才崩」——这也解释了为什么掉线间隔
+（约 510 秒）与客户端活动相关。
+
+### 8.3 已装的三层自愈机制（2026-10-20）
+
+内核 bug 无法在当前内核上修复，但可以让它**发生后自动恢复**：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| **看门狗** | `/etc/wifi-watchdog.sh` + crontab（每分钟） | 检测到 AP 接口消失或 carrier=0 → unbind/bind 驱动 + 重启 netifd → 恢复 AP（实测约 60 秒含客户端重连） |
+| **端口自动适配** | `/etc/hotplug.d/11-wifi-path-detect` | 网卡插入/换口时**自动更新 `radio1.path`** 并 reload 无线——不必再手工改路径（换口是本次踩坑的主因之一） |
+| **autosuspend 禁用** | `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local` | 按 **vid:pid**（`0e8d:7961`）匹配设备，禁用 USB 自动挂起（设备路径随端口变化，不能硬编码） |
+
+**看门狗逻辑**（幂等，AP 正常时立即退出）：
+
+```sh
+AP=$(ls /sys/class/net/ | grep -E '^phy[0-9]+-ap[0-9]+$' | head -1)
+[ -n "$AP" ] && [ "$(cat /sys/class/net/$AP/carrier)" = "1" ] && exit 0   # 正常
+# 否则：unbind/bind mt7921u → 清 hostapd 残留 → 重启 netifd
+```
+
+**这三层只治标不治本**——根因是内核 bug + USB 物理层不稳。
+**根治仍是 §8.7 的硬件动作。**
+
+### 8.4 两次被证伪的假设（记录以免重蹈）
 
 > **这是本篇最有价值的部分**——两次误判的共同教训：
 > **每个假设都必须用「改完是否还复现」验证，不能靠「改了之后看起来好了」下结论。**
@@ -311,7 +356,7 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 **教训**：**前兆 ≠ 原因**。`tx timeout` 与 `disconnect` 的时序关系只能说明
 「驱动在最后时刻放弃了」，不能说明「带宽导致了放弃」。
 
-### 8.4 已排除的因素
+### 8.5 已排除的因素
 
 | 因素 | 实测 | 结论 |
 |---|---|---|
@@ -325,7 +370,7 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 | 定时任务碰 USB | crontab 只有 tailscale / geo-update | ❌ 排除 |
 | USB 链路物理不稳 | **`reset SuperSpeed` 周期出现 → 设备最终从总线消失** | ⚠️ **主嫌** |
 
-### 8.5 硬件信息（供后续判断）
+### 8.6 硬件信息（供后续判断）
 
 - 软路由：**Lunzn FastRhino R68S**（国产 ARM，aarch64）
 - 网卡：MT7921U（0e8d:7961）——**2026-10-20 从 `2-1`（`xhci-hcd.6.auto/usb2`）换到
@@ -334,9 +379,9 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 - **只有一个射频**（radio1 = 5G，**无 2.4G**）→ 5G 挂了就没有备选频段
   （注：`wifi config` 误探测出的 radio0/6G 已删除，见 §9.2）
 
-### 8.6 若要根治
+### 8.7 若要根治
 
-见 §8.2 的四条。**但注意实测结论（2026-10-20）**：**换 USB 口没根治**——
+见 §8.7 的四条。**但注意实测结论（2026-10-20）**：**换 USB 口没根治**——
 旧口 `2-1` 与新口 `4-1`（两条不同的 USB 3.0 控制器）复现同一模式，
 说明不是单个口的供电问题，而是**网卡本身 / 该 USB 控制器链路 / 供电总路**。
 

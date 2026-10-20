@@ -5,6 +5,48 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.12.12] — 2026-10-20（**WiFi 掉线真根因：内核 bug `ieee80211_get_vht_max_nss` 崩溃 → 驱动注销 → 网卡脱落**；三层自愈已装并验证）
+
+> 承接 0.12.11：换 USB 口未根治，掉线仍复现。本次拿到**完整 Call Trace**，
+> 定位到内核 bug，并装上三层自愈机制（治标）+ 给出根治路径。
+
+- **根因 = 内核 bug**（完整 Call Trace，见手册 §8.2）：
+  ```
+  WARNING: CPU: 0 PID: 56 at ieee80211_get_vht_max_nss+0x448/0x49c [cfg80211]
+    ieee80211_get_vht_max_nss → cfg80211_calculate_bitrate → nl80211_put_sta_rate
+    → cfg80211_del_sta_sinfo → sta_set_sinfo → __sta_info_flush
+    → ieee80211_nan_func_terminated → cfg80211_stop_ap → mt76_unregister_device
+  ```
+  `ieee80211_get_vht_max_nss()` 在**停止 AP** 的 STA 速率计算路径空指针崩溃 →
+  **`mt76_unregister_device` 主动注销驱动** → 网卡从 USB 总线脱落。
+  - MT7921U 在 OpenWrt 6.12 上有大量同类崩溃报告（`sta_set_sinfo` 路径，社区已知）；
+  - 内核 6.12.94 + `backports.git 6ecbb44` 的 mac80211 回移；
+  - `minstrel_vht_only=Y` 强制速率算法只走 VHT 路径，但该参数**只读**、改不了
+    （需升级内核，本机不为此升级）；
+  - **触发条件需要客户端关联**（`sta_set_sinfo` 要处理 STA）→ 空载时不崩。
+- **换 USB 口无效**（已在 0.12.11 记）：`2-1` 与 `4-1` 两条 USB 3.0 控制器
+  复现同一模式 → 与单个 USB 口的供电无关。
+- **三层自愈已装并验证**（手册 §8.3）：
+  1. **看门狗** `/etc/wifi-watchdog.sh` + crontab（每分钟）——检测 AP 接口消失或
+     carrier=0 → unbind/bind 驱动 + 清 hostapd 残留 + 重启 netifd → 恢复 AP
+     （实测约 60 秒含 NAS 重连）；幂等，AP 正常时立即退出；
+  2. **端口自动适配** `/etc/hotplug.d/11-wifi-path-detect`——网卡插入/换口时
+     **自动更新 `radio1.path`** 并 reload 无线（不必再手工改路径）；
+  3. **autosuspend 禁用** `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local`
+     （按 **vid:pid** `0e8d:7961` 匹配，设备路径随端口变化不能硬编码）。
+- **当前状态（已验证）**：`br-proxyap` UP carrier=1、`channel 36 / width 40 MHz`、
+  2 台客户端关联、NAS webui 401 / 引擎 200、**`get_vht_max_nss` 0 次 /
+  `USB disconnect` 0 次 / `page_pool` 0 条**（修复后未再崩）。
+- **根治路径**（手册 §8.7，按实际有效性排序）：① **给 NAS 接网线**（对本项目
+  最高优先——直接消除生产环境 WiFi 单点）② 换网卡（RTL8812AU / MT7612U）
+  ③ 带独立供电的 USB 集线器 ④ ~~换 USB 口~~（实测无效）。
+- **手册更新**：§8.1 结论改为「内核 bug 触发的驱动崩溃」；新增 §8.2（完整
+  Call Trace 与已知问题对照）、§8.3（三层自愈机制）；后续节号顺延；§9 增补
+  「换口后必须重启设备」与「重启必须 `setsid` 脱离 SSH 会话」（否则 uptime 不变、
+  误以为重启过）。
+- **本次踩的坑**：`HT40`（纯 802.11n）在 **5G 上不被支持**（netifd
+  `retry_setup_failed`）→ 试该方案失败，已回退 `HE40`。
+
 ## [0.12.11] — 2026-10-20（**网卡换 USB 口后的完整修复**：path 同步 + radio0 抢占 + rc.local 位置 + hotplug 匹配 + 重启）
 
 > 起因：0.12.10 判定为 USB 物理层故障、需换口。用户把网卡换到另一 USB 口后，
