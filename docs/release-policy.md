@@ -61,20 +61,23 @@ main 与确未合入的工作分支）。长期分支只有 main；tag 是发布
 
 ### 6.1 已知雷区（08-27 实证 + 后续补充）
 
-| 雷 | 症状 | 首修 |
-|---|---|---|
-| workflow YAML 解析失败 | push 触发全 0s 失败 / dispatch 422 | 0.8.x（shell 引号内嵌真实换行）；0.10.17 再犯（job name 裸冒号）→ **改 workflow 必跑 pyyaml 严格解析** |
-| release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"）；**0.3.5 同 tag 重传**（09-08，URL 不 404 但 tar 哈希变 → 原 pin 失效，`sha256sum -c` 构建失败；见 CHANGELOG 0.10.31） |
-| 二进制打包丢可执行位 | sha256 OK 但 stockdb/数据更新 呈 -rw-rw-rw-，启动失败 | 0.3.2（tar 解包后补 chmod +x + test -x 断言） |
-| 同步域名静默更换 | 镜像 302 → 新域，旧 sync_url 失效 | ah.123128.xyz → workbuddy.link（**不写适配层**，只改 /data/sync_url.txt 配置） |
-| 数据源禁止旧客户端（09-07 实证） | 同步失败：manifest 403/502；旧 release 资产 404 | 0.3.2→0.3.5（协议版本门禁 X-Sync-UA: sync_client_X，**必须升级客户端二进制**，改 sync_url 无效；见 CHANGELOG 0.10.28） |
-| 引擎 HTTP 协议升级（JSON→MsgPack） | webui/MCP 全链路 JSON 解析失配：health/coverage/code_stats 变 None | 0.10.29（free_stockdb.fetch 按 Content-Type 嗅探 → msgpack_lite 解包 → json 回序列化；引擎 0.3.5 起，无请求侧开关） |
-| 引擎 SDK 区间语义变更（09-08 重传二进制） | 全市场快照退化成 ~50~100 只 → 仓库沉淀零星行、打板清单漏检（**单只 `get_kline` 正常，掩盖链路**） | 0.10.33（批量 SDK 改用同日区间 `start==end`，旧语义顺延一日作回落；换引擎二进制后回归全市场快照链路，非单只调用） |
-| 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） |
-| 同名 tag 重传资产无法发现 | `tag_name`/`published_at` 不变，旧探针只看 tag → 只能等同步失败被动发现（09-07/09-08 两次） | 0.10.40（`/releases` 列表 + 资产指纹 `asset_fingerprint`；首见只建基线，变化即告警 `asset_changed`） |
-| 上游发新版但**无人被告知** | 探测判定把「面板版本」当引擎版本比（`(0,3,6)>(0,10,36)=False`）→ `stale` 恒 false；探针失败静默留空 | 0.10.37（A/B/D：`IMAGE_TAG` 注入 + 引擎版本同类比较 + 看门狗告警与显式降级）。**仍待做（C）**：`/releases/latest` 看不到 prerelease；同名 tag 重传的资产指纹未比对——0.3.5 两次同 tag 重传只能靠同步失败被动发现 |
-| **pybao 惰性 `QueryResult` 被当普通容器用** | `.do()` 才取原生数据；`.keys()/.all()/.len()` 返回错误文案 `'Missing required parameters'`，`iter()` 逐字符吐它 → 键列表变 `[' ', 'M', 'a'…]`、全表读全空、`for v in rd.vals(...)` 恒 0 行（**数据写进去了却读不出来**） | 0.10.41（三处收口：`mydb_store._rd_to_py` 补 `.do()` 分支、`pybao_tools.rd_keys` 经 `_to_py` 归一、`hk_klines` 走 `_rd_to_py`）。**凡 rd 返回值必先过归一函数**，禁止直接 `list()/dict()/for` 迭代 QueryResult |
-| mydb 键形态（段式 vs 拼接） | `get(table, "00700:20240828")` 与带表名整串在 0.3.5 上**恒返回 `[]`**；命中的是**三段** `get(table, code, date)`；单段键（`打板指标`/`自定义`）才用两段 | 0.10.41（候选序列 `_rd_get_any`/`mydb_key_candidates` 逐个试，首个非空即返回；剥表名前缀只在首段确属已登记前缀时做）。**实测为准，勿按直觉写键形** |
+> **完整条目（症状/判据/处置/铁律）见 [`docs/ops/runbook.md`](ops/runbook.md) §2。**
+> 本表只留**雷区索引**——速查用；排查时按 runbook 的症状索引跳过去。
+
+| 雷 | 症状 | 首修 | runbook |
+|---|---|---|---|
+| workflow YAML 解析失败 | push 触发全 0s 失败 / dispatch 422 | 0.8.x（shell 引号内嵌真实换行）；0.10.17 再犯（job name 裸冒号）→ **改 workflow 必跑 pyyaml 严格解析** | — |
+| release 资产被删/替换 | 下载 URL 404，CI 构建失败 | 0.3.1→0.3.2（上游删"测试版本0.3.1"仅存"测试0.3.2"）；**0.3.5 同 tag 重传**（09-08，URL 不 404 但 tar 哈希变 → 原 pin 失效，`sha256sum -c` 构建失败；见 CHANGELOG 0.10.31） | §2.5 |
+| 二进制打包丢可执行位 | sha256 OK 但 stockdb/数据更新 呈 -rw-rw-rw-，启动失败 | 0.3.2（tar 解包后补 chmod +x + test -x 断言） | §3.6 |
+| 同步域名静默更换 | 镜像 302 → 新域，旧 sync_url 失效 | ah.123128.xyz → workbuddy.link（**不写适配层**，只改 /data/sync_url.txt 配置） | §2.7 |
+| 数据源禁止旧客户端（09-07 实证） | 同步失败：manifest 403/502；旧 release 资产 404 | 0.3.2→0.3.5（协议版本门禁 X-Sync-UA: sync_client_X，**必须升级客户端二进制**，改 sync_url 无效；见 CHANGELOG 0.10.28） | §2.7 |
+| 引擎 HTTP 协议升级（JSON→MsgPack） | webui/MCP 全链路 JSON 解析失配：health/coverage/code_stats 变 None | 0.10.29（free_stockdb.fetch 按 Content-Type 嗅探 → msgpack_lite 解包 → json 回序列化；引擎 0.3.5 起，无请求侧开关） | §2.1 |
+| 引擎 SDK 区间语义变更（09-08 重传二进制） | 全市场快照退化成 ~50~100 只 → 仓库沉淀零星行、打板清单漏检（**单只 `get_kline` 正常，掩盖链路**） | 0.10.33（批量 SDK 改用同日区间 `start==end`，旧语义顺延一日作回落；换引擎二进制后回归全市场快照链路，非单只调用） | §2.2 |
+| 镜像页日期标注失效 | health mirror:null | 0.10.13 起不依赖镜像页日期（本地探针自检） | — |
+| 同名 tag 重传资产无法发现 | `tag_name`/`published_at` 不变，旧探针只看 tag → 只能等同步失败被动发现（09-07/09-08 两次） | 0.10.40（`/releases` 列表 + 资产指纹 `asset_fingerprint`；首见只建基线，变化即告警 `asset_changed`） | §2.5（遗留） |
+| 上游发新版但**无人被告知** | 探测判定把「面板版本」当引擎版本比（`(0,3,6)>(0,10,36)=False`）→ `stale` 恒 false；探针失败静默留空 | 0.10.37（A/B/D：`IMAGE_TAG` 注入 + 引擎版本同类比较 + 看门狗告警与显式降级）。**仍待做（C）**：`/releases/latest` 看不到 prerelease；同名 tag 重传的资产指纹未比对——0.3.5 两次同 tag 重传只能靠同步失败被动发现 | §2.5（遗留） |
+| **pybao 惰性 `QueryResult` 被当普通容器用** | `.do()` 才取原生数据；`.keys()/.all()/.len()` 返回错误文案 `'Missing required parameters'`，`iter()` 逐字符吐它 → 键列表变 `[' ', 'M', 'a'…]`、全表读全空、`for v in rd.vals(...)` 恒 0 行（**数据写进去了却读不出来**） | 0.10.41（三处收口：`mydb_store._rd_to_py` 补 `.do()` 分支、`pybao_tools.rd_keys` 经 `_to_py` 归一、`hk_klines` 走 `_rd_to_py`） | §2.3 |
+| mydb 键形态（段式 vs 拼接） | `get(table, "00700:20240828")` 与带表名整串在 0.3.5 上**恒返回 `[]`**；命中的是**三段** `get(table, code, date)`；单段键（`打板指标`/`自定义`）才用两段 | 0.10.41（候选序列 `_rd_get_any`/`mydb_key_candidates` 逐个试，首个非空即返回；剥表名前缀只在首段确属已登记前缀时做） | §2.4 |
 
 ### 6.2 换域/换资产半小时流程
 

@@ -42,6 +42,7 @@
   （路由批 3 后唯一消费方消失）。
 - 生态坑位记录：**vitest 的 hoist transform 会吃掉 `vi.mock(...)` 行尾注释并连带换行**，
   导致下一行被拼上来 → rollup 解析错。`vi.mock` 行禁止行尾注释（注释写上一行）。
+  （运维条目见 [`docs/ops/runbook.md`](../ops/runbook.md) §6.3）
 
 ### 3. tokens 单一来源
 - `styles/tokens.css`（新）只放变量：字体栈 / 表面 / 文字 / 语义色 / Element Plus 桥接

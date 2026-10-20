@@ -16,8 +16,9 @@
 |---|---|
 | `ROADMAP.md` | 定位/路线图/防漂移锚点（该做与不该做） |
 | `architecture.md` | 架构总纲：边界/分层/决策 D1-D12 存档 |
-| `development-guide.md` | 本机开发：目录关系（**代码在 stockdb-ai/，数据在仓库根 data/**）/运行配方/排查手册 |
-| `release-policy.md` | 发布纪律：版本语义/流程/验证要求 |
+| `development-guide.md` | 本机开发：目录关系（**代码在 stockdb-ai/，数据在仓库根 data/**）/运行配方 |
+| `release-policy.md` | 发布纪律：版本语义/流程/验证要求 + 上游依赖治理 SOP |
+| `ops/runbook.md` | **运维知识唯一归属**：症状→判据→处置（上游雷区/部署坑/仓库陷阱/采集坑/方法论） |
 | `runtime-model.md` | 后端并发治理：熔断/信号量/单飞 + 新功能运行时影响检查清单 |
 | `data-source.md` | 上游数据源与镜像同步协议（manifest/SHA256） |
 | `deployments.md` | NAS docker 部署台账（每次部署后更新） |
@@ -32,3 +33,5 @@
   SQLite、records/ jsonl），生产 = `/data` 卷
 - **找发布流程**：`release-policy.md`；版本号在 `stockdb-ai/config.py` 的 `WEBUI_VERSION`
 - **找某决策的为什么**：`architecture.md` §4 决策表（D1~D12）
+- **线上出问题了/踩坑了**：先查 `ops/runbook.md` §1 症状索引表（按"你看到了什么"查），
+  再看 §10 变更纪律——**新坑记在 runbook，不散落在别处**

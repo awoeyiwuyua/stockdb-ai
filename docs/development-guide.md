@@ -70,54 +70,30 @@
 
 ## 4. 本机已知坑（排查手册）
 
+> **运维知识的唯一归属 = [`docs/ops/runbook.md`](ops/runbook.md)**。
+> 本节只留本机环境的最小提示；完整条目（症状/判据/处置/出处）见 runbook §6.1。
+
+- **系统代理**：任何 python 网络请求默认走 127.0.0.1:7890（Clash），务必 `NO_PROXY`
 - **pybao 首次加载慢/HTTP 502**：SDK 客户端初始化会全表预载复权因子，期间引擎忙；
   预热完成后恢复（避免在预热期并发 HTTP）
 - **`rd.keys("*")` / `mydb_tables()` 会挂死**：全表扫描分钟级，引擎单连接串行处理；
   生产路径只做前缀通配（`rd.keys(table, "code:*")`）
 - **mkdtemp 目录不可写**：Python 3.14 Windows 对 `os.mkdir(0o700)`（tempfile.mkdtemp
   内部）施加受限 ACL——仅影响受限令牌环境；真实终端无此问题
-- **系统代理**：任何 python 网络请求默认走 127.0.0.1:7890（Clash），务必 `NO_PROXY`
 
 ## 5. NAS 部署已知坑（2026-09-14 补记，均为实机踩过）
 
-- **工作区是 CRLF，仓库里是 LF**：本机 `core.autocrlf=true` → git 存 LF、工作区检出
-  CRLF。部署脚本按**字节**上传工作区文件，于是 NAS 上的 `.py` 是 CRLF 而 git 里是 LF
-  ——`sha256sum` 比对必然不等，**别据此判断"部署没生效"**（git 视角 `git status`
-  干净、`git diff` 为空，说明内容一致，差异纯粹是行尾）。运行时代码不受影响（Docker
-  `COPY` 逐行处理、CRLF 无副作用，已实证同版本两次构建产物不同 digest 但行为一致）；
-  若要求 NAS 源树与仓库**字节一致**，部署后按需重同步一次。
-  **判据**：`git status --short` 为空 = 内容一致；`sha256sum` 不等 = 行尾/权限差异。
-- **`sudo` 抢 stdin 会挂死**：`sudo -S -p ''` 从 stdin 读密码，**同一条 exec 里出现
-  第二个 sudo、或与其它读 stdin 的命令串联**，就会互相抢输入而卡到超时（实测把
-  SSH 通道卡满 120s）。规矩：**一次 exec 一个 sudo**；要装多个文件就写成脚本文件
-  `sftp.put` 上去再 `sudo -S -p '' sh /tmp/xxx.sh`（脚本从文件读，不与密码抢 stdin）。
-- **fnOS 卷丢执行位**：git clone / 解压到 `/vol1` 后 `entrypoint.sh`、`dev.sh` 可能失去
-  `+x`，重建容器即启动失败。同步一律用 `install -m <mode>` 显式带权限（不要 `cp`）。
-- **卷上 `find` / `docker system df` 很慢**：可能几十秒到分钟级，容易误判成"SSH 断了"；
-  查目录就指定深度、查镜像用 `docker images --format`，别用全盘扫描。
-- **compose 用精确 tag 而非 `:latest`**：改动后必须 `image:` 改到新 tag 再 build/up，
-  否则 `up -d` 会继续用旧镜像（0.10.44 起旧 tag 已清理，回滚需重新 build）。
-- **`.env` CRLF 污染 shell 侧 token → webui POST body 静默丢失**（2026-09-19 实测）：
-  `/vol1/stockdb/.env` 曾是 CRLF 行尾，shell 里 `cut` 取出的 `WEBUI_TOKEN` 尾部带
-  `\r`；把它放进 `X-StockDB-Token` 请求头后，头值里的裸 `\r` 被服务器当成行结束，
-  **其后的 Content-Type / Content-Length 头全部丢失** → `_read_json` 读到 length=0
-  返回 `{}` → **所有 POST body 参数静默变默认值**（实测 `backfill:true` 被吞成
-  False，三次"成功"的仓库回填实际秒完成零目标；GET 接口与 `/mcp`（不带 token 头）
-  完全正常，极具迷惑性）。**判别**：`POST /api/auction/run {"task":"bogus"}` 回显
-  `非法 task ''` = body 丢失，`非法 task 'bogus'` = 正常。**预防**：读 token 后一律
-  `tr -d "\r\n"`；`.env` 已转 LF（备份 `.env.bak-crlf-20260919`）。
-- **DuckDB / SQLite 的 WAL 是数据库的一部分，不是日志**（2026-09-30 实测）：
-  `warehouse.duckdb` 的 `wal_autocheckpoint` 默认 **16 MiB**，而仓库日增量仅 ~0.1 MB
-  → 自动 checkpoint 日常**从不触发**，唯一时机是引擎干净关闭；实测主库文件 mtime
-  曾冻结在 09-23、此后 7 天写入全积在 `.wal`（749 KB）。**后果**：任何"只拷
-  `.duckdb`"的裸恢复/取证/演练会**静默退到上一次 checkpoint**（本次巡检即踩到：
-  读副本得 `watermark:daily=20260923`，实连读才是 `20260930`——差点误判成
-  "水位线停止推进"，而面板全绿）。**规矩**：
-  ① 裸拷一律 `.duckdb` + `.wal`（+ `-shm`）**成对**，单拷主库等于回到过去；
-  ② 离线读取副本时若发现水位/计数"停在某天"，先怀疑 WAL 未收口，**别当成业务故障**
-  （判别：主库 mtime 远旧于 `.wal` mtime）；
-  ③ 0.11.1 起沉淀收尾会自动 `CHECKPOINT`（`backup.checkpoint_duckdb`），`/api/diag`
-  的 `warehouse_db` 项透出主库/WAL 新鲜度（`stale` = WAL ≥ 主库 10%）；
-  ④ 手动收口只能**在应用进程内**发 `CHECKPOINT`（`duckdb.connect(路径)` 复用同进程
-  缓存实例）——独立进程（`docker exec python`）会被实例锁挡住："Conflicting lock
-  is held in ... (PID 59)"，0.01s 失败。同款语义见 `research.db` 的 `-wal/-shm`。
+> **运维知识的唯一归属 = [`docs/ops/runbook.md`](ops/runbook.md)**。
+> 本节只留最小提示清单；完整条目（症状/判据/处置/出处）见 runbook §3（面板与部署）
+> 与 §5.1（仓库 WAL）。**新踩的坑记在 runbook，本节不重复正文。**
+
+| 坑 | 一句话提示 | runbook |
+|---|---|---|
+| 工作区 CRLF vs 仓库 LF | `git status` 干净 = 内容一致；`sha256sum` 不等只是行尾 | §3.7 |
+| `sudo` 抢 stdin | **一次 exec 一个 sudo**；多文件写成脚本再 `sudo sh` | §3.5 |
+| fnOS 卷丢执行位 | 同步用 `install -m <mode>`，不要 `cp` | §3.6 |
+| 卷上 `find` / `docker system df` 慢 | 指定深度 + `docker images --format` | §3.8 |
+| compose 用精确 tag | 改 tag 再 build/up，否则跑旧镜像 | §3.9 |
+| `.env` CRLF → POST body 静默丢失 | 读 token 后 `tr -d "\r\n"`；判别法见 runbook | §3.3 |
+| DuckDB/SQLite 的 WAL 是数据库的一部分 | 裸拷必须 `.duckdb` + `.wal` **成对** | §5.1 |
+| 镜像构建进度条刷爆 SSH 缓冲 | 输出重定向到日志，只回传结果行 | §3.10 |
