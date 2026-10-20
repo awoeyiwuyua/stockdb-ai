@@ -19,7 +19,7 @@
 | `development-guide.md` | 本机开发：目录关系（**代码在 stockdb-ai/，数据在仓库根 data/**）/运行配方 |
 | `release-policy.md` | 发布纪律：版本语义/流程/验证要求 + 上游依赖治理 SOP |
 | `ops/runbook.md` | **运维知识唯一归属**：症状→判据→处置（上游雷区/部署坑/仓库陷阱/采集坑/方法论） |
-| `ops/istoreos-wifi-troubleshooting.md` | iStoreOS WiFi 掉线排障（USB 网卡驱动崩溃专题，超出本仓库边界故单独成篇） |
+| ~~`ops/istoreos-wifi-troubleshooting.md`~~ | **2026-10-20 迁出本仓库**（v0.12.13）——iStoreOS 设备与 USB 网卡驱动不是本项目的内容；手册在 `~/Desktop/home-ops/`，项目侧只留拓扑依赖与指针 |
 | `runtime-model.md` | 后端并发治理：熔断/信号量/单飞 + 新功能运行时影响检查清单 |
 | `data-source.md` | 上游数据源与镜像同步协议（manifest/SHA256） |
 | `deployments.md` | NAS docker 部署台账（每次部署后更新） |

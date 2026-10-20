@@ -13,8 +13,11 @@
 > - `docs/development-guide.md` — 本机怎么跑（配方，本文只记坑）
 > - `docs/runtime-model.md` — 并发治理模型（制度，本文只记事故）
 > - `docs/design/warehouse.md` — 仓库层设计（口径，本文只记运维陷阱）
-> - `docs/ops/istoreos-wifi-troubleshooting.md` — **iStoreOS WiFi 掉线排障**（独立专题：
->   涉及 iStoreOS 设备与 USB 网卡驱动，超出本仓库边界，故单独成篇）
+> - **iStoreOS WiFi 掉线排障** — **已迁出本仓库**（v0.12.13）：iStoreOS 设备与
+>   USB 网卡驱动**不是本项目的内容**（家庭网络基础设施）。手册在
+>   `C:\Users\75393\Desktop\home-ops\istoreos-wifi-troubleshooting.md`；
+>   本书只保留与项目相关的**环境拓扑依赖**（NAS 走 WiFi 挂在 iStoreOS 网段）——
+>   见 §3.13 与 §9 第 17 条。
 > - `docs/ops/engine-data-stale.md` — **引擎行情陈旧 / 上游源全不可达**（独立专题：
 >   三个数据层的口径区分 + 二进制判空陷阱 + 取证清单 + 恢复路径）
 
@@ -56,7 +59,7 @@
 | up -d 后还是旧镜像 | §3.9 compose 精确 tag | 部署 |
 | 构建时 SSH 被断连 | §3.10 构建输出刷爆缓冲 | 部署 |
 | **NAS 连不上了 / SSH 超时** | §3.13 外部依赖：网络与 iStoreOS | 外部 |
-| **WiFi 整个消失 / 5G 客户端拿不到 IP** | [istoreos-wifi-troubleshooting.md](istoreos-wifi-troubleshooting.md) | 外部 |
+| **WiFi 整个消失 / 5G 客户端拿不到 IP** | 外部手册（已迁出本仓库，路径见本文开头） | 外部 |
 | **引擎行情滞后很久 / get_kline 取不到近期数据** | [engine-data-stale.md](engine-data-stale.md) | 上游 |
 | **同步反复失败 / 「N 个文件对不齐」** | [engine-data-stale.md](engine-data-stale.md) §4.5 | 上游 |
 | 点击多了全站「无法访问」 | §3.11 并发风暴 | 部署 |
@@ -389,8 +392,8 @@ ssh root@192.168.31.100 "ip -br link show br-proxyap"
 
 **处置**：
 - Tailscale 通 → 改用 Tailscale 地址部署（**可靠通道**，与网段无关）；
-- Tailscale 也不通 → 是 iStoreOS WiFi 掉了 → 见
-  [`istoreos-wifi-troubleshooting.md`](istoreos-wifi-troubleshooting.md)；
+- Tailscale 也不通 → 是 iStoreOS WiFi 掉了 → 排障手册**在本仓库之外**
+  （`~/Desktop/home-ops/istoreos-wifi-troubleshooting.md`，非项目内容）；
 - 长期解法：给 NAS 接**网线**（`br-lan` 侧 `192.168.31.x`），或让 NAS 也装
   Tailscale（它已有 `100.66.1.5`，说明已装）。
 
@@ -878,7 +881,7 @@ commit、0.12.3 跨两个 PR），自动化会越权。
 | 13 | **paper.sqlite3 遗留文件未删** | 0.8.0 | 模拟盘功能已于 0.8.0 移除，但 SQLite 账本文件留在 NAS 待用户自行处理 |
 | 14 | **上游 002310 数据缺口（05-06~05-12）** | 上游侧 | 上游数据源恢复后重跑同步；非本项目代码问题 |
 | 15 | **CI 侧无 tag 审计 job / 无自动打 tag** | **已修（部分）**，2026-10-20 | 审计脚本 `.github/scripts/audit_tag_coverage.py` 已落地（缺 tag 时退出码 1，已验证失败路径）；**CI cron 审计 job 推迟**——按 ROADMAP §0-5 候选项，等研究闭环跑通、发布节奏稳定后再评估。**注意只报警不自动打 tag**（「哪些 commit 算一个发布」是人的判断） |
-| 16 | **iStoreOS WiFi 无征兆掉线（内核 bug → 驱动注销 → 网卡脱落）** | **三层自愈已装并验证；根治需硬件动作**，2026-10-20 | **根因 = 内核 bug**（完整 Call Trace 见手册 §8.2）：`ieee80211_get_vht_max_nss()` 在**停止 AP** 的 STA 速率计算路径空指针崩溃（`WARNING: CPU: 0 PID: 56`）→ `mt76_unregister_device` **主动注销驱动** → 网卡从 USB 总线脱落（`reset SuperSpeed` → 165~384 秒后 `USB disconnect` → 重枚举 → 循环）。MT7921U 在 OpenWrt 6.12 上已知同类崩溃（`sta_set_sinfo` 路径）；`minstrel_vht_only=Y` 强制走该路径但**只读**、改不了。**换 USB 口无效**（`2-1` 与 `4-1` 两条 USB 3.0 控制器复现同一模式）。**已装三层自愈**：① 看门狗 `/etc/wifi-watchdog.sh`（cron 每分钟，检测 AP 消失/carrier=0 → unbind/bind + 重启 netifd，实测约 60 秒恢复）② 端口自动适配 `/etc/hotplug.d/11-wifi-path-detect`（换口自动改 `radio1.path`）③ autosuspend 禁用（按 vid:pid `0e8d:7961`，rc.local + hotplug 双写）。**当前状态**：`br-proxyap` UP carrier=1、`channel 36/40MHz`、2 台客户端、NAS webui 401 / 引擎 200、`get_vht_max_nss` 0 次 / `USB disconnect` 0 次 / `page_pool` 0 条。**根治优先级**：① **给 NAS 接网线**（对本项目最高优先，直接消除 WiFi 单点）② 换网卡（RTL8812AU/MT7612U）③ 带独立供电的 USB 集线器 ④ ~~换 USB 口~~（实测无效）。**注意本设备只有 5G 无 2.4G** → 5G 掉了 5G 网段（NAS 在此）整体不可达，只能走 Tailscale。详见 `istoreos-wifi-troubleshooting.md` §8/§9 |
+| 16 | **iStoreOS WiFi 无征兆掉线** | **设备侧内容已迁出本仓库**，2026-10-20 | 根因与排障**不是本项目的内容**（iStoreOS 设备 + USB 网卡驱动，2026-10-20 迁至 `~/Desktop/home-ops/istoreos-wifi-troubleshooting.md`）。**对项目只有一条影响**：NAS 挂在 5G 网段上，网卡掉线 = NAS 断联（见 §3.13 / 第 17 条）。**项目侧该做的**：① 部署一律走 Tailscale `100.66.1.5`（与网段无关的可靠通道）② 长期**给 NAS 接网线**（`br-lan` 侧 `192.168.31.x`）→ 直接消除 WiFi 单点。**设备侧已装三层自愈**（看门狗 + 端口自动适配 + autosuspend 禁用），实测恢复约 60 秒；但**内核 bug 未消除、掉线仍复现**（观测窗口内 2 次 `USB disconnect`），自愈只缩短中断不消除中断 |
 | 17 | **NAS 走 WiFi 挂在 iStoreOS 网段** | **环境拓扑依赖**，2026-10-20 | NAS 的局域网 IP `192.168.50.146` 在 `br-proxyap`（5G）网段上——本机切到别的网络时该网段不可达，**NAS 看着像挂了其实是网段隔离**。Tailscale `100.66.1.5` 是可靠通道。长期解法：给 NAS 接网线（`br-lan` 侧）。见 §3.13 |
 | 18 | **引擎行情数据陈旧（只到 2026-08-07，滞后 52 个交易日）** | **未修（需上游或换源）**，2026-10-20 | 根因链：2026-09-06 极空间迁移后 `data/` 快照落盘（mtime 停在 Aug 23）→ 2026-09-11 起引擎报 `data1` Corruption（缺 006051/006072/006074/006075）→ **所有上游源不可达**（`ah./ad.123128.xyz` http=000、`workbuddy.link` 404、`a.` 302 后 000）→ 同步器三轮「N 个文件对不齐」放弃 → 引擎退化为 remote0，行情停在 08-07。**仓库层（到 10-19，116 万行）与港股（到 10-20）正常**。恢复路径见 `engine-data-stale.md` §7（等源恢复 / 换源 / ROADMAP §0-2 兜底源） |
 | 19 | **上游源整体消失（未覆盖的情形）** | **制度缺口**，2026-10-20 | `release-policy` §6 的「三雷」覆盖了「换域/删资产/禁旧客户端」，但**没覆盖「源整体不可达」**——本次 `ah./ad.123128.xyz` 连 `http=000`（连接失败），无任何可用源，缺的文件永远补不齐。**换域/换源是常规操作不是意外**，SOP 需补这一分支 |
@@ -897,7 +900,7 @@ commit、0.12.3 跨两个 PR），自动化会越权。
   「仓库 + NAS」两层，中间还压着「iStoreOS 路由 + WiFi 网段」这一层，
   **它不出现在任何代码或依赖清单里，却能让整条部署链路失效**。
   新增外部依赖（NAS、路由器、网段、Tailscale、DNS、代理）时，
-  在 §9 遗留表或对应的专题手册里登记它的**失效判据**与**可靠通道**。
+  在 §9 遗留表或对应的外部手册里登记它的**失效判据**与**可靠通道**。
 - **复验要报「每个口径的实际值」，不能只报一个好看的数**（2026-10-20 新增）——
   本次 0.12.x 的部署复验把 `/api/warehouse/status.watermark_daily`（仓库层水位线）
   当成了「行情数据最新日期」上报，**掩盖了引擎行情已陈旧 2 个月**。
