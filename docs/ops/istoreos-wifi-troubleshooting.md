@@ -11,7 +11,7 @@
 | 设备 | iStoreOS 25.12.5（OpenWrt 6.12.94，aarch64），硬件 **Lunzn FastRhino R68S** |
 | 管理地址 | `192.168.31.100`（**走有线时**；LAN 侧是 `192.168.50.1`） |
 | SSH | `ssh root@192.168.31.100`（密钥 `~/.ssh/id_ed25519` 可直接登录，无需密码） |
-| 无线网卡 | **MT7921U**（MediaTek 0e8d:7961，USB dongle），驱动 `mt7921u`，挂 `xhci-hcd.6.auto/usb2`（USB 3.0）。**2026-10-20 状态：已从 USB 总线脱落（`2-1` 设备路径消失），待重新插入/换口** |
+| 无线网卡 | **MT7921U**（MediaTek 0e8d:7961，USB dongle），驱动 `mt7921u`。**2026-10-20 已换到 USB 口 `4-1`**（`xhci-hcd.7.auto/usb4`，另一条 USB 3.0 控制器），`option path` 已同步更新 |
 | USB autosuspend | **已禁用**（`usbcore.autosuspend=-1` + 设备 `autosuspend_delay_ms=0`），持久化在 `/etc/hotplug.d/10-usb-nosuspend` + `/etc/rc.local` |
 | 5G AP | `ssid=Pandora_passwall`，`channel=36`，**`htmode=HE40`**（原 HE80，因固件 tx timeout 缺陷降级，见 §8.1），`sae-mixed` |
 | AP 网桥 | `br-proxyap` = `192.168.50.1/24`（**5G 客户端在此网段**，NAS 在 `.146`） |
@@ -299,9 +299,11 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 ### 8.5 硬件信息（供后续判断）
 
 - 软路由：**Lunzn FastRhino R68S**（国产 ARM，aarch64）
-- 网卡：MT7921U（0e8d:7961）挂在 `xhci-hcd.6.auto/usb2`（USB 3.0 SuperSpeed）
+- 网卡：MT7921U（0e8d:7961）——**2026-10-20 从 `2-1`（`xhci-hcd.6.auto/usb2`）换到
+  `4-1`（`xhci-hcd.7.auto/usb4`）**，两条都是 USB 3.0 SuperSpeed 控制器
 - 驱动：`mt7921u.ko`（内核 6.12.94）
 - **只有一个射频**（radio1 = 5G，**无 2.4G**）→ 5G 挂了就没有备选频段
+  （注：`wifi config` 误探测出的 radio0/6G 已删除，见 §9.2）
 
 ### 8.6 若要根治
 
@@ -310,6 +312,122 @@ ping -c 2 -W 2 192.168.50.146                                  # 实测 NAS 通�
 **注意**：本设备**只有 5G**，没有 2.4G 备选——所以一旦 5G 掉线，
 5G 网段（`192.168.50.0/24`，NAS 在此）**整体不可达**，
 只能走 Tailscale（`100.66.1.5`）。
+
+## 9. 网卡换 USB 口后（2026-10-20 实操，五个坑）
+
+把网卡从 `2-1` 换到 `4-1` 后，**配置不会自动跟上**——OpenWrt 的
+`option path` 是硬编码路径。以下五处都要改/修，漏一处就起不来：
+
+### 9.1 `radio1.path` 要改成新路径
+
+```sh
+# 查新路径（注意：要用 phy 的 device 路径，不是网卡的）
+readlink -f /sys/class/ieee80211/phy0/device
+# -> /sys/devices/platform/fd000000.usb/xhci-hcd.7.auto/usb4/4-1/4-1:1.0
+# 去掉前导 / 后就是 uci 的 path 值
+uci set wireless.radio1.path='platform/fd000000.usb/xhci-hcd.7.auto/usb4/4-1/4-1:1.0'
+uci commit wireless
+```
+
+> ⚠️ **path 值不能带前导 `/`**——带了就匹配不上（netifd 静默不认）。
+> 本次就踩了这个：写成 `/platform/...` 时 AP 一直起不来。
+
+### 9.2 自动探测生成的 `radio0` 会抢占同一个 path
+
+`wifi config`（或某些自动探测流程）会生成一个 `radio0`（`band=6g`、
+**`country=00`**），它的 `path` 与 radio1 相同。后果：
+
+```
+hostapd: Line 7: Invalid country_code '00'
+hostapd: Cannot enable IEEE 802.11d without setting the country_code
+hostapd: 2 errors found in configuration file
+hostapd: hostapd.add_iface failed for phy phy0
+```
+
+**处置**：删掉它（它本机没有 6G 射频，是误探测产物）：
+
+```sh
+uci delete wireless.radio0
+uci delete wireless.default_radio0
+uci commit wireless
+```
+
+### 9.3 `rc.local` 的追加内容必须在 `exit 0` 之前
+
+OpenWrt 的 `/etc/rc.local` 模板结尾自带 `exit 0`。**追加在它之后的内容永远
+不会执行**——本次的 autosuspend 持久化就是这样静默失效的。
+
+```sh
+# ❌ 错：追加在 exit 0 之后
+...原有内容...
+exit 0
+echo 0 > /sys/.../autosuspend_delay_ms     # 永不执行
+
+# ✅ 对：重写整个文件，把追加内容放在 exit 0 之前
+```
+
+### 9.4 `hotplug.d` 脚本不能硬编码端口号
+
+设备路径随 USB 口变化（`2-1:1.0` → `4-1:1.0`）。**按 vid:pid 匹配**：
+
+```sh
+VID=$(cat "/sys$DEVPATH/idVendor" 2>/dev/null)
+PID=$(cat "/sys$DEVPATH/idProduct" 2>/dev/null)
+if [ "$VID" != "0e8d" ] || [ "$PID" != "7961" ]; then exit 0; fi
+```
+
+（MT7921U = `0e8d:7961`）
+
+### 9.5 `/etc/hotplug.d` 目录可能不存在
+
+被清理过的系统上该目录会消失，`cp` 直接报 `No such file or directory`。
+**先 `mkdir -p /etc/hotplug.d`**。
+
+### 9.6 换口后必须重启设备
+
+**旧设备的 `page_pool` 卡死会污染新设备的初始化**——实测换口后
+`phy5-ap0` 存在但 hostapd 仍报 694 次 beacon 错误，直到重启才清零。
+**rmmod/modprobe 清不掉，只有重启。**
+
+```sh
+# ⚠️ 必须用 setsid 脱离 SSH 会话，否则会话结束时进程被杀、重启不发生
+setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 &
+```
+
+> **踩过的坑**：先用了 `(sleep 2; reboot) &`，结果 **uptime 没变**（设备根本没
+> 重启），却以为重启过了。**验证重启是否真的发生，看 `uptime` 和
+> `/proc/sys/kernel/random/boot_id`**，别看 dmesg（内核 ring buffer 会保留）。
+
+### 9.7 换口后的完整操作顺序
+
+```sh
+# 1. 改 path（去前导 /）
+uci set wireless.radio1.path='<新路径>'
+uci commit wireless
+# 2. 删误探测的 radio0
+uci delete wireless.radio0; uci delete wireless.default_radio0; uci commit wireless
+# 3. 重写 rc.local（追加内容在 exit 0 之前，按 vid:pid 匹配）
+# 4. 重写 /etc/hotplug.d/10-usb-nosuspend（mkdir -p 目录，按 vid:pid 匹配）
+# 5. 重启设备（setsid 脱离会话）
+setsid sh -c 'sleep 2; reboot' >/dev/null 2>&1 &
+```
+
+**换口后的验证清单**：
+
+```sh
+cat /proc/uptime                                  # uptime 应很小
+cat /proc/sys/kernel/random/boot_id               # 应与重启前不同
+dmesg | grep -c page_pool_release_retry           # 应为 0
+logread | grep -c 'Failed to set beacon'          # 应为 0
+dmesg | grep -c 'USB disconnect'                 # 应为 0
+ip -br link show | grep proxyap                   # 应为 UP
+iw dev phy0-ap0 info | grep -E 'channel|width'    # 信道/带宽须与配置一致
+iw dev phy0-ap0 station dump | grep -c '^Station' # 关联客户端数 > 0
+```
+
+**本次换口后的最终状态**：`page_pool` 0 条、beacon 错误 0 条、USB disconnect 0 次、
+`br-proxyap` UP、carrier=1、`channel 36 / width 40 MHz / center1 5190 MHz`、
+3 台客户端关联、NAS 的 22/7899/8081 全部恢复。
 
 ## 预防
 
