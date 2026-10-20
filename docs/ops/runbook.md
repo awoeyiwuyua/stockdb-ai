@@ -13,6 +13,8 @@
 > - `docs/development-guide.md` — 本机怎么跑（配方，本文只记坑）
 > - `docs/runtime-model.md` — 并发治理模型（制度，本文只记事故）
 > - `docs/design/warehouse.md` — 仓库层设计（口径，本文只记运维陷阱）
+> - `docs/ops/istoreos-wifi-troubleshooting.md` — **iStoreOS WiFi 掉线排障**（独立专题：
+>   涉及 iStoreOS 设备与 USB 网卡驱动，超出本仓库边界，故单独成篇）
 
 ---
 
@@ -51,6 +53,8 @@
 | 卷上 find / docker system df 卡住 | §3.8 慢 IO | 部署 |
 | up -d 后还是旧镜像 | §3.9 compose 精确 tag | 部署 |
 | 构建时 SSH 被断连 | §3.10 构建输出刷爆缓冲 | 部署 |
+| **NAS 连不上了 / SSH 超时** | §3.13 外部依赖：网络与 iStoreOS | 外部 |
+| **WiFi 整个消失 / 5G 客户端拿不到 IP** | [istoreos-wifi-troubleshooting.md](istoreos-wifi-troubleshooting.md) | 外部 |
 | 点击多了全站「无法访问」 | §3.11 并发风暴 | 部署 |
 | 本机跑不通 | §6.1 本机配方坑 | 开发 |
 | 改了代码但测试 patch 不生效 | §6.2 from-import 快照 | 开发 |
@@ -358,6 +362,37 @@ cd /vol1/stockdb && docker compose build && docker compose up -d
 → 全部线程栈打到 docker logs。
 
 **并发治理模型见** `docs/runtime-model.md`（Little's Law + 熔断/信号量/单飞）。
+
+### 3.13 外部依赖：NAS 的网络路径会断（2026-10-20 实测）
+
+**症状**：`ssh 192.168.50.146` 超时 / `curl NAS:8081` 连不上 / 部署脚本报
+连接失败——**但 NAS 本身没坏**（Tailscale 地址 `100.66.1.5` 可能仍通）。
+
+**根因**：**NAS 走 WiFi 挂在 iStoreOS 的 `br-proxyap`（192.168.50.0/24）网段上**。
+本机若切到别的网络（有线 `192.168.31.x`），那个网段就不可达——**NAS 看着像挂了，
+其实是网段隔离**。
+
+**判据**：
+
+```sh
+# 1. NAS 局域网 IP 通不通
+Test-NetConnection 192.168.50.146 -Port 22
+# 2. Tailscale 通不通（区分「NAS 挂了」vs「网段隔离」）
+Test-NetConnection 100.66.1.5 -Port 22
+# 3. iStoreOS 的 WiFi 网桥状态
+ssh root@192.168.31.100 "ip -br link show br-proxyap"
+```
+
+**处置**：
+- Tailscale 通 → 改用 Tailscale 地址部署（**可靠通道**，与网段无关）；
+- Tailscale 也不通 → 是 iStoreOS WiFi 掉了 → 见
+  [`istoreos-wifi-troubleshooting.md`](istoreos-wifi-troubleshooting.md)；
+- 长期解法：给 NAS 接**网线**（`br-lan` 侧 `192.168.31.x`），或让 NAS 也装
+  Tailscale（它已有 `100.66.1.5`，说明已装）。
+
+**教训**：本项目的生产环境**不只有「仓库 + NAS」两层**，中间还压着
+「iStoreOS 路由 + WiFi 网段」这一层外部依赖——**它不出现在任何代码或文档的
+依赖清单里，却能让整个部署链路失效**。这类「环境拓扑依赖」应当显式登记。
 
 ---
 
@@ -839,6 +874,8 @@ commit、0.12.3 跨两个 PR），自动化会越权。
 | 13 | **paper.sqlite3 遗留文件未删** | 0.8.0 | 模拟盘功能已于 0.8.0 移除，但 SQLite 账本文件留在 NAS 待用户自行处理 |
 | 14 | **上游 002310 数据缺口（05-06~05-12）** | 上游侧 | 上游数据源恢复后重跑同步；非本项目代码问题 |
 | 15 | **CI 侧无 tag 审计 job / 无自动打 tag** | **已修（部分）**，2026-10-20 | 审计脚本 `.github/scripts/audit_tag_coverage.py` 已落地（缺 tag 时退出码 1，已验证失败路径）；**CI cron 审计 job 推迟**——按 ROADMAP §0-5 候选项，等研究闭环跑通、发布节奏稳定后再评估。**注意只报警不自动打 tag**（「哪些 commit 算一个发布」是人的判断） |
+| 16 | **iStoreOS `page_pool_release_retry() stalled`** | **未修（不影响功能）**，2026-10-20 | USB 无线网卡（MT7921U）被拔出重插时驱动 oops，旧实例的 DMA 内存池未释放（`id 7, 9 inflight` 持续增长）。**rmmod/modprobe 清不掉，只能重启设备**。实测不影响转发：WiFi 照常工作（`channel 36/80MHz` 正确、NAS ping 0% 丢包）。**复发风险**：网卡再被插拔可能再次触发同样的驱动崩溃。处置见 `istoreos-wifi-troubleshooting.md` |
+| 17 | **NAS 走 WiFi 挂在 iStoreOS 网段** | **环境拓扑依赖**，2026-10-20 | NAS 的局域网 IP `192.168.50.146` 在 `br-proxyap`（5G）网段上——本机切到别的网络时该网段不可达，**NAS 看着像挂了其实是网段隔离**。Tailscale `100.66.1.5` 是可靠通道。长期解法：给 NAS 接网线（`br-lan` 侧）。见 §3.13 |
 
 ---
 
@@ -850,3 +887,8 @@ commit、0.12.3 跨两个 PR），自动化会越权。
   本书是知识的稳定落点。
 - 坑位若与设计文档冲突，以设计文档为准（本书记的是**运维现象**，
   设计文档记的是**口径**）。
+- **「环境拓扑依赖」要显式登记**（2026-10-20 新增）——本项目的生产环境不只有
+  「仓库 + NAS」两层，中间还压着「iStoreOS 路由 + WiFi 网段」这一层，
+  **它不出现在任何代码或依赖清单里，却能让整条部署链路失效**。
+  新增外部依赖（NAS、路由器、网段、Tailscale、DNS、代理）时，
+  在 §9 遗留表或对应的专题手册里登记它的**失效判据**与**可靠通道**。
