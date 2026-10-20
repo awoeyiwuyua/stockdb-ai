@@ -88,6 +88,28 @@ def _tags_available() -> bool:
     return True
 
 
+def _stale_clone_check(version_count: int, tag_count: int) -> str | None:
+    """检测「当前目录不是本仓库的最新克隆」——返回警告文案（无则 None）。
+
+    背景（2026-10-20 实机）：NAS 上的 src/ 是一个 **2026-08-23 的陈旧克隆**
+    （HEAD 停在 0.10.35 时期，tag 只有 7 个）——历次部署都是直出工作区，
+    从未 fetch 过。此时在本目录跑审计会报「92 个版本缺 tag」，
+    **那反映的是克隆陈旧，不是发布纪律缺口**。
+    判据：版本条目数与 tag 数差得离谱（tag 覆盖不足一半）→ 判为陈旧克隆。
+    """
+    if version_count == 0 or tag_count == 0:
+        return None
+    if tag_count * 2 < version_count:
+        return (
+            f"当前目录疑似陈旧克隆：CHANGELOG 有 {version_count} 个版本，"
+            f"但本地只有 {tag_count} 个 tag。\n"
+            "  这多半不是发布纪律缺口，而是这个克隆没 fetch 过：\n"
+            "    git fetch --tags origin && git fetch origin main\n"
+            "  确认后再跑本脚本。"
+        )
+    return None
+
+
 def version_sort_key(v: str) -> tuple[int, int, int]:
     return tuple(int(x) for x in v.split("."))  # type: ignore[return-value]
 
@@ -113,11 +135,20 @@ def main() -> int:
         return 2
 
     tags = git_tags()
+
     # CHANGELOG 可能有同版本多条（如 0.10.36~0.10.39 合并条目），去重保序
     ordered: list[str] = []
     for v in versions:
         if v not in ordered:
             ordered.append(v)
+
+    stale_msg = _stale_clone_check(len(ordered), len(tags))
+    if stale_msg:
+        if not quiet:
+            print(f"ERROR: {stale_msg}", file=sys.stderr)
+        else:
+            print("ERROR: stale clone (tags not fetched)", file=sys.stderr)
+        return 2
 
     missing = sorted((v for v in ordered if v not in tags), key=version_sort_key)
     # 有 tag 但 CHANGELOG 无条目 —— 通常是历史遗留/归档，不算缺口，仅提示
