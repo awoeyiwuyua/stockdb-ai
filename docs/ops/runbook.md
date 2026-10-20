@@ -57,12 +57,12 @@
 | sha256 对不上但 git 干净 | §3.7 工作区 CRLF vs 仓库 LF | 部署 |
 | 卷上 find / docker system df 卡住 | §3.8 慢 IO | 部署 |
 | up -d 后还是旧镜像 | §3.9 compose 精确 tag | 部署 |
-| 构建时 SSH 被断连 | §3.10 构建输出刷爆缓冲 | 部署 |
+| 构建时 SSH 被断连 | §3.11 构建输出刷爆缓冲 | 部署 |
 | **NAS 连不上了 / SSH 超时** | §3.13 外部依赖：网络与 iStoreOS | 外部 |
 | **WiFi 整个消失 / 5G 客户端拿不到 IP** | 外部手册（已迁出本仓库，路径见本文开头） | 外部 |
 | **引擎行情滞后很久 / get_kline 取不到近期数据** | [engine-data-stale.md](engine-data-stale.md) | 上游 |
 | **同步反复失败 / 「N 个文件对不齐」** | [engine-data-stale.md](engine-data-stale.md) §4.5 | 上游 |
-| 点击多了全站「无法访问」 | §3.11 并发风暴 | 部署 |
+| 点击多了全站「无法访问」 | §3.12 并发风暴 | 部署 |
 | 本机跑不通 | §6.1 本机配方坑 | 开发 |
 | 改了代码但测试 patch 不生效 | §6.2 from-import 快照 | 开发 |
 | 启动即崩 / 状态永不可见 | §6.3 模块身份分叉 | 开发 |
@@ -378,13 +378,13 @@ cd /vol1/stockdb && docker compose build && docker compose up -d
 
 
 
-### 3.10 镜像构建进度条刷爆 SSH 缓冲（0.12.1）
+### 3.11 镜像构建进度条刷爆 SSH 缓冲（0.12.1）
 
 **症状**：`docker compose build` 期间 SSH 被断连，镜像未产出，线上跑的还是旧版。
 
 **处置**：构建输出重定向到 `/tmp/build_XXXX.log`，**只回传结果行**。
 
-### 3.11 点击多了全站「无法访问」（0.9.11 / 0.9.12）
+### 3.12 点击多了全站「无法访问」（0.9.11 / 0.9.12）
 
 **症状**：进程活着、无错误日志，但**请求排队/阻塞累积**，全站"点击多了无法访问"。
 
@@ -435,6 +435,70 @@ ssh root@192.168.31.100 "ip -br link show br-proxyap"
 依赖清单里，却能让整个部署链路失效**。这类「环境拓扑依赖」应当显式登记。
 
 ---
+
+### 3.14 NAS 源树会漂移——**部署前必须全量对齐 + 逐文件 sha256 核验**（0.12.15 实测）
+
+**背景**：NAS 的 `/vol1/stockdb/src` 是**构建用源树**（不是 git 仓库，`.git` 已删）。
+历次部署只同步「与上个版本有差异的文件」，**累积下来会漂移**——2026-10-20 部署
+0.12.14 前实测：**188 个文件里 115 个与仓库不一致**。
+
+**坑一：CRLF 漂移（115 个文件）**
+- 现象：NAS 上的 `.py` 文件带 `
+`（从 Windows 工作区同步的），仓库 blob 是 LF；
+- 判据（逐文件对照）：
+  ```sh
+  # NAS 侧
+  sha256sum src/stockdb-ai/core/__init__.py
+  tr -d '\r' < src/stockdb-ai/core/__init__.py | sha256sum   # 去 CR 后应 == 仓库 blob
+  # 本地侧（仓库 blob 的真值）
+  python .env-support/git_tree_manifest.py HEAD /tmp/local.txt
+  ```
+- 危害：运行不报错（Python 吃得下 CRLF），但**镜像内容与仓库不一致**，
+  出问题无法用「仓库版本」对齐复现。
+
+**坑二：`git archive` 会跟着 `core.autocrlf` 转 CRLF**
+- Windows 上 `core.autocrlf=true`，`git archive` 产出的是 **CRLF** 版本；
+- **必须显式关掉**：
+  ```sh
+  git -c core.autocrlf=false -c core.eol=lf archive --format=tar -o src.tar HEAD
+  ```
+- 核验（PowerShell 里 `tar -xOf` 会把行尾规整掉，**测不出 CR**，要用字节级方法）：
+  ```python
+  tarfile.open('src.tar').extractfile('stockdb-ai/app.py').read().count(13)  # 必须为 0
+  ```
+
+**坑三：`tar -czf` 的条目名相对 `-C` 目录 → 解到「旧包」**
+- `tar -czf out.tar.gz -C dir file` 存进去的条目名是 **`file`**（不是 `dir/file`）；
+  NAS 上 `tar -xzf` 落在**当前目录**，而 `find` 可能捞到**上一次残留的同名 tar**——
+  **两次解包结果完全一样**，极具迷惑性（本次连续两次都是 CRLF，才暴露出来）；
+- 处置：解包前**先删残留**（`rm -rf /tmp/.tmp-ssh /tmp/src_head.tar`），
+  解包后**打印 tar 的 sha256 与目标路径**核对，别用 `find` 猜。
+
+**坑四：`__pycache__` 会被打进镜像**
+- `.dockerignore` **没有**排除 `__pycache__`（它只排了 docs/CHANGELOG 等）；
+  而 Dockerfile 是 `COPY stockdb-ai/core/ /opt/webui/core/`——**整目录拷贝**，
+  源树里的 122 个 `.pyc` 全部进镜像；
+- 处置：部署前 `find src -name '__pycache__' -prune -exec rm -rf {} +`，
+  同步后再断言 `find src -name '*.pyc' | wc -l` = 0。
+  （镜像内运行时生成的 `.pyc` 是容器可写层的产物，与此无关。）
+
+**正确姿势：全量对齐 + 逐文件 sha256 核验**
+
+```sh
+# 1) 本地出「仓库 blob 真值」清单（LF）
+python .env-support/git_tree_manifest.py HEAD /tmp/local_head.txt
+# 2) 出包（关 autocrlf）
+git -c core.autocrlf=false -c core.eol=lf archive --format=tar -o src.tar HEAD
+tar -czf src.tar.gz -C <dir> src.tar
+# 3) NAS：备份 → 解包（先清残留）→ 删多余文件（archive 里没有的）
+tar --exclude='__pycache__' -czf src-backup-<date>-<旧版本>.tgz src
+# 4) NAS：逐文件 sha256 清单，与本地清单 diff
+cd src && find . -type f -print0 | xargs -0 sha256sum | sed 's#  \./#  #' | sort -k2 > /tmp/nas.txt
+# 5) 判定：仅 NAS 多出 0 / 仅仓库有 0 / 内容不同 0  → 才允许 build
+```
+
+> **判据是「188/188 字节级一致」**，不是「我同步了 3 个文件」。
+> 增量同步 + 不核验 = 不知道镜像里到底是什么。
 
 ## 4. 同步与调度
 

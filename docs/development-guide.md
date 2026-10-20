@@ -96,4 +96,4 @@
 | compose 用精确 tag | 改 tag 再 build/up，否则跑旧镜像 | §3.9 |
 | `.env` CRLF → POST body 静默丢失 | 读 token 后 `tr -d "\r\n"`；判别法见 runbook | §3.3 |
 | DuckDB/SQLite 的 WAL 是数据库的一部分 | 裸拷必须 `.duckdb` + `.wal` **成对** | §5.1 |
-| 镜像构建进度条刷爆 SSH 缓冲 | 输出重定向到日志，只回传结果行 | §3.10 |
+| 镜像构建进度条刷爆 SSH 缓冲 | 输出重定向到日志，只回传结果行 | §3.11 |
