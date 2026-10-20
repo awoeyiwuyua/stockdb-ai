@@ -37,14 +37,25 @@
 - **教训**：设备「换个口」不是插上就能用——OpenWrt 的 `option path` 是硬编码，
   **配置不会跟随硬件位置变化**；且旧设备的驱动状态会污染新设备。
 
-- **换口后的实测结果（补记）**：`USB disconnect` **0 次**、`page_pool` **0 条**
-  ——不再脱落、内存池不再卡死；但 `reset SuperSpeed` 仍约 **510 秒**一次
-  → **AP 会短暂掉线但可自动恢复**（按手册步骤 1~2）。
-  即：换口把「**不可自愈的脱落**」降级为「**可自愈的掉线**」，**根因未消**
-  （USB 链路仍不稳）。**NAS 服务侧验证全部正常**：WiFi 关联
-  authorized/authenticated/associated = yes（信号 -75dBm）、ping 0% 丢包、
-  webui `/api/version` 与 `/api/health` 返回 401（活着、需 token）、
-  引擎 `?cmd=get&t=股票代码` 返回真实代码列表。
+- **换口后的实测结果（最终补记）——换口未根治**：
+  ```
+  [   17.487] usb 4-1: reset SuperSpeed USB device number 2   ← 上电
+  [  510.351] usb 4-1: reset SuperSpeed USB device number 2   ← 8.5 分钟后
+  [ 1177.189] usb 4-1: USB disconnect, device number 2        ← 19.6 分钟后脱落
+  [ 1190.185] usb 4-1: new SuperSpeed USB device number 3
+  [ 1201.606] usb 4-1: USB disconnect, device number 3        ← 11 秒后又掉
+  [ 1202.014] usb 4-1: new SuperSpeed USB device number 4
+  ```
+  **两条不同的 USB 3.0 控制器（`2-1` 与 `4-1`）复现同一模式** → 不是某一个口的
+  供电问题，而是**网卡本身 / 该 USB 控制器链路 / 供电总路**。
+  **已做到（自愈）**：设备未脱落时按手册步骤 1~2（unbind/bind + netifd 重启）
+  可恢复 AP，NAS 随即重连，**实测约 60 秒**。
+  **根治优先级**：① **给 NAS 接网线**（对本项目最高优先，直接消除 WiFi 单点）
+  ② 换网卡（RTL8812AU/MT7612U）③ 带独立供电的 USB 集线器
+  ④ ~~换 USB 口~~（**实测无效**）。
+  **NAS 服务侧验证全部正常**：WiFi 关联 authorized/authenticated/associated = yes
+  （信号 -75dBm）、ping 0% 丢包、webui `/api/version` 与 `/api/health` 返回 401
+  （活着、需 token）、引擎 `?cmd=get&t=股票代码` 返回真实代码列表。
 - **新增方法论：探测工具本身可能不可靠**（§「七个容易踩的坑」第 7 条）——
   本次两次踩坑：① **busybox ash 不支持 `/dev/tcp`**，
   `(echo > /dev/tcp/HOST/PORT)` 恒失败，被误读成「NAS 端口全 closed」，
