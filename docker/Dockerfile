@@ -117,6 +117,10 @@ COPY docker/stockdb.conf /etc/stockdb/stockdb.conf
 # 0.9.8 严格分层：后端主体按层整体 COPY（interfaces/web + interfaces/mcp 接口层、
 # services/ 服务层、core/ 领域层、storage/ 数据层、ops/ 横切；组合根 app.py/config.py）。
 COPY stockdb-ai/app.py stockdb-ai/config.py stockdb-ai/entrypoint.sh /opt/webui/
+# 0.13.0（部署实证）：fnOS 等带 ACL 的宿主解包 git archive 会剥掉可执行位
+# （源树 mode 000 → COPY 进镜像仍 000 → 容器起不来 permission denied）。
+# 构建内显式 chmod 根治，不再依赖构建上下文的文件模式。
+RUN chmod +x /opt/webui/entrypoint.sh
 COPY stockdb-ai/interfaces/ /opt/webui/interfaces/
 COPY stockdb-ai/services/ /opt/webui/services/
 COPY stockdb-ai/core/ /opt/webui/core/
