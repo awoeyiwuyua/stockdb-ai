@@ -1,0 +1,239 @@
+{
+  "contract_version": "stockdb-market-v3",
+  "contract_revision": "3.0.0",
+  "mode": "nas",
+  "generated_at": "2026-10-24T00:38:47+0800",
+  "server_version": "0.13.0",
+  "cases": [
+    {
+      "case_id": "C01",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "initialize follows negotiated protocol; identity independent",
+          "status": "PASS",
+          "evidence": "serverInfo={'name': 'stockdb-native', 'version': '0.13.0'}"
+        },
+        {
+          "assertion": "tools/list matches real accepted inputs (contract_version present)",
+          "status": "PASS",
+          "evidence": "tools=57"
+        }
+      ]
+    },
+    {
+      "case_id": "C02",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C03",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "legacy-defect regression: 20× batch, zero silent-empty runs",
+          "status": "PASS",
+          "evidence": "empty_runs=0/20"
+        }
+      ]
+    },
+    {
+      "case_id": "C04",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C05",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C06",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C07",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C08",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C09",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C10",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C11",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C12",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C13",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C14",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C15",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C16",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C17",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C18",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C19",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C20",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "SSE supported and paired by request id",
+          "status": "PASS",
+          "evidence": "content-type=text/event-stream; charset=utf-8, frames=1, id-paired=yes"
+        },
+        {
+          "assertion": "JSON mode supported (ping id-paired)",
+          "status": "PASS",
+          "evidence": "ping={'jsonrpc': '2.0', 'id': 778, 'result': {}}"
+        },
+        {
+          "assertion": "notification accepted (no error); empty success response",
+          "status": "PASS",
+          "evidence": "status=202"
+        }
+      ]
+    },
+    {
+      "case_id": "C21",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C22",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "legacy single-element codes keeps documented flat-list form",
+          "status": "PASS",
+          "evidence": "data type=list, rows=4"
+        },
+        {
+          "assertion": "legacy L01 batch (limit=0) returns data for all 5 codes",
+          "status": "PASS",
+          "evidence": "rows={'603516': 4, '000967': 4, '002328': 4, '002600': 4, '159915': 4}"
+        }
+      ]
+    },
+    {
+      "case_id": "X01",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "X02",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "X03",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "X04",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "X05",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C23",
+      "phase": "project",
+      "status": "NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "project daily/close integration (client phase)",
+          "status": "NOT_RUN",
+          "evidence": "属消费方项目接入（README §14.2），服务交付阶段 NOT_RUN"
+        }
+      ]
+    },
+    {
+      "case_id": "C24",
+      "phase": "project",
+      "status": "NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "scope/publication/5-day observation (client phase)",
+          "status": "NOT_RUN",
+          "evidence": "属消费方项目接入，服务交付阶段 NOT_RUN"
+        }
+      ]
+    }
+  ]
+}

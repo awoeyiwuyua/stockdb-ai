@@ -587,6 +587,7 @@ def _avg_price_ok(env: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _http_call(url, method, params=None, msg_id=1, accept=None, timeout=60):
+    """POST JSON-RPC，返回 {"status", "content_type", "body"}（连接已关闭）。"""
     import urllib.request
     msg = {"jsonrpc": "2.0", "id": msg_id, "method": method}
     if params is not None:
@@ -597,22 +598,23 @@ def _http_call(url, method, params=None, msg_id=1, accept=None, timeout=60):
     req = urllib.request.Request(url, data=json.dumps(msg).encode(),
                                  headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp
+        return {"status": resp.status,
+                "content_type": resp.headers.get("Content-Type", ""),
+                "body": resp.read().decode("utf-8", "replace")}
 
 
 def run_nas(cases: dict[str, Case], url: str) -> None:
     c = cases["C01"]
-    with _http_call(url, "initialize", {"protocolVersion": "2025-06-18",
-                                        "capabilities": {},
-                                        "clientInfo": {"name": "acc", "version": "0"}}) as r:
-        init = json.loads(r.read().decode())
+    r = _http_call(url, "initialize", {"protocolVersion": "2025-06-18",
+                                       "capabilities": {},
+                                       "clientInfo": {"name": "acc", "version": "0"}})
+    init = json.loads(r["body"])
     info = init["result"]["serverInfo"]
     c.check("initialize follows negotiated protocol; identity independent",
             init["result"]["protocolVersion"] == "2025-06-18"
             and info["name"] == "stockdb-native",
             f"serverInfo={info}")
-    with _http_call(url, "tools/list") as r:
-        tl = json.loads(r.read().decode())
+    tl = json.loads(_http_call(url, "tools/list")["body"])
     tools = tl["result"]["tools"]
     kline_tool = next(t for t in tools if t["name"] == "get_kline")
     c.check("tools/list matches real accepted inputs (contract_version present)",
@@ -624,13 +626,12 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
     # NAS 上批量×20 稳定性（L01/L02 修复验证）
     empty_runs = 0
     for i in range(20):
-        with _http_call(url, "tools/call", {
+        resp = json.loads(_http_call(url, "tools/call", {
             "name": "get_kline",
             "arguments": {**BASE_ARGS, "codes": [
                 "XSHG/equity/exchange/603516", "XSHE/equity/exchange/000967",
                 "XSHE/equity/exchange/002328", "XSHE/equity/exchange/002600",
-                "XSHE/etf/exchange/159915"]}}, msg_id=100 + i) as r:
-            resp = json.loads(r.read().decode())
+                "XSHE/etf/exchange/159915"]}}, msg_id=100 + i)["body"])
         env = resp["result"]["structuredContent"]
         if all(len(v) == 0 for v in env["data"].values()):
             empty_runs += 1
@@ -638,12 +639,12 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
             empty_runs == 0, f"empty_runs={empty_runs}/20")
 
     c = cases["C20"]
-    with _http_call(url, "tools/call", {
+    sse = _http_call(url, "tools/call", {
         "name": "get_data_status",
         "arguments": {"contract_version": "stockdb-market-v3"}},
-        msg_id=777, accept="application/json, text/event-stream") as r:
-        ct = r.headers.get("Content-Type", "")
-        body = r.read().decode()
+        msg_id=777, accept="application/json, text/event-stream")
+    ct = sse["content_type"]
+    body = sse["body"]
     frames = [line[6:] for line in body.splitlines()
               if line.startswith("data: ")]
     matched = None
@@ -659,8 +660,7 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
             and "result" in (matched or {}),
             f"content-type={ct}, frames={len(frames)}, id-paired={'yes' if matched else 'no'}")
     # JSON 模式
-    with _http_call(url, "ping", msg_id=778) as r:
-        pong = json.loads(r.read().decode())
+    pong = json.loads(_http_call(url, "ping", msg_id=778)["body"])
     c.check("JSON mode supported (ping id-paired)", pong.get("id") == 778,
             f"ping={pong}")
     # 通知（无 id）→ 202 空体
@@ -674,23 +674,21 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
                 r.status in (200, 202), f"status={r.status}")
 
     c = cases["C22"]
-    with _http_call(url, "tools/call", {
+    resp = json.loads(_http_call(url, "tools/call", {
         "name": "get_kline",
         "arguments": {"codes": ["002600"], "frequency": "1d",
                       "start": "20261020", "end": "20261023",
-                      "limit": 10}}) as r:
-        resp = json.loads(r.read().decode())
+                      "limit": 10}})["body"])
     payload = json.loads(resp["result"]["content"][0]["text"])
     c.check("legacy single-element codes keeps documented flat-list form",
             isinstance(payload["data"], list) and len(payload["data"]) == 4,
             f"data type={type(payload['data']).__name__}, rows={len(payload['data'])}")
-    with _http_call(url, "tools/call", {
+    resp = json.loads(_http_call(url, "tools/call", {
         "name": "get_kline",
         "arguments": {"codes": ["603516", "000967", "002328", "002600",
                                 "159915"], "frequency": "1d",
                       "start": "20261020", "end": "20261023",
-                      "limit": 0}}) as r:
-        resp = json.loads(r.read().decode())
+                      "limit": 0}})["body"])
     payload = json.loads(resp["result"]["content"][0]["text"])
     c.check("legacy L01 batch (limit=0) returns data for all 5 codes",
             isinstance(payload["data"], dict)
