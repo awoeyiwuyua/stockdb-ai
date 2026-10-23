@@ -1,0 +1,479 @@
+{
+  "contract_version": "stockdb-market-v3",
+  "contract_revision": "3.0.0",
+  "mode": "stub",
+  "generated_at": "2026-10-24T00:23:53+0800",
+  "server_version": "0.13.0",
+  "cases": [
+    {
+      "case_id": "C01",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C02",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "reject code+codes as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject bare 000001 as AMBIGUOUS_INSTRUMENT",
+          "status": "PASS",
+          "evidence": "errors=['AMBIGUOUS_INSTRUMENT'], query=None"
+        },
+        {
+          "assertion": "reject dup codes as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject >50 codes as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject unknown param as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject comma fields as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject negative limit as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject date 20260230 as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "reject start>end as INVALID_ARGUMENT",
+          "status": "PASS",
+          "evidence": "errors=['INVALID_ARGUMENT'], query=None"
+        },
+        {
+          "assertion": "requests/logs contain public identifiers only",
+          "status": "PASS",
+          "evidence": "stub 参数仅含公开证券键/日期/周期；无组合/账户/成本/数量字段"
+        }
+      ]
+    },
+    {
+      "case_id": "C03",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C04",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C05",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "fields close/volume rows keep date/bar_state/source_id",
+          "status": "PASS",
+          "evidence": "row keys=['bar_state', 'close', 'date', 'source_id', 'volume']; validate_contract KlineResponse OK"
+        }
+      ]
+    },
+    {
+      "case_id": "C06",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "XSHG/index/000001 refused (no alias to equity)",
+          "status": "PASS",
+          "evidence": "errors=[('XSHG/index/exchange/000001', 'UNSUPPORTED_ASSET')]"
+        },
+        {
+          "assertion": "wrong-exchange key UNKNOWN_INSTRUMENT",
+          "status": "PASS",
+          "evidence": "code=UNKNOWN_INSTRUMENT"
+        },
+        {
+          "assertion": "no extra/unrequested keys in data/meta",
+          "status": "PASS",
+          "evidence": "keys=['XSHE/equity/exchange/002600']"
+        }
+      ]
+    },
+    {
+      "case_id": "C07",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "zero-session range complete/empty expected_rows=0",
+          "status": "PASS",
+          "evidence": "status=complete, coverage={'state': 'complete', 'expected_rows': 0, 'available_rows': 0, 'returned_rows': 0, 'gaps': []}"
+        },
+        {
+          "assertion": "no synthetic flat/zero fills for suspension gaps",
+          "status": "PASS",
+          "evidence": "缺行仅以 gap 表达（UNKNOWN 证据空，不造平盘K线/零量行）——见 C08"
+        }
+      ]
+    },
+    {
+      "case_id": "C08",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "unknown gap → INCOMPLETE_COVERAGE + failed/partial, is_partial=true",
+          "status": "PASS",
+          "evidence": "status=partial（含可用行证券 → partial；全空 → failed），errors=['INCOMPLETE_COVERAGE']"
+        },
+        {
+          "assertion": "counts do not change expected calendar slots",
+          "status": "PASS",
+          "evidence": "coverage={'state': 'incomplete', 'expected_rows': 4, 'available_rows': 0, 'returned_rows': 0, 'gaps': [{'date': '2026-10-20', 'time': None, 'reason': 'UNKNOWN', 'evidence': []}, {'date': '2026-10-21', 'time': None, 'reason': 'UNKNOWN', 'evidence': []}, {'date': '2026-10-22', 'time': None, 'reason': 'UNKNOWN', 'evidence': []}, {'date': '2026-10-23', 'time': None, 'reason': 'UNKNOWN', 'evidence': []}]}"
+        }
+      ]
+    },
+    {
+      "case_id": "C09",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "one-code timeout: good rows kept, failed code empty+error meta",
+          "status": "PASS",
+          "evidence": "status=partial, err=SOURCE_TIMEOUT, good=4"
+        },
+        {
+          "assertion": "all-code failure: failed + isError + machine errors",
+          "status": "PASS",
+          "evidence": "status=failed, errors=['SOURCE_UNAVAILABLE', 'SOURCE_UNAVAILABLE']"
+        }
+      ]
+    },
+    {
+      "case_id": "C10",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "one-bar-of-four not complete; gaps UNKNOWN (not PRE_LISTING)",
+          "status": "PASS",
+          "evidence": "coverage=incomplete, gaps=['UNKNOWN', 'UNKNOWN', 'UNKNOWN']"
+        },
+        {
+          "assertion": "expected=available+gaps when counts known",
+          "status": "PASS",
+          "evidence": "4==1+3"
+        }
+      ]
+    },
+    {
+      "case_id": "C11",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C12",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "retrieved/served/source_updated/published distinct semantics",
+          "status": "PASS",
+          "evidence": "retrieved_at=2026-10-24T00:23:51+08:00 served_at=2026-10-24T00:23:51+08:00"
+        },
+        {
+          "assertion": "unknown provider/time null and disclosed",
+          "status": "PASS",
+          "evidence": "unknown_fields=['provider', 'source_updated_at', 'published_at']"
+        },
+        {
+          "assertion": "final rows reference finality_evidence (sync-log based)",
+          "status": "PASS",
+          "evidence": "bar_state=final, evidence=engine daily bars are populated exclusively by the post-close incremental sync t"
+        }
+      ]
+    },
+    {
+      "case_id": "C13",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C14",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C15",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "replay same snapshot: rows unchanged after upstream change",
+          "status": "PASS",
+          "evidence": "snapshot=snap-kline-f9ac635a1c64, rows equal=True"
+        },
+        {
+          "assertion": "subset security/date/projection reads original snapshot only",
+          "status": "PASS",
+          "evidence": "dates=['2026-10-21', '2026-10-22']"
+        },
+        {
+          "assertion": "scope expansion → SNAPSHOT_SCOPE_MISMATCH",
+          "status": "PASS",
+          "evidence": "code=SNAPSHOT_SCOPE_MISMATCH"
+        },
+        {
+          "assertion": "restart-loss → explicit SNAPSHOT_NOT_FOUND (no re-fetch)",
+          "status": "PASS",
+          "evidence": "code=SNAPSHOT_NOT_FOUND"
+        },
+        {
+          "assertion": "retention config >= 7 days",
+          "status": "PASS",
+          "evidence": "snapshot_retention_seconds=604800"
+        }
+      ]
+    },
+    {
+      "case_id": "C16",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "single and one-element array normalize to same request_hash",
+          "status": "PASS",
+          "evidence": "hash=9ccc28beea339fe6…"
+        },
+        {
+          "assertion": "hashes are SHA256 of canonical_json_v1 (no floats)",
+          "status": "PASS",
+          "evidence": "recomputed digests match"
+        }
+      ]
+    },
+    {
+      "case_id": "C17",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "structuredContent equals parsed sole JSON text block",
+          "status": "PASS",
+          "evidence": "text block parsed == structuredContent"
+        },
+        {
+          "assertion": "failed tool → isError=true with failed envelope",
+          "status": "PASS",
+          "evidence": "isError=true, envelope.status=failed"
+        }
+      ]
+    },
+    {
+      "case_id": "C18",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "deadline exceeded → SOURCE_TIMEOUT within bounded time",
+          "status": "PASS",
+          "evidence": "elapsed=0.00s, errors=['SOURCE_TIMEOUT', 'SOURCE_TIMEOUT']"
+        },
+        {
+          "assertion": "ordinary Kline recovers after failed request",
+          "status": "PASS",
+          "evidence": "status=complete"
+        }
+      ]
+    },
+    {
+      "case_id": "C19",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "extra request at max concurrency → BUSY with retry_after_ms",
+          "status": "PASS",
+          "evidence": "code=BUSY, retry_after_ms=2000"
+        },
+        {
+          "assertion": "cached status p95<=2s over 20 calls",
+          "status": "PASS",
+          "evidence": "p95=0.000s, status=ready"
+        },
+        {
+          "assertion": "health/listing do not synchronously call every upstream",
+          "status": "PASS",
+          "evidence": "状态仅读后台 60s 健康缓存；无逐上游现查"
+        }
+      ]
+    },
+    {
+      "case_id": "C20",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "C21",
+      "phase": "service",
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "profiles explicit supported/unsupported with reason",
+          "status": "PASS",
+          "evidence": "profiles=['adjusted_history_v1', 'core_daily_v1', 'fullmarket_daily_v1', 'historical_identity_v1', 'index_board_daily_v1', 'minute_v1']"
+        },
+        {
+          "assertion": "1m never substituted by 5m/1d",
+          "status": "PASS",
+          "evidence": "code=UNSUPPORTED_FREQUENCY"
+        },
+        {
+          "assertion": "board never substituted by stock series",
+          "status": "PASS",
+          "evidence": "code=UNSUPPORTED_ASSET"
+        },
+        {
+          "assertion": "fq never substituted by none silently",
+          "status": "PASS",
+          "evidence": "code=UNSUPPORTED_ADJUSTMENT"
+        }
+      ]
+    },
+    {
+      "case_id": "C22",
+      "phase": "service",
+      "status": "NOT_RUN",
+      "assertion_results": []
+    },
+    {
+      "case_id": "X01",
+      "phase": "service",
+      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "fullmarket_daily_v1 declared unsupported with reason",
+          "status": "PASS",
+          "evidence": "reason=全市场逐证券×交易日覆盖解释未独立验收；首批仅按请求证券读取"
+        },
+        {
+          "assertion": "feature body NOT_RUN (independent acceptance pending)",
+          "status": "NOT_RUN",
+          "evidence": "扩展未实现，功能本体不运行"
+        }
+      ]
+    },
+    {
+      "case_id": "X02",
+      "phase": "service",
+      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "index/board keys refused; no cross-provider stitching",
+          "status": "PASS",
+          "evidence": "index/board/同名不互拼，全部 UNSUPPORTED_ASSET"
+        },
+        {
+          "assertion": "feature body NOT_RUN",
+          "status": "NOT_RUN",
+          "evidence": "index_board_daily_v1 未验收"
+        }
+      ]
+    },
+    {
+      "case_id": "X03",
+      "phase": "service",
+      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "minute frequencies each refused explicitly",
+          "status": "PASS",
+          "evidence": "1m/5m/15m/30m/60m → UNSUPPORTED_FREQUENCY"
+        },
+        {
+          "assertion": "feature body NOT_RUN",
+          "status": "NOT_RUN",
+          "evidence": "minute_v1 未验收"
+        }
+      ]
+    },
+    {
+      "case_id": "X04",
+      "phase": "service",
+      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "qfq/hfq refused until affine-v1 factors accepted",
+          "status": "PASS",
+          "evidence": "qfq/hfq → UNSUPPORTED_ADJUSTMENT"
+        },
+        {
+          "assertion": "feature body NOT_RUN",
+          "status": "NOT_RUN",
+          "evidence": "adjusted_history_v1 未验收"
+        }
+      ]
+    },
+    {
+      "case_id": "X05",
+      "phase": "service",
+      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "historical as_of refused (current list not pasted to old date)",
+          "status": "PASS",
+          "evidence": "code=UNSUPPORTED_AS_OF"
+        },
+        {
+          "assertion": "feature body NOT_RUN",
+          "status": "NOT_RUN",
+          "evidence": "historical_identity_v1 未验收"
+        }
+      ]
+    },
+    {
+      "case_id": "C23",
+      "phase": "project",
+      "status": "NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "project daily/close integration (client phase)",
+          "status": "NOT_RUN",
+          "evidence": "属消费方项目接入（README §14.2），服务交付阶段 NOT_RUN"
+        }
+      ]
+    },
+    {
+      "case_id": "C24",
+      "phase": "project",
+      "status": "NOT_RUN",
+      "assertion_results": [
+        {
+          "assertion": "scope/publication/5-day observation (client phase)",
+          "status": "NOT_RUN",
+          "evidence": "属消费方项目接入，服务交付阶段 NOT_RUN"
+        }
+      ]
+    }
+  ]
+}

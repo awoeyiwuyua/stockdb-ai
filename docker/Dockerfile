@@ -138,6 +138,12 @@ ENV WEBUI_STATIC_DIR=/opt/webui/static
 ARG VERSION
 ENV IMAGE_TAG=${VERSION}
 
+# 0.13.0：构建身份注入（stockdb-market-v3 get_data_status 如实上报
+# server.source_commit/build_id）。构建时经 --build-arg GIT_COMMIT=<sha> 传入
+# （NAS compose build.args）；缺省空串 = 运行时回退 src+<version>+nogit，不造值。
+ARG GIT_COMMIT=""
+ENV STOCKDB_BUILD_COMMIT=${GIT_COMMIT}
+
 # 0.10.30：引擎就在本容器，显式钉死 127.0.0.1——webui 与 MCP 模块共用此地址。
 # 此前未声明，MCP 取址回落到独立运行默认值 100.66.1.5（NAS Tailscale），隧道
 # 一断则 get_kline/get_stock_list/打板采集/仓库沉淀全部 <urlopen error timed out>。

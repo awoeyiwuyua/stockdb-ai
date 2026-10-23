@@ -5,6 +5,61 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.13.0] — 2026-10-24（**公开行情合同 stockdb-market-v3（修订 3.0.0）服务端落地：core_daily_v1 首批**；根因修复 legacy 批量「成功空数据」）
+
+> 起因：消费方项目交付合同包 `stockdb-market-v3-3.0.0`（HANDOFF + README +
+> schema/examples/验收用例/离线校验器），要求迭代 NAS StockDB HTTP MCP 行情服务，
+> 使 `core_daily_v1` 通过共同契约验收并保留旧版兼容。**根因查证在先，不在没证据时
+> 猜**——HANDOFF 明令「不要只修 limit=0 后就宣告完成」。
+
+- **L01/L02 根因（代码+实验证据，不是猜测）**：legacy 批量 `codes=[...]` 走 pybao
+  SDK `rd.pipe()+mget` 单路批量——**容器内实测 10/20 次全空（50%）**，且
+  `stock_sdk.get_data` 的 Python 层把异常形状静默归一为 `{code: []}` 不报错 →
+  MCP 层输出 `errors=[]/is_partial=false/truncated=false` 的「成功空批量」；
+  同批逐码 `rd.vals` 单查 **0/100 失败**。**修复**：`_query_kline_via_sdk` 批量
+  改逐码单查后按码组装（返回形状与旧版完全一致；QC 锁定测试
+  `test_http_dispatch_get_kline_sdk_batch` 同步改为锁定逐码语义）。
+  SDK `pipe` 缺陷本身在原生 `stockdb.abi3.so` 内（上游发行包），本仓库不可修，
+  已在交付报告注明。
+- **L03**：旧版单元素 `codes=["002600"]` 返回扁平列表是**文档化兼容行为**（v3 才统一
+  对象形状）；v3 单票/单元素/多元素一律 `{规范键: rows}`。
+- **v3 分支（`interfaces/mcp/market_v3.py`，新模块）**：请求显式携带
+  `contract_version=stockdb-market-v3` 时接管四个首批工具（get_kline /
+  get_stock_list / get_trading_days / get_data_status）；**不带该字段的请求路径与
+  返回形状零改动**。要点：
+  - 规范证券键 `<exchange>/<asset_type>/<namespace>/<code>`；裸代码 →
+    `AMBIGUOUS_INSTRUMENT`；目录/段表核验失败 → `UNKNOWN_INSTRUMENT`；未声明
+    资产（index/board/北交所/LOF·REIT 段）→ `UNSUPPORTED_ASSET`；未知合同版本 →
+    `UNSUPPORTED_CONTRACT`（details.requested_contract）；
+  - 统一信封（query/request_hash/data/meta/errors/source_catalog/data_hash）+
+    canonical_json_v1 哈希（禁浮点；与消费方校验器同算法）；
+  - coverage/gaps：日历 2024-01-01..2026-12-31（core/calendar_market XSHG 表）内
+    expected=交易日数，缺口一律 UNKNOWN+证据空（无上市/停牌公开证据不造合法空），
+    日历范围外 expected=null 不能标 complete；
+  - 快照仓：不可变、保留 604800s、重读子集（证券/区间/投影）、
+    SNAPSHOT_{NOT_FOUND,EXPIRED,SCOPE_MISMATCH} 明确失败、重启丢失不重抓；
+  - 来源记录：provider=null（上游未文档化，如实披露于 unknown_fields）、
+    aggregator=free-stockdb+引擎版本、retrieved_at=引擎读取/同步日志时间、
+    finality_evidence=「仅盘后增量同步写入」机制+同步日志（**不是**「现在已过收盘」）；
+    bar_state 无依据时 unknown 不伪标 final；
+  - 有界运行：行情并发 4（满载 BUSY+retry_after_ms）、单请求期限 30s（耗尽逐码
+    SOURCE_TIMEOUT）、单响应行数上限 200k（含预期槽位预检 → RESULT_TOO_LARGE）、
+    快照仓总量上限；状态工具只读 60s 后台健康缓存（实测 p95≈0ms）；
+  - 双载荷：structuredContent + 恰好一个同对象 JSON 文本块；失败 isError=true；
+  - 旧版兼容：`legacy.default_contract=v2, sunset_at=null`；
+- **合同文件入库**：`interfaces/mcp/contract/`（schema/examples/验收用例/校验器/
+  MANIFEST）与消费方交付包**字节级一致**（测试锁定 sha256）；测试用它做判定基准
+  （不是自造第二套 schema）。
+- **测试**：`test_market_v3.py` 81 项（含消费方校验器逐信封校验、故障注入、快照、
+  并发 BUSY、p95、legacy 回归）；既有 `test_stockdb_mcp_server.py` 140 项全绿
+  （QC 批量测试改逐码语义后）。live 模式（`STOCKDB_V3_LIVE=1`）对真实引擎跑通
+  批量/单票等价、单位（股/份、元，均价交叉核对）、日历、清单。验收执行器
+  `acceptance_v3.py` 按 C01—C22/X01—X05 编号产出证据报告（stub/live/nas 三模式）。
+- **部署身份**：镜像构建注入 `STOCKDB_BUILD_COMMIT/STOCKDB_BUILD_ID`；
+  `get_data_status` v3 报 server.build_id/source_commit/image_digest（实际不可得为
+  null，不造值）。
+- 交付报告与支持矩阵见 `docs/deployments.md`（0.13.0 节）与交付说明。
+
 ## [0.12.15] — 2026-10-20（**0.12.14 实机部署到 NAS**（0.12.6 → 0.12.14）；顺手修掉 NAS 源树的 CRLF 漂移）
 
 > 起因：用户要求做一次部署。**部署前的全量核验发现 NAS 源树早已漂移**——

@@ -43,3 +43,8 @@ k_b.pub
 .ssh_keysetup2.py
 .verify_key.py
 nas_ssh.py
+
+# 0.13.0：market-v3 本地验收工作目录（含 NAS 同步日志副本/响应样本，不入库）
+.tmp-v3live/
+# unittest 临时产物（test_records 等）
+stockdb-ai/test_records_*/

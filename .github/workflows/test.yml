@@ -36,6 +36,9 @@ jobs:
       - name: Run MCP unit tests
         working-directory: stockdb-ai
         run: uv run --project .. python -m unittest interfaces.mcp.test_stockdb_mcp_server -v
+      - name: Run market-v3 contract tests (jsonschema via dev extra)
+        working-directory: stockdb-ai
+        run: uv run --project .. --extra dev python -m unittest interfaces.mcp.test_market_v3 -v
 
       - name: Run ops unit tests
         working-directory: stockdb-ai
