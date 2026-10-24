@@ -210,11 +210,14 @@ class Runner:
                             rounding=ROUND_HALF_UP)
         return format(value.normalize(), "f")
 
-    @staticmethod
-    def calendar_sessions(n: int, end: str | None = None) -> list[str]:
+    latest_end: str | None = None  # main() 里按模式注入（nas=端点 status，live=引擎探针）
+
+    @classmethod
+    def calendar_sessions(cls, n: int, end: str | None = None) -> list[str]:
         """最近 n 个已完成交易日（默认截至引擎最新交易日，绝不含未来）。"""
         if end is None:
-            end = v3.HEALTH.get().get("latest") or v3.engine_latest_trade_date()
+            end = cls.latest_end or v3.HEALTH.get().get(
+                "latest") or v3.engine_latest_trade_date()
             if not end:
                 raise RuntimeError("无法确定最新已完成交易日")
         days = v3._calendar().trading_days_between(
@@ -1465,6 +1468,7 @@ def main() -> int:
     started = time.monotonic()
     if latest is None:
         latest = v3.engine_latest_trade_date()
+    Runner.latest_end = latest
     run_S(runner, latest)
     ctx = run_I(runner, latest)
     run_H(runner, latest, ctx)

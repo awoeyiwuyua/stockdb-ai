@@ -151,9 +151,10 @@ def _http_json(url: str, *, referer: str, timeout: float) -> Any:
 # 腾讯 ifzq 指数日K（A 批指数数据路径）
 # ---------------------------------------------------------------------------
 
-# 腾讯日K双主机（2026-10-25 实测：web.ifzq 间歇 501，proxy.finance.qq.com
-# 官方镜像同 API 同数据形状可用；轮转 + 页级重试）
-_IFZQ_HOSTS = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+# 腾讯日K主机轮转（2026-10-25 实测：可达性随网络位置漂移——NAS 容器内
+# ifzq.gtimg.cn 可用而 web./proxy. 变体 501；开发机反之。三主机轮转+页级重试）
+_IFZQ_HOSTS = ("https://ifzq.gtimg.cn/appstock/app/fqkline/get",
+               "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
                "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/"
                "fqkline/get")
 _IFZQ_PAGE = 760  # 单次 count：实测 ≤1200 稳定；按 760 分页穷尽并去重（H03）
