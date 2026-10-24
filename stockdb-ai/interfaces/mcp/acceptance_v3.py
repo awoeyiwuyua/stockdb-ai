@@ -238,14 +238,20 @@ def run_stub(cases: dict[str, Case]) -> None:
     env = _kline({**BASE_ARGS, "codes": ["XSHG/index/exchange/000001",
                                          EQUITY_KEY]})
     err_codes = {(e["instrument_id"], e["code"]) for e in env["errors"]}
-    # 0.14.0：上证指数键经 research 目录解析（identity=index）；stub 模式未桩化
-    # 腾讯源 → 如实 SOURCE_UNAVAILABLE。关键断言：不别名到 equity、保留 index 资产。
+    # 0.14.x：上证指数键经 research 目录解析（identity=index）；stub 模式未
+    # 桩化腾讯源 → 源可达时真取数（无错误），不可达时 SOURCE_UNAVAILABLE。
+    # 关键断言：绝不别名到 equity（asset_type 恒 index）。
     idx_meta = env["meta"].get("XSHG/index/exchange/000001", {})
+    idx_data = env["data"].get("XSHG/index/exchange/000001", [])
+    not_aliased = (idx_meta.get("instrument", {}).get("asset_type") == "index"
+                   and idx_meta.get("units", {}).get("price") == "points")
+    served_or_failed = (bool(idx_data)
+                        or ("XSHG/index/exchange/000001",
+                            "SOURCE_UNAVAILABLE") in err_codes)
     c.check("XSHG/index/000001 never aliased to equity",
-            idx_meta.get("instrument", {}).get("asset_type") == "index"
-            and ("XSHG/index/exchange/000001", "SOURCE_UNAVAILABLE") in err_codes,
+            not_aliased and served_or_failed,
             f"asset_type={idx_meta.get('instrument', {}).get('asset_type')} "
-            f"errors={sorted(err_codes)}")
+            f"rows={len(idx_data)} errors={sorted(err_codes)}")
     env = _kline({**BASE_ARGS, "code": "XSHE/equity/exchange/600000"})
     c.check("wrong-exchange key UNKNOWN_INSTRUMENT",
             env["errors"][0]["code"] == "UNKNOWN_INSTRUMENT",

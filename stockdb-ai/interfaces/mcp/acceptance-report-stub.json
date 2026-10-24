@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "stub",
-  "generated_at": "2026-10-25T05:01:34+0800",
-  "server_version": "0.14.0",
+  "generated_at": "2026-10-25T06:25:35+0800",
+  "server_version": "0.14.1",
   "cases": [
     {
       "case_id": "C01",
@@ -146,7 +146,7 @@
         {
           "assertion": "XSHG/index/000001 never aliased to equity",
           "status": "PASS",
-          "evidence": "asset_type=index errors=[('XSHG/index/exchange/000001', 'SOURCE_UNAVAILABLE')]"
+          "evidence": "asset_type=index rows=4 errors=[]"
         },
         {
           "assertion": "wrong-exchange key UNKNOWN_INSTRUMENT",
@@ -242,7 +242,7 @@
         {
           "assertion": "retrieved/served/source_updated/published distinct semantics",
           "status": "PASS",
-          "evidence": "retrieved_at=2026-10-25T05:01:31+08:00 served_at=2026-10-25T05:01:31+08:00"
+          "evidence": "retrieved_at=2026-10-25T06:25:33+08:00 served_at=2026-10-25T06:25:33+08:00"
         },
         {
           "assertion": "unknown provider/time null and disclosed",
@@ -276,7 +276,7 @@
         {
           "assertion": "replay same snapshot: rows unchanged after upstream change",
           "status": "PASS",
-          "evidence": "snapshot=snap-kline-512b7a87b012, rows equal=True"
+          "evidence": "snapshot=snap-kline-903603239ab8, rows equal=True"
         },
         {
           "assertion": "subset security/date/projection reads original snapshot only",
