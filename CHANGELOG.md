@@ -5,6 +5,47 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.14.1] — 2026-10-25（**research-extension 消费方反馈修补：E01—E08**——反馈包 `2026-10-25-stockdb-research-extension-consumer-feedback`）
+
+> 消费方复验判定"部分交付，扩展整体验收未通过"（E01—E04 为 P1 阻塞）。
+> 本版按 E01—E08 逐项修复；合同 1.0.0 与基线六文件零变更，原回传记录保留。
+
+- **E01（P1，代码修复）**：所有 v3 get_kline 成功响应（含 R 原始快照重读、
+  子范围读取、普通 core）现在都携带 `extensions.research_v1` 价格序列目录——
+  扩展校验器对一切带 query 的 KlineResponse 强制 research_metadata；**A 的
+  series_catalog 改为与 R 相同的价格序列描述**（E01 旧实现误用因子序列描述，
+  与 R 的 series/provider/method 不等被 reconstruct 拒绝）；复权语义由
+  meta.adjustment 表达；F 保持因子序列描述。快照 payload 持久化 catalog，
+  重启后重读元数据不变。单测新增 reconstruct(R,F,A) 校验器全过。
+- **E02（P1，runner 修复）**：H01 恢复逐证券精确窗口标准（==500/==250，
+  废除 >=498 与 per-market any() 放宽）；成熟样本 600000（引擎数据洞 6 会话）
+  由 600036 替代（500/500 完整），600000 缺口记录保留（UNKNOWN gap，不改
+  SUSPENDED）；板块 BLOCKED 如实拖累 H01 断言（不宣称批次全部完成）。
+- **E03（P1，runner 修复）**：I08 扩为 4 指数 ×（末 5 日+规则抽样 5 日）逐点
+  表（双方原值/精度/差值/判定，~160 点/轮）；服务提供者逐响应记录；
+  同源/跨源独立性分开标注。本轮恰为**跨提供者对照**（腾讯服务 vs 新浪参考）
+  4×40 点全 PASS。
+- **E04（P1，runner+证据修复）**：A04/A06/A07 改为独立实现对照——runner 从
+  引擎原始事件自建 cum walk 与 12 位量化 multiplier，独立复算复权价与服务
+  A 逐点 Decimal 精确比较（A06 28 点、A07 28 点全 PASS）；事件窗口扩为
+  **±3 交易日**；SDK 公式证据升级为**容器内 stock_sdk.py 原文摘录**；
+  **引擎 mult 公式实证**：mult = 前一交易日 close / 事件日 pre_close
+  （000001: 11.60/11.35=1.022 ✓；002594: 337.0/111.01=3.0357→3.036 ✓），
+  give/trans/div 字段语义无官方文档、如实保留限制；废除 0.001 因子容差；
+  引擎 pre_close 事件前预调整语义（不能作连续性基准）作为限制记录。
+- **E05（P2，runner 修复）**：S06 补齐真实并发（4×500日请求并行）+ 慢负载
+  注入（单码 sleep 3s）期间 status p95 实测 + 负载后槽位恢复检查（live 模式；
+  nas 端无注入接口如实引用 live 证据）。
+- **E06**：I07/H04 从 NOT_RUN 占位改为如实 BLOCKED（窗口内无更名事件/无带
+  公开证据停牌样本；结构性保证由单测锁定；600000 缺口不改称停牌）。
+- **E07（P2）**：A15 重启验证升级为 F/R/A 三者 data_hash、data、series 元
+  数据、来源 retrieved_at 逐项前后一致（不再只证"可读"）；R/A 目录一致性
+  与 R 元数据存在性并入断言。
+- **E08（P2，打包修复）**：回传改用真实 ZIP；contract/ 补齐 baseline 六文件
+  （内层 MANIFEST 与原校验器可在另一工作区直接运行）；部署事实统一
+  GIT_COMMIT/台账（消除 ed871e1 残留）；image_digest 如实 null + 本地镜像
+  ID 单独标注；报告按断言级如实状态（45→重新计数）。
+
 ## [0.14.0] — 2026-10-25（**research-extension 1.0.0 服务端落地：A 指数/板块日K + B 因子/R/F/A 复权链 + 长历史**——消费方交接包 `2026-10-25-stockdb-research-extension-handoff`）
 
 > 补充合同 `stockdb-market-v3-research-extension` 1.0.0（叠加在 stockdb-market-v3
@@ -46,7 +87,8 @@
   live）；基线执行器三模式（stub 17 PASS/live 6/nas 4，0 FAIL，断言按 0.14.0
   语义更新：指数身份解析、板块源错误、裸 qfq 拒绝、X02/X04 移交扩展执行器）。
 - **部署坑**：Windows `git archive` 按 core.autocrlf 输出 CRLF → entrypoint shebang
-  `` → 容器 Restarting(255)。**必须 `git -c core.autocrlf=false archive`**。
+  `
+` → 容器 Restarting(255)。**必须 `git -c core.autocrlf=false archive`**。
   （0.13.x 台账的 fnOS 剥可执行位坑由 Dockerfile chmod 根治，本次未复现。）
 
 ## [0.13.2] — 2026-10-24（**C01 收尾：发布 schema 两处协议/兼容遗漏**——消费方复验 `stockdb-v3-schema-completion-20261024`）

@@ -161,6 +161,18 @@ class ResearchTestCase(V3TestCase):
             return
         super().validate(payload, kind)
 
+    def _reconstruct_check(self, raw_env, factor_env, adjusted_env) -> None:
+        """用未改动扩展校验器的 reconstruct 验证 R/F/A（E01 验收标准）。"""
+        if _ext_validate_contract is None:
+            self.skipTest("扩展校验器不可用")
+        for mode_env in (raw_env, factor_env, adjusted_env):
+            _ext_validate_contract.validate(
+                mode_env,
+                "FactorResponse" if mode_env is factor_env
+                else "KlineResponse")
+        _ext_validate_contract.reconstruct(raw_env, factor_env,
+                                           adjusted_env)
+
     # --- 便捷调用 ---------------------------------------------------------
     def kline(self, **overrides) -> dict:
         args = {**BASE_ARGS, **overrides}
@@ -652,13 +664,29 @@ class AdjustedKlineTest(ResearchTestCase):
         self.assertEqual(a["status"], "complete", msg=json.dumps(a["errors"]))
         ext = a["extensions"]["research_v1"]
         raw_id = ext["raw_snapshot_id"]
+        # E01：A 的 series_catalog 描述价格序列（与 R 一致），不是因子序列
         self.assertEqual(ext["series_catalog"][EQUITY_KEY]["methodology_id"],
-                         "affine-v1-from-engine-cum")
+                         "sse-szse-exchange-daily-bar")
         # R 重读（fq=none）
         r_env = self.kline(codes=[EQUITY_KEY, ETF_KEY], fq="none",
                            snapshot_id=raw_id)
         self.assertEqual(r_env["status"], "complete",
                          msg=json.dumps(r_env["errors"]))
+        # E01：R 重读带价格序列 research 元数据，且与 A 的 series 描述一致
+        r_ext = r_env["extensions"]["research_v1"]
+        self.assertIsNone(r_ext["raw_snapshot_id"])
+        for key in (EQUITY_KEY, ETF_KEY):
+            r_desc = r_ext["series_catalog"][key]
+            a_desc = ext["series_catalog"][key]
+            for field in ("series_id", "provider", "methodology_id",
+                          "methodology_version", "history_start",
+                          "history_end"):
+                self.assertEqual(r_desc[field], a_desc[field],
+                                 f"{key}.{field}: R vs A series differ")
+        # 消费方校验器 reconstruct(R,F,A) 双模式全过（E01 验收标准）
+        f_reread = self.factors(codes=[EQUITY_KEY, ETF_KEY],
+                                snapshot_id=fid)
+        self._reconstruct_check(r_env, f_reread, a)
         # F 重读（子集合重读，保留两码）
         f_env = self.factors(codes=[EQUITY_KEY, ETF_KEY], snapshot_id=fid)
         # 客户端复算：raw × multiplier + offset == adjusted（逐 OHLC）
@@ -900,12 +928,21 @@ class CompatAndIsolationTest(ResearchTestCase):
                                             {"code": "002600"}))
         self.assertIsNone(v3.maybe_dispatch("get_kline", {"code": "002600"}))
 
-    def test_core_kline_shape_unchanged_without_research_series(self):
-        # S03：纯股票/ETF 请求不携带 extensions（core 形状与 0.13.x 一致）
+    def test_core_kline_carries_price_series_metadata(self):
+        # S03+E01：纯股票/ETF 请求也携带 research 元数据（价格序列目录）；
+        # 八键信封与正式字段形状不变（extensions 是合同允许的可选对象，
+        # 基线校验器/旧客户端解析不受影响）
         env = self.kline(codes=[EQUITY_KEY, ETF_KEY])
         self.assertEqual(env["status"], "complete")
-        self.assertNotIn("extensions", env)
         self.validate(env, "KlineResponse")
+        ext = env["extensions"]["research_v1"]
+        self.assertIsNone(ext["raw_snapshot_id"])
+        self.assertEqual(set(ext["series_catalog"]),
+                         {EQUITY_KEY, ETF_KEY})
+        desc = ext["series_catalog"][EQUITY_KEY]
+        self.assertEqual(desc["methodology_id"],
+                         "sse-szse-exchange-daily-bar")
+        self.assertEqual(desc["native_volume_unit"], "shares")
 
     def test_status_degrades_when_board_source_down(self):
         type(self)._board_fail = True

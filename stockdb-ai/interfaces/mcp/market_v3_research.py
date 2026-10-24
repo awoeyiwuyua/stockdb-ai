@@ -1214,6 +1214,17 @@ def _adjusted_fetch_and_build(query: dict, request_hash: str,
             bar_states[key] = v3._bar_state_for(
                 max(str(r.get("date"))[:8] for r in rows), latest)
 
+    # ---- 价格序列目录（R/A 共用同一描述；E01：series_catalog 描述价格序列，
+    # 复权语义由 meta.adjustment 表达；F 保持自己的因子序列描述）----
+    cal_id, cal_ver = v3.CALENDAR_ID, v3._calendar().XSHG_HOLIDAYS_THROUGH
+    price_catalog: dict[str, dict | None] = {}
+    for key in query["codes"]:
+        rows = rows_by_code.get(key) or []
+        price_catalog[key] = (series_descriptor(
+            key, kind="equity",
+            rows=[{"date8": str(r.get("date"))[:8]} for r in rows],
+            calendar_id=cal_id, calendar_version=cal_ver) if rows else None)
+
     # ---- R：原始六字段行情快照（不可变；可经 fq=none + snapshot_id 重读）----
     raw_sources = {
         v3.IDENTITY_SOURCE_ID: v3._identity_source(catalog_retrieved),
@@ -1236,6 +1247,7 @@ def _adjusted_fetch_and_build(query: dict, request_hash: str,
         "identities": {k: v3._identity_dict(v3.identity_from_key(k, verified=True))
                        for k in rows_by_code},
         "bar_states": dict(bar_states), "latest": latest,
+        "catalog": dict(price_catalog),
     }, row_count=total_rows)
 
     # ---- A：按 F 计算（Decimal 仿射；量额保持 R 原值不改写）----
@@ -1295,6 +1307,7 @@ def _adjusted_fetch_and_build(query: dict, request_hash: str,
         "raw_snapshot_id": raw_id,
         "factor_snapshot_id": query["factor_snapshot_id"],
         "adjustment_anchor": anchor, "fq": query["fq"],
+        "catalog": dict(price_catalog),
     }, row_count=sum(len(r) for r in adjusted_rows.values()))
 
     expected_by_code = {key: v3._expected_slots(key.split("/")[0],
@@ -1312,13 +1325,8 @@ def _adjusted_fetch_and_build(query: dict, request_hash: str,
             m["adjustment"] = {"mode": query["fq"], "anchor_date": anchor,
                                "factor_snapshot_id": query["factor_snapshot_id"],
                                "algorithm": FACTOR_ALGORITHM}
-    cal_id, cal_ver = v3.CALENDAR_ID, v3._calendar().XSHG_HOLIDAYS_THROUGH
-    catalog_desc = {}
-    for key in query["codes"]:
-        catalog_desc[key] = series_descriptor(
-            key, kind="factor", rows=adjusted_rows.get(key) or [],
-            calendar_id=cal_id, calendar_version=cal_ver)
-    envelope.update(research_extensions(raw_id, catalog_desc))
+    # E01：A 的 series_catalog = 与 R 相同的价格序列描述（不是因子序列）
+    envelope.update(research_extensions(raw_id, dict(price_catalog)))
     return envelope
 
 
@@ -1357,16 +1365,10 @@ def _adjusted_from_snapshot(query: dict, request_hash: str) -> dict:
     if envelope.get("status") == "failed":
         return envelope
     raw_id = payload.get("raw_snapshot_id")
-    cal_id, cal_ver = v3.CALENDAR_ID, v3._calendar().XSHG_HOLIDAYS_THROUGH
-    catalog_desc = {}
-    for key in query["codes"]:
-        rows = envelope.get("data", {}).get(key) or []
-        catalog_desc[key] = series_descriptor(
-            key, kind="factor", rows=[{"date8": r["date"].replace("-", "")}
-                                      for r in rows],
-            calendar_id=cal_id, calendar_version=cal_ver) if rows else None
+    # E01：A 重读沿用捕获时的价格序列目录（与 R 一致，不由当前行重造）
     merged = dict(envelope.get("extensions") or {})
-    merged.update(research_extensions(raw_id, catalog_desc)["extensions"])
+    merged.update(research_extensions(raw_id, payload.get(
+        "catalog") or {})["extensions"])
     envelope["extensions"] = merged
     return envelope
 

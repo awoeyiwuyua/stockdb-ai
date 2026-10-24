@@ -1259,39 +1259,43 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
             research.series_source_record(kind, key, _now_iso(),
                                           provider=provider))
     snapshot_id = SNAPSHOTS.new_id("kline")
+    # E01（消费方反馈）：所有 v3 行情响应（含 R/长历史/普通 core）都携带价格
+    # 序列研究元数据——扩展校验器对一切带 query 的 KlineResponse 强制
+    # research_metadata；R 与 A 必须共享同一价格 series 描述（复权语义由
+    # meta.adjustment 表达，不进 series_catalog）。
+    catalog_desc: dict[str, dict | None] = {}
+    cal_ver = _calendar().XSHG_HOLIDAYS_THROUGH
+    for key in codes:
+        entry = kinds.get(key)
+        kind = entry[0] if entry else None
+        provider = entry[1] if entry else None
+        if kind and rows_by_code.get(key):
+            catalog_desc[key] = research.series_descriptor(
+                key, kind=kind, rows=rows_by_code[key],
+                calendar_id=CALENDAR_ID, calendar_version=cal_ver,
+                provider_used=provider)
+        elif key in identities and identities[key].asset_type not in (
+                "index", "board") and rows_by_code.get(key):
+            catalog_desc[key] = research.series_descriptor(
+                key, kind="equity",
+                rows=[{"date8": str(r.get("date"))[:8]}
+                      for r in rows_by_code[key]],
+                calendar_id=CALENDAR_ID, calendar_version=cal_ver)
+        else:
+            catalog_desc[key] = None
     SNAPSHOTS.capture(snapshot_id, {
         "kind": "kline", "query": dict(query),
         "rows": {k: list(v) for k, v in rows_by_code.items()},
         "sources": {k: dict(v) for k, v in sources.items()},
         "identities": {k: _identity_dict(v) for k, v in identities.items()},
         "bar_states": dict(bar_states), "latest": latest,
+        "catalog": catalog_desc,
     }, row_count=total_rows)
 
     envelope = _kline_build_response(query, request_hash, codes, identities,
                                      fetch_errors, expected_by_code, sources,
                                      snapshot_id, rows_by_code, bar_states)
-    # A 批响应必带 extensions.research_v1（series_catalog 恰好覆盖 query.codes）
-    if kinds and research is not None:
-        catalog_desc: dict[str, dict | None] = {}
-        cal_ver = _calendar().XSHG_HOLIDAYS_THROUGH
-        for key in codes:
-            entry = kinds.get(key)
-            kind = entry[0] if entry else None
-            provider = entry[1] if entry else None
-            if kind and rows_by_code.get(key):
-                catalog_desc[key] = research.series_descriptor(
-                    key, kind=kind, rows=rows_by_code[key],
-                    calendar_id=CALENDAR_ID, calendar_version=cal_ver,
-                    provider_used=provider)
-            elif key in identities and identities[key].asset_type not in (
-                    "index", "board") and rows_by_code.get(key):
-                catalog_desc[key] = research.series_descriptor(
-                    key, kind="equity",
-                    rows=[{"date8": str(r.get("date"))[:8]}
-                          for r in rows_by_code[key]],
-                    calendar_id=CALENDAR_ID, calendar_version=cal_ver)
-            else:
-                catalog_desc[key] = None
+    if research is not None:
         envelope.update(research.research_extensions(None, catalog_desc))
     return envelope
 
@@ -1547,11 +1551,17 @@ def _kline_from_snapshot(query, request_hash) -> dict:
     expected_by_code = {key: _expected_slots(identities[key].exchange,
                                              query["start"], query["end"])
                         for key in query["codes"]}
-    return _kline_build_response(
+    envelope = _kline_build_response(
         query, request_hash, query["codes"], identities, {},
         expected_by_code, payload["sources"], query["snapshot_id"],
         rows_by_code, payload["bar_states"],
         prebuilt_bars=payload.get("kind") == "kline-adjusted")
+    # E01：捕获时已带价格序列目录的快照（R/长历史/普通 core），重读与子范围
+    # 读取同样返回 research 元数据（原始捕获不变）。
+    if research is not None and payload.get("catalog"):
+        envelope.update(research.research_extensions(
+            None, payload["catalog"]))
+    return envelope
 
 
 # ---------------------------------------------------------------------------
