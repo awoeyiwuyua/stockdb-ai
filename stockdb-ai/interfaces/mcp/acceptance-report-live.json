@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "live",
-  "generated_at": "2026-10-24T10:05:31+0800",
-  "server_version": "0.13.1",
+  "generated_at": "2026-10-24T10:32:12+0800",
+  "server_version": "0.13.2",
   "cases": [
     {
       "case_id": "C01",

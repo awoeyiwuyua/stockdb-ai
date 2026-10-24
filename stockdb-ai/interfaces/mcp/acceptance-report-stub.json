@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "stub",
-  "generated_at": "2026-10-24T10:01:13+0800",
-  "server_version": "0.13.0",
+  "generated_at": "2026-10-24T10:32:11+0800",
+  "server_version": "0.13.2",
   "cases": [
     {
       "case_id": "C01",
@@ -242,7 +242,7 @@
         {
           "assertion": "retrieved/served/source_updated/published distinct semantics",
           "status": "PASS",
-          "evidence": "retrieved_at=2026-10-24T10:01:11+08:00 served_at=2026-10-24T10:01:11+08:00"
+          "evidence": "retrieved_at=2026-10-24T10:32:09+08:00 served_at=2026-10-24T10:32:09+08:00"
         },
         {
           "assertion": "unknown provider/time null and disclosed",
@@ -276,7 +276,7 @@
         {
           "assertion": "replay same snapshot: rows unchanged after upstream change",
           "status": "PASS",
-          "evidence": "snapshot=snap-kline-91b5a622be53, rows equal=True"
+          "evidence": "snapshot=snap-kline-8bb5c52a75c6, rows equal=True"
         },
         {
           "assertion": "subset security/date/projection reads original snapshot only",
