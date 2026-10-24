@@ -5,6 +5,50 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.14.0] — 2026-10-25（**research-extension 1.0.0 服务端落地：A 指数/板块日K + B 因子/R/F/A 复权链 + 长历史**——消费方交接包 `2026-10-25-stockdb-research-extension-handoff`）
+
+> 补充合同 `stockdb-market-v3-research-extension` 1.0.0（叠加在 stockdb-market-v3
+> 3.0.0 之上，不改基线六文件与原 $defs）。两批能力分别交付：
+> A=index_board_daily_v1（4 指数 + 7 东财 BK）；B=adjusted_history_v1（因子工具
+> v3 分支 + R/F/A 快照链）。合同机器件原样落地
+> `interfaces/mcp/contract/research-extension/`（MANIFEST 18 文件校验通过）。
+
+- **A 批指数**：4 个指定规范键（上证/深成/创业板/中证1000-csi 命名空间）经腾讯
+  ifzq 日K（**三主机轮转**：实测可达性随网络位置漂移——NAS 容器仅无前缀主机
+  可用、开发机反之、web. 前缀间歇 501）。量额单位不可证明 → price-only
+  （volume/amount null + units.null_reason，I06 合规路径）；series_catalog 逐请求
+  证券给出 SeriesDescriptor（provider=编制方/交易所、origin_reference 公开证据）。
+  外部对照：新浪 getKLineData 独立提供者逐点比较（末 5 日，容差 1ulp@2dp）。
+- **A 批板块**：7 个东财 BK 经 push2his（四主机轮转）。**部署窗口内东财源持续
+  不可达**（v4/联通v6 节点 RST，与 runbook §6.5 上游抽风模式一致）→ 按合同如实
+  SOURCE_UNAVAILABLE + 状态工具 degraded + known_limitations 声明；**不用 THS
+  序列冒充**（I04 负例锁定）。交付物按 BLOCKED 逐序列报告。
+- **B 批因子**：get_adjust_factors v3 分支（FactorRequest/Response；请求级资产资格
+  ——指数/板块拒绝 UNSUPPORTED_ADJUSTMENT）。引擎 `复权:<code>:<date>` cum 序列
+  → affine-v1（multiplier=cum(≤date)/cum(≤anchor) 量化 12 位、offset=0）。
+  **公式证据链**：容器内 `/opt/stockdb/pybao/stock_sdk.py::_apply_fq_in_memory`
+  源码（qfq=raw×f_cur/f_latest、hfq=raw×f_cur）+ 引擎事件行实测
+  （000001@20260924：div=0.249、mult=1.022=11.60/(11.60-0.249)、cum 链乘积吻合）。
+  逐原始行情日给系数（A03）；qfq 锚末交易日/hfq 锚首日（A05 必须项）+ 区间内
+  任意已完成交易日显式锚点。
+- **B 批 R/F/A**：get_kline fq=qfq/hfq 携带 F → 捕获原始六字段 R（可经 fq=none+
+  snapshot_id 重读）→ Decimal 仿射计算 A（ROUND_HALF_UP@price_decimals、量额
+  原样携带、合法 ≤0 值不复检正负）→ A 快照含 raw_snapshot_id。互传负例
+  （F 当行情快照/R 当因子/裸 R 改 fq 重放）全 SNAPSHOT_SCOPE_MISMATCH（A12）。
+- **持久化快照仓**（A15）：内存+磁盘双层（/data/market_v3_snapshots，原子写），
+  **docker restart 后 F/R/A 同 id 重读值不变**（部署级实测）。
+- **核心兼容**：四工具 schema/行为不变（纯股票/ETF 请求不带 extensions）；
+  旧版 get_adjust_factors（无 contract_version）原形状保留。**amount 精度修正**：
+  500 日窗口实测引擎存在带小数成交额（002600@2026-06-23）——原「整数元」断言
+  过紧致整段失败，放宽 ≤2 位小数并声明 amount_decimals=2（合同本就允许十进制）。
+- **验收**：单测 143 例全绿（新增 test_market_v3_research 42 例）；全仓 761 通过；
+  acceptance_v3_research.py live 36 PASS/0 FAIL、nas 模式 0 FAIL（A14 注入仅
+  live）；基线执行器三模式（stub 17 PASS/live 6/nas 4，0 FAIL，断言按 0.14.0
+  语义更新：指数身份解析、板块源错误、裸 qfq 拒绝、X02/X04 移交扩展执行器）。
+- **部署坑**：Windows `git archive` 按 core.autocrlf 输出 CRLF → entrypoint shebang
+  `` → 容器 Restarting(255)。**必须 `git -c core.autocrlf=false archive`**。
+  （0.13.x 台账的 fnOS 剥可执行位坑由 Dockerfile chmod 根治，本次未复现。）
+
 ## [0.13.2] — 2026-10-24（**C01 收尾：发布 schema 两处协议/兼容遗漏**——消费方复验 `stockdb-v3-schema-completion-20261024`）
 
 > 0.13.1 反例已全部修复，但消费方复验（FEEDBACK 1024）以 **46 项离线回归 +
