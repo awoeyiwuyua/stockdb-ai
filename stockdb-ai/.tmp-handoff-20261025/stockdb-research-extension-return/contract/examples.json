@@ -1,0 +1,1901 @@
+{
+  "notice": "ALL SYNTHETIC; no live prices, economic events or capability proof.",
+  "requests": [
+    {
+      "name": "factor_qfq",
+      "tool": "get_adjust_factors",
+      "schema": "FactorRequest",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "codes": [
+          "XSHE/equity/exchange/002600",
+          "XSHE/etf/exchange/159915"
+        ],
+        "start": "20261020",
+        "end": "20261021",
+        "fq": "qfq",
+        "adjustment_anchor": "20261021"
+      }
+    },
+    {
+      "name": "adjusted_qfq",
+      "tool": "get_kline",
+      "schema": "KlineRequest",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "codes": [
+          "XSHE/equity/exchange/002600",
+          "XSHE/etf/exchange/159915"
+        ],
+        "frequency": "1d",
+        "start": "20261020",
+        "end": "20261021",
+        "fq": "qfq",
+        "fields": [
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "amount"
+        ],
+        "limit": 0,
+        "adjustment_anchor": "20261021",
+        "factor_snapshot_id": "fixture-factor-F-qfq"
+      }
+    },
+    {
+      "name": "factor_hfq",
+      "tool": "get_adjust_factors",
+      "schema": "FactorRequest",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "codes": [
+          "XSHE/equity/exchange/002600",
+          "XSHE/etf/exchange/159915"
+        ],
+        "start": "20261020",
+        "end": "20261021",
+        "fq": "hfq",
+        "adjustment_anchor": "20261020"
+      }
+    },
+    {
+      "name": "adjusted_hfq",
+      "tool": "get_kline",
+      "schema": "KlineRequest",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "codes": [
+          "XSHE/equity/exchange/002600",
+          "XSHE/etf/exchange/159915"
+        ],
+        "frequency": "1d",
+        "start": "20261020",
+        "end": "20261021",
+        "fq": "hfq",
+        "fields": [
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "amount"
+        ],
+        "limit": 0,
+        "adjustment_anchor": "20261020",
+        "factor_snapshot_id": "fixture-factor-F-hfq"
+      }
+    },
+    {
+      "name": "index_board",
+      "tool": "get_kline",
+      "schema": "KlineRequest",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "codes": [
+          "XSHG/index/exchange/000001",
+          "CN/board/eastmoney/BK1138"
+        ],
+        "frequency": "1d",
+        "start": "20261020",
+        "end": "20261021",
+        "fq": "none",
+        "fields": [
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "amount"
+        ],
+        "limit": 0
+      }
+    }
+  ],
+  "responses": [
+    {
+      "name": "raw_stock_etf",
+      "schema": "KlineResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-complete-001",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-raw-R",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "frequency": "1d",
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "none",
+          "fields": [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+          ],
+          "limit": 0,
+          "snapshot_id": null,
+          "adjustment_anchor": null,
+          "factor_snapshot_id": null
+        },
+        "request_hash": "c81a27ca5708884a3c2b4111a4615f1c5579b9b64b44f8cdf14e5fc8367198c4",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.00",
+              "high": "10.50",
+              "low": "9.90",
+              "close": "10.20",
+              "volume": 1000,
+              "amount": "10200.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.20",
+              "high": "10.80",
+              "low": "10.10",
+              "close": "10.50",
+              "volume": 1200,
+              "amount": "12600.00"
+            }
+          ],
+          "XSHE/etf/exchange/159915": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "2.000",
+              "high": "2.050",
+              "low": "1.990",
+              "close": "2.020",
+              "volume": 2000,
+              "amount": "4040.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "2.020",
+              "high": "2.080",
+              "low": "2.010",
+              "close": "2.050",
+              "volume": 2400,
+              "amount": "4920.00"
+            }
+          ]
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "shares",
+              "amount": "CNY",
+              "price_decimals": 2,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "none",
+              "anchor_date": null,
+              "factor_snapshot_id": null,
+              "algorithm": null
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "fund_units",
+              "amount": "CNY",
+              "price_decimals": 3,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "none",
+              "anchor_date": null,
+              "factor_snapshot_id": null,
+              "algorithm": null
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "588ad555fdb73baf861fe1964d80b006a655166807d285621f253d678c10b70f",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": {
+                "instrument_id": "XSHE/etf/exchange/159915",
+                "series_id": "synthetic-series:XSHE/etf/exchange/159915",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "factor_qfq",
+      "schema": "FactorResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-factor-qfq",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-factor-F-qfq",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "qfq",
+          "adjustment_anchor": "20261021",
+          "snapshot_id": null
+        },
+        "request_hash": "ed03639f30c767a37bf8795109044b3c51ba77628f2aa8b56cd0adb0cf959e3d",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "multiplier": "0.5",
+              "offset": "-6",
+              "source_id": "s1"
+            },
+            {
+              "date": "2026-10-21",
+              "multiplier": "1",
+              "offset": "0",
+              "source_id": "s1"
+            }
+          ],
+          "XSHE/etf/exchange/159915": [
+            {
+              "date": "2026-10-20",
+              "multiplier": "0.5",
+              "offset": "-6",
+              "source_id": "s1"
+            },
+            {
+              "date": "2026-10-21",
+              "multiplier": "1",
+              "offset": "0",
+              "source_id": "s1"
+            }
+          ]
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "adjustment": {
+              "mode": "qfq",
+              "anchor_date": "20261021",
+              "factor_snapshot_id": "fixture-factor-F-qfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": {
+              "methodology_id": "synthetic-affine-example",
+              "methodology_version": "1",
+              "source_id": "s1",
+              "formula_reference": "urn:fixture:affine-not-market-facts"
+            }
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "adjustment": {
+              "mode": "qfq",
+              "anchor_date": "20261021",
+              "factor_snapshot_id": "fixture-factor-F-qfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": {
+              "methodology_id": "synthetic-affine-example",
+              "methodology_version": "1",
+              "source_id": "s1",
+              "formula_reference": "urn:fixture:affine-not-market-facts"
+            }
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "54c40a7233b5052990118027a3bb09c4d34f32d8a35ffa36f742287bfa0d07d5",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": {
+                "instrument_id": "XSHE/etf/exchange/159915",
+                "series_id": "synthetic-series:XSHE/etf/exchange/159915",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "adjusted_qfq",
+      "schema": "KlineResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-complete-001",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-adjusted-A-qfq",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "frequency": "1d",
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "qfq",
+          "fields": [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+          ],
+          "limit": 0,
+          "snapshot_id": null,
+          "adjustment_anchor": "20261021",
+          "factor_snapshot_id": "fixture-factor-F-qfq"
+        },
+        "request_hash": "c4e817917cab235f0556865f3495b506e84ff2aadad85b77381de4be52bc1e7d",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "-1.00",
+              "high": "-0.75",
+              "low": "-1.05",
+              "close": "-0.90",
+              "volume": 1000,
+              "amount": "10200.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.20",
+              "high": "10.80",
+              "low": "10.10",
+              "close": "10.50",
+              "volume": 1200,
+              "amount": "12600.00"
+            }
+          ],
+          "XSHE/etf/exchange/159915": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "-5.000",
+              "high": "-4.975",
+              "low": "-5.005",
+              "close": "-4.990",
+              "volume": 2000,
+              "amount": "4040.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "2.020",
+              "high": "2.080",
+              "low": "2.010",
+              "close": "2.050",
+              "volume": 2400,
+              "amount": "4920.00"
+            }
+          ]
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "shares",
+              "amount": "CNY",
+              "price_decimals": 2,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "qfq",
+              "anchor_date": "20261021",
+              "factor_snapshot_id": "fixture-factor-F-qfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "fund_units",
+              "amount": "CNY",
+              "price_decimals": 3,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "qfq",
+              "anchor_date": "20261021",
+              "factor_snapshot_id": "fixture-factor-F-qfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "404607ec740097b191f131afb5213a435b7b5af098aaa72d7c5b9ce73c6dead5",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": "fixture-raw-R",
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": {
+                "instrument_id": "XSHE/etf/exchange/159915",
+                "series_id": "synthetic-series:XSHE/etf/exchange/159915",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "factor_hfq",
+      "schema": "FactorResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-factor-hfq",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-factor-F-hfq",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "hfq",
+          "adjustment_anchor": "20261020",
+          "snapshot_id": null
+        },
+        "request_hash": "e252020d57477dd1593506542ea76ddb58c72b557e3df04c7e9f03314921958b",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "multiplier": "1",
+              "offset": "0",
+              "source_id": "s1"
+            },
+            {
+              "date": "2026-10-21",
+              "multiplier": "2",
+              "offset": "12",
+              "source_id": "s1"
+            }
+          ],
+          "XSHE/etf/exchange/159915": [
+            {
+              "date": "2026-10-20",
+              "multiplier": "1",
+              "offset": "0",
+              "source_id": "s1"
+            },
+            {
+              "date": "2026-10-21",
+              "multiplier": "2",
+              "offset": "12",
+              "source_id": "s1"
+            }
+          ]
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "adjustment": {
+              "mode": "hfq",
+              "anchor_date": "20261020",
+              "factor_snapshot_id": "fixture-factor-F-hfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": {
+              "methodology_id": "synthetic-affine-example",
+              "methodology_version": "1",
+              "source_id": "s1",
+              "formula_reference": "urn:fixture:affine-not-market-facts"
+            }
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "adjustment": {
+              "mode": "hfq",
+              "anchor_date": "20261020",
+              "factor_snapshot_id": "fixture-factor-F-hfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": {
+              "methodology_id": "synthetic-affine-example",
+              "methodology_version": "1",
+              "source_id": "s1",
+              "formula_reference": "urn:fixture:affine-not-market-facts"
+            }
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "f81035292011eaf5a27f7e359c740d36756f7a9d1a03f19ec0c78cfada789038",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": {
+                "instrument_id": "XSHE/etf/exchange/159915",
+                "series_id": "synthetic-series:XSHE/etf/exchange/159915",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "adjusted_hfq",
+      "schema": "KlineResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-complete-001",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-adjusted-A-hfq",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "frequency": "1d",
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "hfq",
+          "fields": [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+          ],
+          "limit": 0,
+          "snapshot_id": null,
+          "adjustment_anchor": "20261020",
+          "factor_snapshot_id": "fixture-factor-F-hfq"
+        },
+        "request_hash": "6b10b85c0092bf950b21335790a9dced6496a7678dad040639b0bb0f7794d01e",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.00",
+              "high": "10.50",
+              "low": "9.90",
+              "close": "10.20",
+              "volume": 1000,
+              "amount": "10200.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "32.40",
+              "high": "33.60",
+              "low": "32.20",
+              "close": "33.00",
+              "volume": 1200,
+              "amount": "12600.00"
+            }
+          ],
+          "XSHE/etf/exchange/159915": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "2.000",
+              "high": "2.050",
+              "low": "1.990",
+              "close": "2.020",
+              "volume": 2000,
+              "amount": "4040.00"
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "16.040",
+              "high": "16.160",
+              "low": "16.020",
+              "close": "16.100",
+              "volume": 2400,
+              "amount": "4920.00"
+            }
+          ]
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "shares",
+              "amount": "CNY",
+              "price_decimals": 2,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "hfq",
+              "anchor_date": "20261020",
+              "factor_snapshot_id": "fixture-factor-F-hfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "CNY",
+              "volume": "fund_units",
+              "amount": "CNY",
+              "price_decimals": 3,
+              "amount_decimals": 2,
+              "null_reason": null
+            },
+            "adjustment": {
+              "mode": "hfq",
+              "anchor_date": "20261020",
+              "factor_snapshot_id": "fixture-factor-F-hfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "19eb824a66a3f3a9da5807f2bfb7c11722f87f4cbb382f285460b706502d5334",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": "fixture-raw-R",
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": {
+                "instrument_id": "XSHE/etf/exchange/159915",
+                "series_id": "synthetic-series:XSHE/etf/exchange/159915",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "index_board_price_only",
+      "schema": "KlineResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-complete-001",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-index-board",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "complete",
+        "is_partial": false,
+        "truncated": false,
+        "errors": [],
+        "query": {
+          "codes": [
+            "XSHG/index/exchange/000001",
+            "CN/board/eastmoney/BK1138"
+          ],
+          "frequency": "1d",
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "none",
+          "fields": [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+          ],
+          "limit": 0,
+          "snapshot_id": null,
+          "adjustment_anchor": null,
+          "factor_snapshot_id": null
+        },
+        "request_hash": "3f365152ae9c41724c2c52feee6647088d500cb1b8469670de7aef7ed0a68e54",
+        "data": {
+          "XSHG/index/exchange/000001": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.00",
+              "high": "10.50",
+              "low": "9.90",
+              "close": "10.20",
+              "volume": null,
+              "amount": null
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.20",
+              "high": "10.80",
+              "low": "10.10",
+              "close": "10.50",
+              "volume": null,
+              "amount": null
+            }
+          ],
+          "CN/board/eastmoney/BK1138": [
+            {
+              "date": "2026-10-20",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.00",
+              "high": "10.50",
+              "low": "9.90",
+              "close": "10.20",
+              "volume": null,
+              "amount": null
+            },
+            {
+              "date": "2026-10-21",
+              "bar_state": "final",
+              "source_id": "s1",
+              "open": "10.20",
+              "high": "10.80",
+              "low": "10.10",
+              "close": "10.50",
+              "volume": null,
+              "amount": null
+            }
+          ]
+        },
+        "meta": {
+          "XSHG/index/exchange/000001": {
+            "instrument": {
+              "instrument_id": "XSHG/index/exchange/000001",
+              "code": "000001",
+              "exchange": "XSHG",
+              "asset_type": "index",
+              "namespace": "exchange",
+              "name": "synthetic-index-or-board",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "points",
+              "volume": "unknown",
+              "amount": "unknown",
+              "price_decimals": 2,
+              "amount_decimals": null,
+              "null_reason": "synthetic source has no defined volume/amount"
+            },
+            "adjustment": {
+              "mode": "none",
+              "anchor_date": null,
+              "factor_snapshot_id": null,
+              "algorithm": null
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          },
+          "CN/board/eastmoney/BK1138": {
+            "instrument": {
+              "instrument_id": "CN/board/eastmoney/BK1138",
+              "code": "BK1138",
+              "exchange": "CN",
+              "asset_type": "board",
+              "namespace": "eastmoney",
+              "name": "synthetic-index-or-board",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "units": {
+              "price": "points",
+              "volume": "unknown",
+              "amount": "unknown",
+              "price_decimals": 2,
+              "amount_decimals": null,
+              "null_reason": "synthetic source has no defined volume/amount"
+            },
+            "adjustment": {
+              "mode": "none",
+              "anchor_date": null,
+              "factor_snapshot_id": null,
+              "algorithm": null
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "a46e886f3b5a0183405e35a006255e8e2c156b17f8d2f365aa84d1957661af98",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHG/index/exchange/000001": {
+                "instrument_id": "XSHG/index/exchange/000001",
+                "series_id": "synthetic-series:XSHG/index/exchange/000001",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHG",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "CN/board/eastmoney/BK1138": {
+                "instrument_id": "CN/board/eastmoney/BK1138",
+                "series_id": "synthetic-series:CN/board/eastmoney/BK1138",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHG",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "factor_all_failed",
+      "schema": "FactorResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-factor-qfq",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": null,
+        "snapshot_expires_at": null,
+        "status": "failed",
+        "is_partial": true,
+        "truncated": false,
+        "errors": [
+          {
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "synthetic failure",
+            "instrument_id": null,
+            "retryable": true,
+            "details": {}
+          }
+        ],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "qfq",
+          "adjustment_anchor": "20261021",
+          "snapshot_id": null
+        },
+        "request_hash": "ed03639f30c767a37bf8795109044b3c51ba77628f2aa8b56cd0adb0cf959e3d",
+        "data": {
+          "XSHE/equity/exchange/002600": [],
+          "XSHE/etf/exchange/159915": []
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": false,
+              "identity_source_id": null
+            },
+            "status": "error",
+            "adjustment": null,
+            "coverage": {
+              "state": "incomplete",
+              "expected_rows": 2,
+              "available_rows": 0,
+              "returned_rows": 0,
+              "gaps": [
+                {
+                  "date": "2026-10-20",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                },
+                {
+                  "date": "2026-10-21",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                }
+              ]
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": null
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": false,
+              "identity_source_id": null
+            },
+            "status": "error",
+            "adjustment": null,
+            "coverage": {
+              "state": "incomplete",
+              "expected_rows": 2,
+              "available_rows": 0,
+              "returned_rows": 0,
+              "gaps": [
+                {
+                  "date": "2026-10-20",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                },
+                {
+                  "date": "2026-10-21",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                }
+              ]
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": null
+          }
+        },
+        "source_catalog": {},
+        "data_hash": "e4d74c1b83ed29aaf8600991f5944c46306f12a741581cb45369ef9506425bbb",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": null,
+              "XSHE/etf/exchange/159915": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "factor_partial",
+      "schema": "FactorResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-factor-qfq",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": "fixture-factor-F-qfq",
+        "snapshot_expires_at": "2026-10-28T16:01:00+08:00",
+        "status": "partial",
+        "is_partial": true,
+        "truncated": false,
+        "errors": [
+          {
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "synthetic failure",
+            "instrument_id": "XSHE/etf/exchange/159915",
+            "retryable": true,
+            "details": {}
+          }
+        ],
+        "query": {
+          "codes": [
+            "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"
+          ],
+          "start": "20261020",
+          "end": "20261021",
+          "fq": "qfq",
+          "adjustment_anchor": "20261021",
+          "snapshot_id": null
+        },
+        "request_hash": "ed03639f30c767a37bf8795109044b3c51ba77628f2aa8b56cd0adb0cf959e3d",
+        "data": {
+          "XSHE/equity/exchange/002600": [
+            {
+              "date": "2026-10-20",
+              "multiplier": "0.5",
+              "offset": "-6",
+              "source_id": "s1"
+            },
+            {
+              "date": "2026-10-21",
+              "multiplier": "1",
+              "offset": "0",
+              "source_id": "s1"
+            }
+          ],
+          "XSHE/etf/exchange/159915": []
+        },
+        "meta": {
+          "XSHE/equity/exchange/002600": {
+            "instrument": {
+              "instrument_id": "XSHE/equity/exchange/002600",
+              "code": "002600",
+              "exchange": "XSHE",
+              "asset_type": "equity",
+              "namespace": "exchange",
+              "name": "synthetic-equity",
+              "identity_verified": true,
+              "identity_source_id": "s1"
+            },
+            "status": "ok",
+            "adjustment": {
+              "mode": "qfq",
+              "anchor_date": "20261021",
+              "factor_snapshot_id": "fixture-factor-F-qfq",
+              "algorithm": "affine-v1"
+            },
+            "coverage": {
+              "state": "complete",
+              "expected_rows": 2,
+              "available_rows": 2,
+              "returned_rows": 2,
+              "gaps": []
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": {
+              "methodology_id": "synthetic-affine-example",
+              "methodology_version": "1",
+              "source_id": "s1",
+              "formula_reference": "urn:fixture:affine-not-market-facts"
+            }
+          },
+          "XSHE/etf/exchange/159915": {
+            "instrument": {
+              "instrument_id": "XSHE/etf/exchange/159915",
+              "code": "159915",
+              "exchange": "XSHE",
+              "asset_type": "etf",
+              "namespace": "exchange",
+              "name": "synthetic-etf",
+              "identity_verified": false,
+              "identity_source_id": null
+            },
+            "status": "error",
+            "adjustment": null,
+            "coverage": {
+              "state": "incomplete",
+              "expected_rows": 2,
+              "available_rows": 0,
+              "returned_rows": 0,
+              "gaps": [
+                {
+                  "date": "2026-10-20",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                },
+                {
+                  "date": "2026-10-21",
+                  "time": null,
+                  "reason": "SOURCE_ERROR",
+                  "evidence": []
+                }
+              ]
+            },
+            "truncated": false,
+            "truncation_reason": null,
+            "derivation": null
+          }
+        },
+        "source_catalog": {
+          "s1": {
+            "provider": "synthetic-provider",
+            "aggregator": "fixture-stockdb",
+            "access_path": "warehouse",
+            "reference": "urn:stockdb:fixture:market-and-identities-v1",
+            "retrieved_at": "2026-10-21T16:00:00+08:00",
+            "source_updated_at": "2026-10-21T15:40:00+08:00",
+            "published_at": null,
+            "finality_evidence": "synthetic upstream final flag; not a real market assertion",
+            "unknown_fields": [
+              "published_at"
+            ]
+          }
+        },
+        "data_hash": "a4368b8289a6d3d7054292f946e73417d2d465aad3ec4e9f2b99683da76f62c5",
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "raw_snapshot_id": null,
+            "series_catalog": {
+              "XSHE/equity/exchange/002600": {
+                "instrument_id": "XSHE/equity/exchange/002600",
+                "series_id": "synthetic-series:XSHE/equity/exchange/002600",
+                "provider": "synthetic-provider",
+                "methodology_id": "synthetic-method",
+                "methodology_version": "1",
+                "history_start": "2026-10-20",
+                "history_end": "2026-10-21",
+                "calendar_exchange": "XSHE",
+                "calendar_id": "synthetic-calendar",
+                "calendar_version": "fixture-1",
+                "native_volume_unit": "synthetic-verified-unit",
+                "volume_multiplier_to_wire": "1",
+                "origin_reference": "urn:fixture:series-identity",
+                "limitations": [
+                  "synthetic fixture only"
+                ]
+              },
+              "XSHE/etf/exchange/159915": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "daily_invalid_request",
+      "schema": "ToolFailureResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "server_version": "fixture-1.0",
+        "server_build_id": "fixture-build",
+        "request_id": "fixture-failed-001",
+        "served_at": "2026-10-21T16:01:00+08:00",
+        "snapshot_id": null,
+        "snapshot_expires_at": null,
+        "status": "failed",
+        "is_partial": true,
+        "truncated": false,
+        "query": null,
+        "request_hash": null,
+        "data": {},
+        "meta": {},
+        "source_catalog": {},
+        "errors": [
+          {
+            "code": "AMBIGUOUS_INSTRUMENT",
+            "message": "v3 requires a qualified public instrument id",
+            "instrument_id": null,
+            "retryable": false,
+            "details": {
+              "argument": "code",
+              "received": "000001"
+            }
+          }
+        ],
+        "data_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      }
+    },
+    {
+      "name": "synthetic_status",
+      "schema": "StatusResponse",
+      "payload": {
+        "contract_version": "stockdb-market-v3",
+        "contract_revision": "3.0.0",
+        "protocol_versions": [
+          "2025-06-18"
+        ],
+        "contract_versions": [
+          "v2",
+          "stockdb-market-v3"
+        ],
+        "server": {
+          "name": "fixture-stockdb",
+          "version": "fixture-1.0",
+          "build_id": "fixture-build",
+          "source_commit": null,
+          "image_digest": null,
+          "started_at": "2026-10-21T15:00:00+08:00"
+        },
+        "status": "ready",
+        "checked_at": "2026-10-21T16:01:00+08:00",
+        "issues": [],
+        "profiles": [
+          {
+            "id": "core_daily_v1",
+            "supported": true,
+            "reason": null,
+            "capabilities": [
+              {
+                "asset_type": "equity",
+                "exchange": "XSHG",
+                "namespace": "exchange",
+                "frequencies": [
+                  "1d"
+                ],
+                "fq_modes": [
+                  "none"
+                ],
+                "history_start": null,
+                "history_end": null,
+                "exceptions": [
+                  "synthetic fixture; no real historical coverage claim"
+                ]
+              },
+              {
+                "asset_type": "equity",
+                "exchange": "XSHE",
+                "namespace": "exchange",
+                "frequencies": [
+                  "1d"
+                ],
+                "fq_modes": [
+                  "none"
+                ],
+                "history_start": null,
+                "history_end": null,
+                "exceptions": [
+                  "synthetic fixture; no real historical coverage claim"
+                ]
+              },
+              {
+                "asset_type": "etf",
+                "exchange": "XSHG",
+                "namespace": "exchange",
+                "frequencies": [
+                  "1d"
+                ],
+                "fq_modes": [
+                  "none"
+                ],
+                "history_start": null,
+                "history_end": null,
+                "exceptions": [
+                  "synthetic fixture; no real historical coverage claim"
+                ]
+              },
+              {
+                "asset_type": "etf",
+                "exchange": "XSHE",
+                "namespace": "exchange",
+                "frequencies": [
+                  "1d"
+                ],
+                "fq_modes": [
+                  "none"
+                ],
+                "history_start": null,
+                "history_end": null,
+                "exceptions": [
+                  "synthetic fixture; no real historical coverage claim"
+                ]
+              }
+            ]
+          },
+          {
+            "id": "fullmarket_daily_v1",
+            "supported": false,
+            "reason": "not implemented in fixture",
+            "capabilities": []
+          },
+          {
+            "id": "index_board_daily_v1",
+            "supported": false,
+            "reason": "not implemented in fixture",
+            "capabilities": []
+          },
+          {
+            "id": "minute_v1",
+            "supported": false,
+            "reason": "not implemented in fixture",
+            "capabilities": []
+          },
+          {
+            "id": "adjusted_history_v1",
+            "supported": false,
+            "reason": "not implemented in fixture",
+            "capabilities": []
+          },
+          {
+            "id": "historical_identity_v1",
+            "supported": false,
+            "reason": "not implemented in fixture",
+            "capabilities": []
+          }
+        ],
+        "limits": {
+          "max_codes": 50,
+          "max_concurrency": 4,
+          "request_timeout_ms": 30000,
+          "max_response_rows": 200000,
+          "snapshot_retention_seconds": 604800
+        },
+        "legacy": {
+          "default_contract": "v2",
+          "sunset_at": null
+        },
+        "data_status": {
+          "latest_trade_date": null,
+          "scope": "summary_only",
+          "refreshed_at": null
+        },
+        "extensions": {
+          "research_v1": {
+            "extension_contract": "stockdb-market-v3-research-extension",
+            "extension_revision": "1.0.0",
+            "history_targets": {
+              "index_sessions": 500,
+              "board_sessions": 250,
+              "stock_etf_sessions": 500
+            },
+            "known_limitations": [
+              "synthetic status only; two-day fixtures prove no historical coverage"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

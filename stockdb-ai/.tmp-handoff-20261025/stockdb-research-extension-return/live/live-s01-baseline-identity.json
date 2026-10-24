@@ -1,0 +1,12 @@
+{
+ "baseline_files_identical": {
+  "README": true,
+  "HANDOFF": true,
+  "schema": true,
+  "examples": true,
+  "cases": true,
+  "validator": true
+ },
+ "extension_manifest_files_verified": 18,
+ "manifest_ok": true
+}

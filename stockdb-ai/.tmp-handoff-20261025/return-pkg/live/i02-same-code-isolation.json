@@ -1,0 +1,22 @@
+{
+ "index_source": "series-000001-index",
+ "equity_source": "engine-daily-kline",
+ "units": [
+  {
+   "price": "points",
+   "volume": "unknown",
+   "amount": "unknown",
+   "price_decimals": 3,
+   "amount_decimals": null,
+   "null_reason": "tencent ifzq day rows expose a single volume figure whose unit (shares vs lots) is not verifiable from the source, and no per-day amount field exists; price-only acceptance per DEVELOPMENT.md §3.3"
+  },
+  {
+   "price": "CNY",
+   "volume": "shares",
+   "amount": "CNY",
+   "price_decimals": 2,
+   "amount_decimals": 2,
+   "null_reason": null
+  }
+ ]
+}

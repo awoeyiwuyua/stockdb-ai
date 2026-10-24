@@ -1,0 +1,87 @@
+{
+ "XSHG/index/exchange/000001": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHE/index/exchange/399001": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHE/index/exchange/399006": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHG/index/csi/000852": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHE/equity/exchange/000001": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHE/equity/exchange/002600": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHG/equity/exchange/600000": {
+  "returned": 494,
+  "expected": 500,
+  "complete": false
+ },
+ "XSHG/equity/exchange/603516": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHE/etf/exchange/159915": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "XSHG/etf/exchange/510300": {
+  "returned": 500,
+  "expected": 500,
+  "complete": true
+ },
+ "CN/board/eastmoney/BK1408": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK1134": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK1138": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK1101": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK1037": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK0728": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ },
+ "CN/board/eastmoney/BK1160": {
+  "returned": 0,
+  "expected": 250,
+  "complete": false
+ }
+}

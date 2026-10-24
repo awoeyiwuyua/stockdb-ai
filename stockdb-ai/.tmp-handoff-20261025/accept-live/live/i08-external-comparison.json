@@ -1,0 +1,16 @@
+{
+ "provider": "sina CN_MarketDataService (independent of tencent ifzq)",
+ "tolerance": "abs diff <= 0.01 (ROUND_HALF_UP to 2dp)",
+ "results": [
+  {
+   "symbol": "sh000001",
+   "compared_days": 6,
+   "diffs": []
+  },
+  {
+   "symbol": "sz399006",
+   "compared_days": 6,
+   "diffs": []
+  }
+ ]
+}

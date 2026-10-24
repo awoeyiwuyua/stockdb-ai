@@ -1,0 +1,8 @@
+{
+ "fq_mismatch": "SNAPSHOT_SCOPE_MISMATCH",
+ "anchor_mismatch": "SNAPSHOT_SCOPE_MISMATCH",
+ "range_expand": "SNAPSHOT_SCOPE_MISMATCH",
+ "kline_as_factor": "SNAPSHOT_SCOPE_MISMATCH",
+ "factor_as_kline": "SNAPSHOT_SCOPE_MISMATCH",
+ "raw_replay_qfq": "SNAPSHOT_SCOPE_MISMATCH"
+}

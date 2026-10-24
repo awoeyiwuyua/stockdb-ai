@@ -1,0 +1,12 @@
+{
+ "anchor": "20261023",
+ "anchor_row": [
+  {
+   "date": "2026-10-23",
+   "multiplier": "1",
+   "offset": "0",
+   "source_id": "engine-adjust-cum"
+  }
+ ],
+ "hfq_probe": "hfq 用首交易日锚（下断言）"
+}

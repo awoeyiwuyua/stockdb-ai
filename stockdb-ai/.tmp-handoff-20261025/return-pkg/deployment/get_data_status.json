@@ -1,0 +1,342 @@
+{
+ "jsonrpc": "2.0",
+ "id": 3,
+ "result": {
+  "content": [
+   {
+    "type": "text",
+    "text": "{\"contract_version\": \"stockdb-market-v3\", \"contract_revision\": \"3.0.0\", \"protocol_versions\": [\"2025-06-18\"], \"contract_versions\": [\"v2\", \"stockdb-market-v3\"], \"server\": {\"name\": \"stockdb-native\", \"version\": \"0.14.0\", \"build_id\": \"src+0.14.0+ed871e1\", \"source_commit\": \"ed871e1\", \"image_digest\": null, \"started_at\": \"2026-10-25T04:59:58.533141+08:00\"}, \"status\": \"ready\", \"checked_at\": \"2026-10-25T05:02:16+08:00\", \"issues\": [], \"profiles\": [{\"id\": \"core_daily_v1\", \"supported\": true, \"reason\": null, \"capabilities\": [{\"asset_type\": \"equity\", \"exchange\": \"XSHG\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": \"2000-01-04\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage\", \"bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)\", \"LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly\", \"history bounds are observed dataset bounds, not a per-instrument guarantee\"]}, {\"asset_type\": \"etf\", \"exchange\": \"XSHG\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": \"2005-02-23\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage\", \"bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)\", \"LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly\", \"history bounds are observed dataset bounds, not a per-instrument guarantee\"]}, {\"asset_type\": \"equity\", \"exchange\": \"XSHE\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": \"2000-01-04\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage\", \"bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)\", \"LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly\", \"history bounds are observed dataset bounds, not a per-instrument guarantee\"]}, {\"asset_type\": \"etf\", \"exchange\": \"XSHE\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": \"2005-02-23\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage\", \"bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)\", \"LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly\", \"history bounds are observed dataset bounds, not a per-instrument guarantee\"]}]}, {\"id\": \"fullmarket_daily_v1\", \"supported\": false, \"reason\": \"全市场逐证券×交易日覆盖解释未独立验收；首批仅按请求证券读取\", \"capabilities\": []}, {\"id\": \"index_board_daily_v1\", \"supported\": true, \"reason\": null, \"capabilities\": [{\"asset_type\": \"index\", \"exchange\": \"XSHG\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": null, \"history_end\": \"2026-10-23\", \"exceptions\": [\"series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes\", \"volume/amount null with units.null_reason (unit unverifiable); price-only acceptance\", \"board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series\"]}, {\"asset_type\": \"index\", \"exchange\": \"XSHE\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": null, \"history_end\": \"2026-10-23\", \"exceptions\": [\"series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes\", \"volume/amount null with units.null_reason (unit unverifiable); price-only acceptance\", \"board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series\"]}, {\"asset_type\": \"index\", \"exchange\": \"XSHG\", \"namespace\": \"csi\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": null, \"history_end\": \"2026-10-23\", \"exceptions\": [\"series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes\", \"volume/amount null with units.null_reason (unit unverifiable); price-only acceptance\", \"board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series\"]}, {\"asset_type\": \"board\", \"exchange\": \"CN\", \"namespace\": \"eastmoney\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\"], \"history_start\": null, \"history_end\": \"2026-10-23\", \"exceptions\": [\"series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes\", \"volume/amount null with units.null_reason (unit unverifiable); price-only acceptance\", \"board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series\"]}]}, {\"id\": \"minute_v1\", \"supported\": false, \"reason\": \"分钟K未接入 v3 合同（周期边界/竞价归属细则未冻结）\", \"capabilities\": []}, {\"id\": \"adjusted_history_v1\", \"supported\": true, \"reason\": null, \"capabilities\": [{\"asset_type\": \"equity\", \"exchange\": \"XSHG\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\", \"qfq\", \"hfq\"], \"history_start\": \"2000-01-04\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)\", \"qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor\", \"adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series\", \"volume/amount are carried unchanged from the raw snapshot R\"]}, {\"asset_type\": \"etf\", \"exchange\": \"XSHG\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\", \"qfq\", \"hfq\"], \"history_start\": \"2005-02-23\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)\", \"qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor\", \"adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series\", \"volume/amount are carried unchanged from the raw snapshot R\"]}, {\"asset_type\": \"equity\", \"exchange\": \"XSHE\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\", \"qfq\", \"hfq\"], \"history_start\": \"2000-01-04\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)\", \"qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor\", \"adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series\", \"volume/amount are carried unchanged from the raw snapshot R\"]}, {\"asset_type\": \"etf\", \"exchange\": \"XSHE\", \"namespace\": \"exchange\", \"frequencies\": [\"1d\"], \"fq_modes\": [\"none\", \"qfq\", \"hfq\"], \"history_start\": \"2005-02-23\", \"history_end\": \"2026-10-23\", \"exceptions\": [\"factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)\", \"qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor\", \"adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series\", \"volume/amount are carried unchanged from the raw snapshot R\"]}]}, {\"id\": \"historical_identity_v1\", \"supported\": false, \"reason\": \"历史身份（上市/退市/别名有效期）无证据源，清单仅 observed_current\", \"capabilities\": []}], \"limits\": {\"max_codes\": 50, \"max_concurrency\": 4, \"request_timeout_ms\": 30000, \"max_response_rows\": 200000, \"snapshot_retention_seconds\": 604800}, \"legacy\": {\"default_contract\": \"v2\", \"sunset_at\": null}, \"data_status\": {\"latest_trade_date\": \"2026-10-23\", \"scope\": \"summary_only\", \"refreshed_at\": \"2026-10-25T05:02:00+08:00\"}, \"extensions\": {\"notice\": \"core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用\", \"snapshot_store_size\": 23, \"research_v1\": {\"extension_contract\": \"stockdb-market-v3-research-extension\", \"extension_revision\": \"1.0.0\", \"history_targets\": {\"index_sessions\": 500, \"board_sessions\": 250, \"stock_etf_sessions\": 500}, \"known_limitations\": [\"index/board volume/amount are null (unit not verifiable); price-only acceptance per DEVELOPMENT.md §3.3\", \"1000-session probes before 2024-01-01 are rejected OUT_OF_CALENDAR (verified calendar bounds 2024-01-01..2026-12-31), not silently truncated (H10 declaration)\"]}}}"
+   }
+  ],
+  "structuredContent": {
+   "contract_version": "stockdb-market-v3",
+   "contract_revision": "3.0.0",
+   "protocol_versions": [
+    "2025-06-18"
+   ],
+   "contract_versions": [
+    "v2",
+    "stockdb-market-v3"
+   ],
+   "server": {
+    "name": "stockdb-native",
+    "version": "0.14.0",
+    "build_id": "src+0.14.0+ed871e1",
+    "source_commit": "ed871e1",
+    "image_digest": null,
+    "started_at": "2026-10-25T04:59:58.533141+08:00"
+   },
+   "status": "ready",
+   "checked_at": "2026-10-25T05:02:16+08:00",
+   "issues": [],
+   "profiles": [
+    {
+     "id": "core_daily_v1",
+     "supported": true,
+     "reason": null,
+     "capabilities": [
+      {
+       "asset_type": "equity",
+       "exchange": "XSHG",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": "2000-01-04",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage",
+        "bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)",
+        "LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly",
+        "history bounds are observed dataset bounds, not a per-instrument guarantee"
+       ]
+      },
+      {
+       "asset_type": "etf",
+       "exchange": "XSHG",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": "2005-02-23",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage",
+        "bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)",
+        "LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly",
+        "history bounds are observed dataset bounds, not a per-instrument guarantee"
+       ]
+      },
+      {
+       "asset_type": "equity",
+       "exchange": "XSHE",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": "2000-01-04",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage",
+        "bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)",
+        "LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly",
+        "history bounds are observed dataset bounds, not a per-instrument guarantee"
+       ]
+      },
+      {
+       "asset_type": "etf",
+       "exchange": "XSHE",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": "2005-02-23",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "identity: engine securities catalog (股票代码 table) membership plus official SSE/SZSE code-segment classification; per-instrument history starts at its own listing date within dataset coverage",
+        "bar_state=final requires post-close sync-log evidence or a later trading session in the engine; otherwise unknown (never assumed final)",
+        "LOF/closed-end/REIT segments (160-169/180/501/502/506/508) and Beijing exchange (920) are outside core_daily_v1 and refused explicitly",
+        "history bounds are observed dataset bounds, not a per-instrument guarantee"
+       ]
+      }
+     ]
+    },
+    {
+     "id": "fullmarket_daily_v1",
+     "supported": false,
+     "reason": "全市场逐证券×交易日覆盖解释未独立验收；首批仅按请求证券读取",
+     "capabilities": []
+    },
+    {
+     "id": "index_board_daily_v1",
+     "supported": true,
+     "reason": null,
+     "capabilities": [
+      {
+       "asset_type": "index",
+       "exchange": "XSHG",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": null,
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes",
+        "volume/amount null with units.null_reason (unit unverifiable); price-only acceptance",
+        "board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series"
+       ]
+      },
+      {
+       "asset_type": "index",
+       "exchange": "XSHE",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": null,
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes",
+        "volume/amount null with units.null_reason (unit unverifiable); price-only acceptance",
+        "board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series"
+       ]
+      },
+      {
+       "asset_type": "index",
+       "exchange": "XSHG",
+       "namespace": "csi",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": null,
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes",
+        "volume/amount null with units.null_reason (unit unverifiable); price-only acceptance",
+        "board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series"
+       ]
+      },
+      {
+       "asset_type": "board",
+       "exchange": "CN",
+       "namespace": "eastmoney",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none"
+       ],
+       "history_start": null,
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "series directory is an explicit verified allowlist: 4 indices (exchange/csi namespaces) and 7 eastmoney BK boards; other series are refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes",
+        "volume/amount null with units.null_reason (unit unverifiable); price-only acceptance",
+        "board series depend on eastmoney reachability; failures are honest SOURCE_UNAVAILABLE, never substituted with THS series"
+       ]
+      }
+     ]
+    },
+    {
+     "id": "minute_v1",
+     "supported": false,
+     "reason": "分钟K未接入 v3 合同（周期边界/竞价归属细则未冻结）",
+     "capabilities": []
+    },
+    {
+     "id": "adjusted_history_v1",
+     "supported": true,
+     "reason": null,
+     "capabilities": [
+      {
+       "asset_type": "equity",
+       "exchange": "XSHG",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none",
+        "qfq",
+        "hfq"
+       ],
+       "history_start": "2000-01-04",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)",
+        "qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor",
+        "adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series",
+        "volume/amount are carried unchanged from the raw snapshot R"
+       ]
+      },
+      {
+       "asset_type": "etf",
+       "exchange": "XSHG",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none",
+        "qfq",
+        "hfq"
+       ],
+       "history_start": "2005-02-23",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)",
+        "qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor",
+        "adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series",
+        "volume/amount are carried unchanged from the raw snapshot R"
+       ]
+      },
+      {
+       "asset_type": "equity",
+       "exchange": "XSHE",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none",
+        "qfq",
+        "hfq"
+       ],
+       "history_start": "2000-01-04",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)",
+        "qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor",
+        "adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series",
+        "volume/amount are carried unchanged from the raw snapshot R"
+       ]
+      },
+      {
+       "asset_type": "etf",
+       "exchange": "XSHE",
+       "namespace": "exchange",
+       "frequencies": [
+        "1d"
+       ],
+       "fq_modes": [
+        "none",
+        "qfq",
+        "hfq"
+       ],
+       "history_start": "2005-02-23",
+       "history_end": "2026-10-23",
+       "exceptions": [
+        "factor algorithm affine-v1 with offset=0 derived from engine 复权 cum (conversion proven from /opt/stockdb/pybao/stock_sdk.py source)",
+        "qfq anchors on request end date, hfq on request start date; any other completed in-range trading day is also accepted as explicit anchor",
+        "adjusted prices may legally be <= 0 for synthetic factors; raw price positivity gate is not applied to adjusted series",
+        "volume/amount are carried unchanged from the raw snapshot R"
+       ]
+      }
+     ]
+    },
+    {
+     "id": "historical_identity_v1",
+     "supported": false,
+     "reason": "历史身份（上市/退市/别名有效期）无证据源，清单仅 observed_current",
+     "capabilities": []
+    }
+   ],
+   "limits": {
+    "max_codes": 50,
+    "max_concurrency": 4,
+    "request_timeout_ms": 30000,
+    "max_response_rows": 200000,
+    "snapshot_retention_seconds": 604800
+   },
+   "legacy": {
+    "default_contract": "v2",
+    "sunset_at": null
+   },
+   "data_status": {
+    "latest_trade_date": "2026-10-23",
+    "scope": "summary_only",
+    "refreshed_at": "2026-10-25T05:02:00+08:00"
+   },
+   "extensions": {
+    "notice": "core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用",
+    "snapshot_store_size": 23,
+    "research_v1": {
+     "extension_contract": "stockdb-market-v3-research-extension",
+     "extension_revision": "1.0.0",
+     "history_targets": {
+      "index_sessions": 500,
+      "board_sessions": 250,
+      "stock_etf_sessions": 500
+     },
+     "known_limitations": [
+      "index/board volume/amount are null (unit not verifiable); price-only acceptance per DEVELOPMENT.md §3.3",
+      "1000-session probes before 2024-01-01 are rejected OUT_OF_CALENDAR (verified calendar bounds 2024-01-01..2026-12-31), not silently truncated (H10 declaration)"
+     ]
+    }
+   }
+  },
+  "isError": false,
+  "trace_id": "61b34d96cfe6"
+ }
+}

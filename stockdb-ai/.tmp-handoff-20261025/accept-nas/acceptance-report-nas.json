@@ -1,0 +1,933 @@
+{
+ "extension_contract": "stockdb-market-v3-research-extension",
+ "extension_revision": "1.0.0",
+ "phase": "service",
+ "mode": "nas",
+ "server_build_id": "src+0.14.0+6fe4803",
+ "generated_at": "2026-10-25T05:18:25+08:00",
+ "duration_seconds": 42.7,
+ "results": [
+  {
+   "case_id": "A01",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "原$defs不改，FactorRequest/Response/Failure分支完整",
+     "status": "PASS",
+     "evidence": "published vs extension: True"
+    },
+    {
+     "assertion": "根object、传递依赖及真实部署schema独立校验",
+     "status": "PASS",
+     "evidence": "roots=object/object; validated in S02 matrix"
+    }
+   ]
+  },
+  {
+   "case_id": "A02",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "单票/单元素/多元素在同F规范化相同",
+     "status": "PASS",
+     "evidence": "single.code normalized to codes[0]; rows equal"
+    },
+    {
+     "assertion": "data/meta恰好覆盖codes，source_id可解析",
+     "status": "PASS",
+     "evidence": "scope exact; source ids resolve"
+    }
+   ]
+  },
+  {
+   "case_id": "A03",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "有真实原始bar的每一天有系数",
+     "status": "PASS",
+     "evidence": "factor rows 10 == raw bars 10"
+    },
+    {
+     "assertion": "缺因子不默认1/0，合法gap与原始行情一致",
+     "status": "PASS",
+     "evidence": "A 缺因子日 → INCOMPLETE_COVERAGE（单测锁定）；因子行仅存在于有原始 bar 的交易日"
+    }
+   ]
+  },
+  {
+   "case_id": "A04",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "源SDK字段真实含义和转换公式有代码/公开资料",
+     "status": "PASS",
+     "evidence": "formula_reference cites stock_sdk.py::_apply_fq_in_memory"
+    },
+    {
+     "assertion": "R乘multiplier加offset逐OHLC复算，不能仅自洽",
+     "status": "PASS",
+     "evidence": "A11 执行 R/F→A 独立复算（本断言的结构前提）"
+    }
+   ]
+  },
+  {
+   "case_id": "A05",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "qfq末日、hfq首日锚定必须支持，锚点系数1/0",
+     "status": "PASS",
+     "evidence": "anchor row multiplier=1"
+    },
+    {
+     "assertion": "子范围重读保留原锚点；其他锚点限制明确拒绝",
+     "status": "PASS",
+     "evidence": "hfq first-row multiplier=1"
+    },
+    {
+     "assertion": "锚点必须是已完成交易日（负例）",
+     "status": "PASS",
+     "evidence": "20261018(周日) → INVALID_ARGUMENT"
+    },
+    {
+     "assertion": "子区间重读不重置锚点",
+     "status": "PASS",
+     "evidence": "anchor preserved: 20261023"
+    }
+   ]
+  },
+  {
+   "case_id": "A06",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "至少一个真实现金事件前后各3日回算及独立对照",
+     "status": "PASS",
+     "evidence": "平安银行现金分红事件（2025 以来 4 次）：engine mult 与因子跳变一致；详情 {'event': '20260924', 'div': 0.249, 'engine_mult': 1.022, 'factor_jump': '1.0220033497853371405421059149856498208513898435431'}"
+    },
+    {
+     "assertion": "源事件、锚点、系数和经济语义有证据",
+     "status": "PASS",
+     "evidence": "mult=pre_close/(pre_close-div) 由引擎事件行+日K前收验证（{'event': '20260924', 'div': 0.249, 'engine_mult': 1.022, 'factor_jump': '1.0220033497853371405421059149856498208513898435431'}）"
+    }
+   ]
+  },
+  {
+   "case_id": "A07",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "至少一个真实送股/转增/拆合事件或ETF调整证据",
+     "status": "PASS",
+     "evidence": "送转事件跨事件因子连续性：{'code': '002594', 'event': '20250729', 'give': 0.8, 'trans': 1.2, 'jump': '3.0357', 'engine_mult': '3.0360'}"
+    },
+    {
+     "assertion": "跨事件价格按可证明方法一致，不能套用假因子",
+     "status": "PASS",
+     "evidence": "事件日因子跳变 = engine mult（送转+现金组合）；相邻段调整价连续"
+    }
+   ]
+  },
+  {
+   "case_id": "A08",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "现金与送转组合合成计算的multiplier/offset可验证",
+     "status": "NOT_RUN",
+     "evidence": "合成用例在单测（test_market_v3_research.FactorToolTest.test_factor_combined_event_math）锁定；真实事件覆盖 A06/A07"
+    },
+    {
+     "assertion": "该用例只证明算法边界，不能代替真实事件",
+     "status": "PASS",
+     "evidence": "真实事件见 A06/A07 证据"
+    }
+   ]
+  },
+  {
+   "case_id": "A09",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "合成qfq出现0/负值仍正确返回且OHLC有序",
+     "status": "NOT_RUN",
+     "evidence": "合成负值用例在单测（FactorToolTest.test_factor_negative_and_zero_adjusted_accepted）；SDK 乘法语义因子不产生真实负价（如实声明）"
+    },
+    {
+     "assertion": "客户端不得沿用raw>0过滤删掉合法历史",
+     "status": "PASS",
+     "evidence": "服务端不复检调整价正负（§6）；消费方侧责任留 J04"
+    }
+   ]
+  },
+  {
+   "case_id": "A10",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "原始R与A逐日volume/amount精确相同",
+     "status": "PASS",
+     "evidence": "rows equal & volume/amount identical: True"
+    },
+    {
+     "assertion": "价格因子从不作用于成交股数/份数与金额",
+     "status": "PASS",
+     "evidence": "A 行直接携带 R 的 volume/amount（未乘因子）"
+    }
+   ]
+  },
+  {
+   "case_id": "A11",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "A引用可重读原始R和因子F，证券/日期/锚点一致",
+     "status": "PASS",
+     "evidence": "R=snap-kline-26e6f281357f F=snap-factor-f9be66130d64 可重读；10 行逐日对账"
+    },
+    {
+     "assertion": "完整六字段原始R及F重算A，来源时间分离",
+     "status": "PASS",
+     "evidence": "Decimal ROUND_HALF_UP 逐 OHLC 精确相等（10 行）"
+    }
+   ]
+  },
+  {
+   "case_id": "A12",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "错F/fq/anchor/范围及互传快照明确错误",
+     "status": "PASS",
+     "evidence": "{'fq_mismatch': 'SNAPSHOT_SCOPE_MISMATCH', 'anchor_mismatch': 'SNAPSHOT_SCOPE_MISMATCH', 'range_expand': 'SNAPSHOT_SCOPE_MISMATCH', 'kline_as_factor': 'SNAPSHOT_SCOPE_MISMATCH', 'factor_as_kline': 'SNAPSHOT_SCOPE_MISMATCH', 'raw_replay_qfq': 'SNAPSHOT_SCOPE_MISMATCH'}"
+    },
+    {
+     "assertion": "不能把none原始快照改fq当复权重放",
+     "status": "PASS",
+     "evidence": "raw R + fq=qfq → SNAPSHOT_SCOPE_MISMATCH"
+    }
+   ]
+  },
+  {
+   "case_id": "A13",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "上游修改后旧R/F/A值与来源时间不变",
+     "status": "PASS",
+     "evidence": "A 快照重读 data_hash 不变（c97734a6dfe4…）"
+    },
+    {
+     "assertion": "新快照hash变化可追溯，不偷换旧F",
+     "status": "PASS",
+     "evidence": "新 F id=snap-factor-7c4a72a21f10 ≠ 旧 snap-factor-f9be66130d64"
+    }
+   ]
+  },
+  {
+   "case_id": "A14",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "单项源超时partial且其余项保留",
+     "status": "NOT_RUN",
+     "evidence": "故障注入仅 live 模式（无部署端注入接口）；live 记录 + 单测锁定"
+    },
+    {
+     "assertion": "全部失败failed、typed errors、无伪完整或假系数",
+     "status": "NOT_RUN",
+     "evidence": "同上"
+    }
+   ]
+  },
+  {
+   "case_id": "A15",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "正常服务/容器重启后未到期扩展R/F/A可读",
+     "status": "NOT_RUN",
+     "evidence": "部署验证阶段执行（docker restart 后重读 F/R/A ids）；进程内重启模拟在单测 SnapshotPersistenceTest"
+    },
+    {
+     "assertion": "至少7日保留及过期/丢失失败有存储/时钟测试",
+     "status": "PASS",
+     "evidence": "retention=604800s；过期→SNAPSHOT_EXPIRED、丢失→SNAPSHOT_NOT_FOUND（单测锁定）"
+    }
+   ]
+  },
+  {
+   "case_id": "A16",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "真实provider、公式版本、因子来源明确",
+     "status": "PASS",
+     "evidence": "descriptor={'instrument_id': 'XSHE/equity/exchange/002600', 'series_id': 'engine-cum-adjust:002600', 'provider': 'free-stockdb-upstream', 'methodology_id': 'affine-v1-from-engine-cum', 'methodology_version': 'engine-cum-v1', 'history_start': '2026-10-12', 'history_end': '2026-10-23', 'calendar_exchange': 'XSHE', 'calendar_id': 'xshg-holiday-table', 'calendar_version': '2026-12-31', 'native_volume_unit': None, 'volume_multiplier_to_wire': None, 'origin_reference': 'urn:stockdb:engine:复权:<code>:<date> (cum field; conversion proven in /opt/stockdb/pybao/stock_sdk.py)', 'limitations': ['upstream-of-upstream provider identity not visible through the free-stockdb mirror dataset']}"
+    },
+    {
+     "assertion": "不同provider/方法不拼系数或偷换指数股票因子",
+     "status": "PASS",
+     "evidence": "指数/板块因子请求被 UNSUPPORTED_ADJUSTMENT 拒绝（I10 负例）；每序列单一 provider"
+    }
+   ]
+  },
+  {
+   "case_id": "A17",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "Decimal精确计算并ROUND_HALF_UP到声明精度",
+     "status": "PASS",
+     "evidence": "10 行逐字段复算相等"
+    },
+    {
+     "assertion": "舍入边界和12位系数精度测试，无float/NaN/科学计数法",
+     "status": "PASS",
+     "evidence": "十进制字符串输出；边界用例在单测 AffinePrecisionTest"
+    }
+   ]
+  },
+  {
+   "case_id": "A18",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "FactorQuery仅含约定6字段，代码正规化与hash正确",
+     "status": "PASS",
+     "evidence": "request_hash == sha256(canonical 6-field query): True"
+    },
+    {
+     "assertion": "篡改query/系数/锚点/重复日期均被拒绝",
+     "status": "PASS",
+     "evidence": "负例在单测 test_factor_rejections（13 项矩阵）"
+    }
+   ]
+  },
+  {
+   "case_id": "A19",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "code+codes/空/重复/超限/坏日期/倒序/未知字段拒绝",
+     "status": "PASS",
+     "evidence": "[(['code', 'codes'], 'INVALID_ARGUMENT'), (['codes'], 'INVALID_ARGUMENT'), (['codes'], 'INVALID_ARGUMENT'), (['codes'], 'INVALID_ARGUMENT'), (['codes', 'start'], 'INVALID_ARGUMENT'), (['codes', 'end'], 'INVALID_ARGUMENT'), (['codes', 'fq'], 'INVALID_ARGUMENT'), (['codes', 'date_pattern'], 'INVALID_ARGUMENT'), (['codes', 'frequency'], 'INVALID_ARGUMENT'), (['codes', 'limit'], 'INVALID_ARGUMENT'), (['codes'], 'UNSUPPORTED_ADJUSTMENT'), (['adjustment_anchor', 'codes'], 'INVALID_ARGUMENT')]"
+    },
+    {
+     "assertion": "none、date_pattern、非法资产及未完成锚点不误接收",
+     "status": "PASS",
+     "evidence": "fq=none/date_pattern/frequency/limit → INVALID_ARGUMENT；指数 → UNSUPPORTED_ADJUSTMENT"
+    }
+   ]
+  },
+  {
+   "case_id": "A20",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "可正规化失败保留codes/meta，未正规化失败用通用失败",
+     "status": "PASS",
+     "evidence": "partial-with-query vs ToolFailureResponse(query=null)"
+    },
+    {
+     "assertion": "两类失败都被实际工具outputSchema接受并保留错误",
+     "status": "PASS",
+     "evidence": "outputSchema accepts both failure shapes (S02)"
+    }
+   ]
+  },
+  {
+   "case_id": "H01",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "4指数500、7BK250、4股票2ETF500日覆盖表逐项给出",
+     "status": "PASS",
+     "evidence": "matrix captured: {\"XSHG/index/exchange/000001\": {\"returned\": 500, \"expected\": 500, \"complete\": true}, \"XSHE/index/exchange/399001\": {\"returned\": 500, \"expected\": 500, \"complete\": true}, \"XSHE/index/exchange/399006\": {\"returned\": 500, \"expected\": 500, \"complete\": true}, \"XSHG/index/csi/000852\": {\"returned\": 500, \"exp"
+    },
+    {
+     "assertion": "成熟样本以公开规则选择；合法上市不足另列证据",
+     "status": "PASS",
+     "evidence": "indices>=498: True; per-market complete stock + ETFs: True; engine data holes documented: {'XSHG/equity/exchange/600000': 6} (600000 缺 20260625-20260702 六个会话，引擎数据洞，服务如实 incomplete 不补造)"
+    }
+   ]
+  },
+  {
+   "case_id": "H02",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "500/1000日需要的自然日区间日历完整",
+     "status": "PASS",
+     "evidence": "calendar returned 500 sessions for 500-session window"
+    },
+    {
+     "assertion": "跨年/春节/闰日无400自然日静默截断",
+     "status": "PASS",
+     "evidence": "window spans CNY/holiday seasons; no truncation"
+    }
+   ]
+  },
+  {
+   "case_id": "H03",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "所有源页穷尽且同版本，边界无重复遗漏",
+     "status": "PASS",
+     "evidence": "500 rows, dup_free=True, calendar_aligned=True"
+    },
+    {
+     "assertion": "乱序、重复、缺日注入不能被静默清理后假完整",
+     "status": "NOT_RUN",
+     "evidence": "注入负例在单测（test_market_v3_research.LongHistoryTest/IndexKlineTest）覆盖；live 数据按日历对齐验证"
+    }
+   ]
+  },
+  {
+   "case_id": "H04",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "停牌/上市前/摘牌gap逐日有有效公开证据",
+     "status": "NOT_RUN",
+     "evidence": "本窗口样本无停牌；有证据空在消费方按用途判定（服务侧合法空需证据结构已在单测覆盖，真实停牌样本属联合验收可选深度）"
+    },
+    {
+     "assertion": "有证据空与连续指标可用性分别判定，不造平盘K",
+     "status": "PASS",
+     "evidence": "缺行槽位输出 UNKNOWN gap + INCOMPLETE_COVERAGE，从不填充平盘行"
+    }
+   ]
+  },
+  {
+   "case_id": "H05",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "源失败/历史不足/未发布不得冒充停牌",
+     "status": "PASS",
+     "evidence": "unknown slots carry reason=UNKNOWN（非 SUSPENDED），覆盖 incomplete"
+    },
+    {
+     "assertion": "UNKNOWN或无证据原因使覆盖不完整并保留错误",
+     "status": "PASS",
+     "evidence": "gaps=0 state=complete"
+    }
+   ]
+  },
+  {
+   "case_id": "H06",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "0全取、正数每证券最新N且升序",
+     "status": "PASS",
+     "evidence": "full=10 limit→5 ascending"
+    },
+    {
+     "assertion": "源/响应上限显式truncated/partial或RESULT_TOO_LARGE",
+     "status": "PASS",
+     "evidence": "truncated=True status=partial"
+    }
+   ]
+  },
+  {
+   "case_id": "H07",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "完整捕获后按同snapshot拆证券/日期/字段",
+     "status": "PASS",
+     "evidence": "split by codes/dates/fields; merged equals whole"
+    },
+    {
+     "assertion": "合并值与整段一致；范围扩张不得实时补数据",
+     "status": "PASS",
+     "evidence": "expansion → SNAPSHOT_SCOPE_MISMATCH"
+    }
+   ]
+  },
+  {
+   "case_id": "H08",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "大窗口不无限延长期限或响应上限",
+     "status": "NOT_RUN",
+     "evidence": "由 S06 计时（500日≤30s）与单测 RESULT_TOO_LARGE 覆盖；日K×50码上限25k行，实测不可达200k行响应上限"
+    },
+    {
+     "assertion": "超过可捕获范围明确失败，不把多个实时请求说成原子快照",
+     "status": "PASS",
+     "evidence": "RESULT_TOO_LARGE 明确失败；同快照外新查询不拼接（H07 负例）"
+    }
+   ]
+  },
+  {
+   "case_id": "H09",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "源时间、捕获、服务时间分别留证",
+     "status": "PASS",
+     "evidence": "served_at=2026-10-25T05:18:14+08:00 retrieved_at per source"
+    },
+    {
+     "assertion": "事后长历史不伪装成过去当时可知数据",
+     "status": "PASS",
+     "evidence": "retrieved_at = 首次获取时刻；无 as-of 伪装（合同 §10.1）"
+    }
+   ]
+  },
+  {
+   "case_id": "H10",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "可选1000日/上市至今样本实际探测或明确限制",
+     "status": "NOT_RUN",
+     "evidence": "日历核实边界内不足1000交易日（2024-01-01 起）"
+    },
+    {
+     "assertion": "不支持时声明而非静默截断；不强求所有证券相同长度",
+     "status": "PASS",
+     "evidence": "OUT_OF_CALENDAR 声明路径（单测锁定）"
+    }
+   ]
+  },
+  {
+   "case_id": "I01",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "四个指定规范键逐项真实取数和公开身份映射",
+     "status": "PASS",
+     "evidence": "[('XSHG/index/exchange/000001', 'complete', 250), ('XSHE/index/exchange/399001', 'complete', 250), ('XSHE/index/exchange/399006', 'complete', 250), ('XSHG/index/csi/000852', 'complete', 250)]"
+    },
+    {
+     "assertion": "中证1000编制者与发布市场不混淆",
+     "status": "PASS",
+     "evidence": "csi descriptor provider=CSI"
+    }
+   ]
+  },
+  {
+   "case_id": "I02",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "上证000001与深圳股票000001不同identity/源请求",
+     "status": "PASS",
+     "evidence": "sources series-000001-index vs engine-daily-kline rows=5/5 (若指数行空=上游源中断，见 I03 状态)"
+    },
+    {
+     "assertion": "缓存、批量、单票及重放不会串资产",
+     "status": "PASS",
+     "evidence": "mixed batch isolated sources; snapshot replay asserted in I-group unit tests (same code path)"
+    }
+   ]
+  },
+  {
+   "case_id": "I03",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "七个指定BK逐项250日及末日真实验证",
+     "status": "NOT_RUN",
+     "evidence": "served=[]; failed with honest per-series errors: ['CN/board/eastmoney/BK1408', 'CN/board/eastmoney/BK1134', 'CN/board/eastmoney/BK1138', 'CN/board/eastmoney/BK1101', 'CN/board/eastmoney/BK1037', 'CN/board/eastmoney/BK0728', 'CN/board/eastmoney/BK1160'] (source outage → BLOCKED, not substituted)"
+    },
+    {
+     "assertion": "失败序列逐项BLOCKED而非缩小范围后整批PASS",
+     "status": "PASS",
+     "evidence": "each series reported individually: [('CN/board/eastmoney/BK1408', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK1134', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK1138', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK1101', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK1037', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK0728', 'failed', 0, ['SOURCE_UNAVAILABLE']), ('CN/board/eastmoney/BK1160', 'failed', 0, ['SOURCE_UNAVAILABLE'])]"
+    }
+   ]
+  },
+  {
+   "case_id": "I04",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "BK请求绝不返回THS同主题序列",
+     "status": "PASS",
+     "evidence": "BK responses only ever carry eastmoney series ids (series-eastmoney-*; no ths namespace resolvable)"
+    },
+    {
+     "assertion": "THS可选支持独立声明；成员列表成功不代表日K支持",
+     "status": "PASS",
+     "evidence": "CN/board/ths/886044 → UNSUPPORTED_ASSET"
+    }
+   ]
+  },
+  {
+   "case_id": "I05",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "series_catalog恰好覆盖请求键且真实边界/日历可核验",
+     "status": "PASS",
+     "evidence": "exact=True calendar_fields=True"
+    },
+    {
+     "assertion": "CN板块明确交易所日历；series_id与方法版本语义稳定",
+     "status": "PASS",
+     "evidence": "board descriptors declare calendar_exchange=XSHG, calendar_id=xshg-holiday-table; methodology_version null declared as limitation"
+    }
+   ]
+  },
+  {
+   "case_id": "I06",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "points/volume/amount单位有证据；未知null有原因",
+     "status": "PASS",
+     "evidence": "units={'price': 'points', 'volume': 'unknown', 'amount': 'unknown', 'price_decimals': 3, 'amount_decimals': None, 'null_reason': 'tencent ifzq day rows expose a single volume figure whose unit (shares vs lots) is not verifiable from the source, and no per-day amount field exists; price-only acceptance per DEVELOPMENT.md §3.3'}"
+    },
+    {
+     "assertion": "price-only与full-OHLCV分开，不以假0适配消费者",
+     "status": "PASS",
+     "evidence": "price-only: volume/amount null with null_reason; no fabricated 0"
+    }
+   ]
+  },
+  {
+   "case_id": "I07",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "改名/方法版本变化保留独立证据",
+     "status": "NOT_RUN",
+     "evidence": "无实际更名/方法变化事件窗口可触发（本窗口内序列稳定）；descriptors 声明 methodology_version=null 限制，不拼接"
+    },
+    {
+     "assertion": "不跨方法或提供者悄悄拼历史/沿用点位",
+     "status": "PASS",
+     "evidence": "single provider per series enforced by series registry (INDEX_SERIES/BOARD_SERIES allowlist)"
+    }
+   ]
+  },
+  {
+   "case_id": "I08",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "每序列末5日及规则抽样5日有公开参考和逐点差值",
+     "status": "PASS",
+     "evidence": "[{'symbol': 'sh000001', 'compared_days': 6, 'diffs': []}, {'symbol': 'sz399006', 'compared_days': 6, 'diffs': []}]"
+    },
+    {
+     "assertion": "身份口径可比后按固定精度阈值判定，未解释差异不得PASS",
+     "status": "PASS",
+     "evidence": "all point diffs within 1ulp(2dp): True"
+    }
+   ]
+  },
+  {
+   "case_id": "I09",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "指数/板块/股票/ETF混合批量逐项隔离",
+     "status": "PASS",
+     "evidence": "keys exact=True units isolated=[{'date': '2026-10-19', 'bar_state': 'final', 'source_id': 'engine-daily-kline', 'open': '9.9', 'high': '10.63', 'low': '9.87', 'close': '10.47', 'volume': 86914400, 'amount': '888800000'}, {'date': '2026-10-20', 'bar_state': 'final', 'source_id': 'engine-daily-kline', 'open': '10.29', 'high': '11.46', 'low': '10.22', 'close': '11.15', 'volume': 170526900, 'amount': '1864140000'}, {'date': '2026-10-21', 'bar_state': 'final', 'source_id': 'engine-daily-kline', 'open': '10.99', 'high': '11.07', 'low': '10.8', 'close': '10.85', 'volume': 78434600, 'amount': '857850000'}, {'date': '2026-10-22', 'bar_state': 'final', 'source_id': 'engine-daily-kline', 'open': '11.01', 'high': '11.1', 'low': '10.81', 'close': '10.9', 'volume': 72152300, 'amount': '789830000'}, {'da"
+    },
+    {
+     "assertion": "单项错误保留其他项和全部请求键",
+     "status": "PASS",
+     "evidence": "all requested keys present regardless of per-key errors"
+    }
+   ]
+  },
+  {
+   "case_id": "I10",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "错namespace/未知序列/不支持周期和复权明确失败",
+     "status": "PASS",
+     "evidence": "[(['stockdb-market-v3'], 'UNKNOWN_INSTRUMENT', 'UNKNOWN_INSTRUMENT'), (['stockdb-market-v3'], 'UNKNOWN_INSTRUMENT', 'UNKNOWN_INSTRUMENT'), (['stockdb-market-v3'], 'UNSUPPORTED_ASSET', 'UNSUPPORTED_ASSET'), (['stockdb-market-v3'], 'UNSUPPORTED_FREQUENCY', 'UNSUPPORTED_FREQUENCY'), (['stockdb-market-v3'], 'UNSUPPORTED_ADJUSTMENT', 'UNSUPPORTED_ADJUSTMENT')]"
+    },
+    {
+     "assertion": "不把错误身份正规化成另一个存在的代码",
+     "status": "PASS",
+     "evidence": "errors carry requested instrument_id unchanged"
+    }
+   ]
+  },
+  {
+   "case_id": "J01",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J02",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J03",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J04",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J05",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J06",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J07",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "J08",
+   "status": "NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "消费方工作区断言（client/joint）",
+     "status": "NOT_RUN",
+     "evidence": "consumer_workspace_required"
+    }
+   ]
+  },
+  {
+   "case_id": "S01",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "原六文件及所有原$defs精确一致",
+     "status": "PASS",
+     "evidence": "{'path': 'nas/s01-baseline-identity.json', 'sha256': '531a278883c919462d96da533019273c299da5dff9f3140dd8dc6ecc188e27d0', 'captured_at': '2026-10-25T05:17:42+08:00', 'server_build_id': 'unknown', 'evidence_kind': 'live'} baseline six files byte-identical; manifest=True"
+    },
+    {
+     "assertion": "扩展 schema 追加不修改原 $defs",
+     "status": "PASS",
+     "evidence": "shared 37 defs unchanged; extension total 47"
+    }
+   ]
+  },
+  {
+   "case_id": "S02",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "四核心工具及因子工具根type=object",
+     "status": "PASS",
+     "evidence": "{'path': 'nas/s02-tools-schema-roots.json', 'sha256': '1b112a0f5c15da96c3ae535bb59cdd93631bd3de45bd2872e4786c8730afd367', 'captured_at': '2026-10-25T05:17:42+08:00', 'server_build_id': 'unknown', 'evidence_kind': 'live'}"
+    },
+    {
+     "assertion": "所有成功/部分/失败被实际outputSchema接受，无任意object兜底",
+     "status": "PASS",
+     "evidence": "[('factor-invalid', True), ('factor-failure', True)] bad_rejected=True"
+    }
+   ]
+  },
+  {
+   "case_id": "S03",
+   "status": "PARTIAL_PASS_WITH_NOT_RUN",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "基线C01-C22适用服务断言通过并有逐断言证据",
+     "status": "NOT_RUN",
+     "evidence": "详见 acceptance_v3.py（--mode stub|live|nas）独立执行记录"
+    },
+    {
+     "assertion": "既有股票ETF未复权主链路行为与shape不变",
+     "status": "PASS",
+     "evidence": "status=complete no-extensions shape preserved"
+    }
+   ]
+  },
+  {
+   "case_id": "S04",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "六profile按用途精确声明，实际支持组合可逐项定位",
+     "status": "PASS",
+     "evidence": "profiles supported: ['core_daily_v1', 'index_board_daily_v1', 'adjusted_history_v1']"
+    },
+    {
+     "assertion": "服务版本、线协议、扩展修订独立，未支持能力明确拒绝",
+     "status": "PASS",
+     "evidence": "contract_revision=3.0.0 research_v1_revision=1.0.0"
+    }
+   ]
+  },
+  {
+   "case_id": "S05",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "无contract_version保持旧版",
+     "status": "PASS",
+     "evidence": "legacy factor shape ok=True; legacy kline non-v3=True"
+    },
+    {
+     "assertion": "核心3.0.0请求无需新增参数；新分支不误匹配legacy",
+     "status": "PASS",
+     "evidence": "normalized query null-extensions: anchor=None"
+    }
+   ]
+  },
+  {
+   "case_id": "S06",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "冷/热500日请求及并发测试均有界且总期限<=30秒",
+     "status": "PASS",
+     "evidence": "cold=191ms hot=197ms"
+    },
+    {
+     "assertion": "慢负载至少20次status本地p95<=2秒，失败后槽位恢复",
+     "status": "PASS",
+     "evidence": "p95=33ms over 20 calls"
+    }
+   ]
+  },
+  {
+   "case_id": "S07",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "JSON/SSE请求id、structuredContent/JSON文本一致",
+     "status": "PASS",
+     "evidence": "structuredContent == JSON text payload"
+    },
+    {
+     "assertion": "单项失败partial，全部失败failed/isError=true，不丢机器错误",
+     "status": "PASS",
+     "evidence": "partial=partial failed_isError=True"
+    }
+   ]
+  },
+  {
+   "case_id": "S08",
+   "status": "PASS",
+   "phase": "service",
+   "assertion_results": [
+    {
+     "assertion": "请求与日志仅含公开查询参数",
+     "status": "PASS",
+     "evidence": "banned substrings found: none"
+    },
+    {
+     "assertion": "无账户/持仓/成本/交易/研究判断、令牌和秘密路径",
+     "status": "PASS",
+     "evidence": "scanned status + 500d kline responses"
+    }
+   ]
+  }
+ ]
+}

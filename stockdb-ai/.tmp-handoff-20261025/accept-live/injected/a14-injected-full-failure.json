@@ -1,0 +1,140 @@
+{
+ "contract_version": "stockdb-market-v3",
+ "contract_revision": "3.0.0",
+ "server_version": "0.14.0",
+ "server_build_id": "src+0.14.0+nogit",
+ "request_id": "req-8f21a397d7fd49d6",
+ "served_at": "2026-10-25T04:47:28+08:00",
+ "snapshot_id": "snap-factor-69a0078f4d3e",
+ "snapshot_expires_at": "2026-11-01T04:47:28+08:00",
+ "status": "failed",
+ "is_partial": true,
+ "truncated": false,
+ "errors": [
+  {
+   "code": "SOURCE_TIMEOUT",
+   "message": "injected failure for 002600",
+   "instrument_id": "XSHE/equity/exchange/002600",
+   "retryable": true,
+   "details": {}
+  },
+  {
+   "code": "SOURCE_UNAVAILABLE",
+   "message": "injected failure for 159915",
+   "instrument_id": "XSHE/etf/exchange/159915",
+   "retryable": true,
+   "details": {}
+  }
+ ],
+ "source_catalog": {
+  "engine-adjust-cum": {
+   "provider": null,
+   "aggregator": "free-stockdb",
+   "access_path": "http",
+   "reference": "urn:stockdb:engine:复权:<code>:<year>* (cum/div/give/trans/mult per ex-dividend date); affine-v1 conversion proven in /opt/stockdb/pybao/stock_sdk.py::_apply_fq_in_memory",
+   "retrieved_at": "2026-10-25T04:47:28+08:00",
+   "source_updated_at": null,
+   "published_at": null,
+   "finality_evidence": "engine 复权 table populated by post-close sync; factors are event-driven and stable once captured",
+   "unknown_fields": [
+    "provider",
+    "source_updated_at",
+    "published_at"
+   ]
+  },
+  "ident-engine-catalog": {
+   "provider": null,
+   "aggregator": "free-stockdb",
+   "access_path": "http",
+   "reference": "urn:stockdb:engine:股票代码 (provider securities catalog table)",
+   "retrieved_at": "2026-10-25T04:46:57+08:00",
+   "source_updated_at": null,
+   "published_at": null,
+   "finality_evidence": null,
+   "unknown_fields": [
+    "provider",
+    "source_updated_at",
+    "published_at",
+    "finality_evidence"
+   ]
+  }
+ },
+ "data_hash": "e4d74c1b83ed29aaf8600991f5944c46306f12a741581cb45369ef9506425bbb",
+ "query": {
+  "codes": [
+   "XSHE/equity/exchange/002600",
+   "XSHE/etf/exchange/159915"
+  ],
+  "start": "20261012",
+  "end": "20261023",
+  "fq": "qfq",
+  "adjustment_anchor": "20261023",
+  "snapshot_id": null
+ },
+ "request_hash": "c46ae3dd8ee1266ac10c4888ed0bf31c2554c860602017d6aaef54b1fe2998b3",
+ "data": {
+  "XSHE/equity/exchange/002600": [],
+  "XSHE/etf/exchange/159915": []
+ },
+ "meta": {
+  "XSHE/equity/exchange/002600": {
+   "instrument": {
+    "instrument_id": "XSHE/equity/exchange/002600",
+    "code": "002600",
+    "exchange": "XSHE",
+    "asset_type": "equity",
+    "namespace": "exchange",
+    "name": null,
+    "identity_verified": true,
+    "identity_source_id": "ident-engine-catalog"
+   },
+   "status": "error",
+   "adjustment": null,
+   "coverage": {
+    "state": "unknown",
+    "expected_rows": null,
+    "available_rows": null,
+    "returned_rows": 0,
+    "gaps": []
+   },
+   "truncated": false,
+   "truncation_reason": null,
+   "derivation": null
+  },
+  "XSHE/etf/exchange/159915": {
+   "instrument": {
+    "instrument_id": "XSHE/etf/exchange/159915",
+    "code": "159915",
+    "exchange": "XSHE",
+    "asset_type": "etf",
+    "namespace": "exchange",
+    "name": null,
+    "identity_verified": true,
+    "identity_source_id": "ident-engine-catalog"
+   },
+   "status": "error",
+   "adjustment": null,
+   "coverage": {
+    "state": "unknown",
+    "expected_rows": null,
+    "available_rows": null,
+    "returned_rows": 0,
+    "gaps": []
+   },
+   "truncated": false,
+   "truncation_reason": null,
+   "derivation": null
+  }
+ },
+ "extensions": {
+  "research_v1": {
+   "extension_contract": "stockdb-market-v3-research-extension",
+   "extension_revision": "1.0.0",
+   "raw_snapshot_id": null,
+   "series_catalog": {
+    "XSHE/equity/exchange/002600": null,
+    "XSHE/etf/exchange/159915": null
+   }
+  }
+ }
+}

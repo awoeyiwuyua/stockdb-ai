@@ -1,0 +1,10 @@
+{
+ "coverage": {
+  "state": "complete",
+  "expected_rows": 5,
+  "available_rows": 5,
+  "returned_rows": 5,
+  "gaps": []
+ },
+ "status": "complete"
+}

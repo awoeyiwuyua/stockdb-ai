@@ -1,0 +1,21 @@
+{
+ "reference_provider": "sina CN_MarketDataService (independent of tencent ifzq)",
+ "serving_provider_per_series": {
+  "XSHG/index/exchange/000001": "sina-kline-index-daily:sh000001",
+  "XSHE/index/exchange/399006": "sina-kline-index-daily:sz399006"
+ },
+ "independence_note": "同源对照（本轮数据亦由新浪服务）——跨提供者独立性证明见 live 轮证据（tencent 服务 vs sina 参考）",
+ "tolerance": "abs diff <= 0.01 (ROUND_HALF_UP to 2dp)",
+ "results": [
+  {
+   "symbol": "sh000001",
+   "compared_days": 6,
+   "diffs": []
+  },
+  {
+   "symbol": "sz399006",
+   "compared_days": 6,
+   "diffs": []
+  }
+ ]
+}

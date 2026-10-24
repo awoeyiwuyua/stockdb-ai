@@ -1,0 +1,22 @@
+{
+ "get_kline": [
+  "object",
+  "object"
+ ],
+ "get_stock_list": [
+  "object",
+  "object"
+ ],
+ "get_adjust_factors": [
+  "object",
+  "object"
+ ],
+ "get_trading_days": [
+  "object",
+  "object"
+ ],
+ "get_data_status": [
+  "object",
+  "object"
+ ]
+}

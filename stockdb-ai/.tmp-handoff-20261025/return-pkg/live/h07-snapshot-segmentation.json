@@ -1,0 +1,4 @@
+{
+ "consistent": true,
+ "expansion_refused": "SNAPSHOT_SCOPE_MISMATCH"
+}

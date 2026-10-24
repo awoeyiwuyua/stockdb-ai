@@ -1,0 +1,13 @@
+{
+ "accepted": [
+  [
+   "factor-invalid",
+   true
+  ],
+  [
+   "factor-failure",
+   true
+  ]
+ ],
+ "bad_v3_object_rejected": true
+}

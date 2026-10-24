@@ -1,0 +1,28 @@
+{
+ "steps": [
+  [
+   "F captured",
+   "snap-factor-cbc30ac7b109",
+   "01cae0866c22b27e47f9045cfc329a5d55691338a3dc5f49527fd820852dea68"
+  ],
+  [
+   "A captured",
+   "snap-kline-ee8ad84b9efe",
+   "8edefc14cfea5ae39b8f00edc7fcfe3e279440bc3d60e083a08d851533d2e9c7"
+  ],
+  [
+   "R captured",
+   "snap-kline-2769d19232eb",
+   null
+  ],
+  [
+   "restarted",
+   "2026-10-25T05:19:02.777590+08:00",
+   null
+  ]
+ ],
+ "F_same_after_restart": true,
+ "R_readable_after_restart": true,
+ "A_same_after_restart": true,
+ "missing_snapshot_fails": true
+}

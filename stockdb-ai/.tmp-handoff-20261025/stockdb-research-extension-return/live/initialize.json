@@ -1,0 +1,15 @@
+{
+ "jsonrpc": "2.0",
+ "id": 1,
+ "result": {
+  "protocolVersion": "2025-06-18",
+  "capabilities": {
+   "tools": {},
+   "prompts": {}
+  },
+  "serverInfo": {
+   "name": "stockdb-native",
+   "version": "0.14.0"
+  }
+ }
+}

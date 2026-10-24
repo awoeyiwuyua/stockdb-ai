@@ -1,0 +1,21 @@
+{
+ "units": {
+  "price": "points",
+  "volume": "unknown",
+  "amount": "unknown",
+  "price_decimals": 3,
+  "amount_decimals": null,
+  "null_reason": "tencent ifzq day rows expose a single volume figure whose unit (shares vs lots) is not verifiable from the source, and no per-day amount field exists; price-only acceptance per DEVELOPMENT.md §3.3"
+ },
+ "sample_row": {
+  "date": "2026-10-23",
+  "bar_state": "unknown",
+  "source_id": "series-000001-index",
+  "open": "3623.57",
+  "high": "3691.4",
+  "low": "3574.27",
+  "close": "3690.48",
+  "volume": null,
+  "amount": null
+ }
+}

@@ -1,0 +1,176 @@
+{
+ "tool_count": 57,
+ "tools": [
+  {
+   "name": "get_kline"
+  },
+  {
+   "name": "get_stock_list"
+  },
+  {
+   "name": "get_adjust_factors"
+  },
+  {
+   "name": "get_market_snapshot"
+  },
+  {
+   "name": "get_board_open_effect_history"
+  },
+  {
+   "name": "get_indicators"
+  },
+  {
+   "name": "get_board_members"
+  },
+  {
+   "name": "screen_stocks"
+  },
+  {
+   "name": "get_mydb_data"
+  },
+  {
+   "name": "get_trading_days"
+  },
+  {
+   "name": "get_data_status"
+  },
+  {
+   "name": "get_point_snapshot"
+  },
+  {
+   "name": "warehouse_run_sql"
+  },
+  {
+   "name": "warehouse_list_tables"
+  },
+  {
+   "name": "warehouse_status"
+  },
+  {
+   "name": "warehouse_run"
+  },
+  {
+   "name": "MACD"
+  },
+  {
+   "name": "alpha"
+  },
+  {
+   "name": "bk_get"
+  },
+  {
+   "name": "get_all_alpha_101"
+  },
+  {
+   "name": "get_all_alpha_191"
+  },
+  {
+   "name": "get_all_securities"
+  },
+  {
+   "name": "get_bars"
+  },
+  {
+   "name": "get_billboard_list"
+  },
+  {
+   "name": "get_call_auction"
+  },
+  {
+   "name": "get_data"
+  },
+  {
+   "name": "get_dominant_future"
+  },
+  {
+   "name": "get_extras"
+  },
+  {
+   "name": "get_factor_kanban_values"
+  },
+  {
+   "name": "get_factor_values"
+  },
+  {
+   "name": "get_factor_values_legacy"
+  },
+  {
+   "name": "get_fundamentals"
+  },
+  {
+   "name": "get_fundamentals_cash_flow_legacy"
+  },
+  {
+   "name": "get_fundamentals_continuously"
+  },
+  {
+   "name": "get_fundamentals_generic_legacy"
+  },
+  {
+   "name": "get_fundamentals_income_legacy"
+  },
+  {
+   "name": "get_fundamentals_indicator_legacy"
+  },
+  {
+   "name": "get_fundamentals_valuation_legacy"
+  },
+  {
+   "name": "get_future_contracts"
+  },
+  {
+   "name": "get_history_fundamentals"
+  },
+  {
+   "name": "get_index_stocks"
+  },
+  {
+   "name": "get_index_style_exposure"
+  },
+  {
+   "name": "get_index_weights"
+  },
+  {
+   "name": "get_industry"
+  },
+  {
+   "name": "get_last_tick"
+  },
+  {
+   "name": "get_locked_shares"
+  },
+  {
+   "name": "get_margincash_stocks"
+  },
+  {
+   "name": "get_marginsec_stocks"
+  },
+  {
+   "name": "get_money_flow"
+  },
+  {
+   "name": "get_mtss"
+  },
+  {
+   "name": "get_price"
+  },
+  {
+   "name": "get_security_info"
+  },
+  {
+   "name": "get_ticks"
+  },
+  {
+   "name": "get_trade_days"
+  },
+  {
+   "name": "get_valuation"
+  },
+  {
+   "name": "list_query_tables"
+  },
+  {
+   "name": "run_query"
+  }
+ ]
+}

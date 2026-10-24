@@ -1,0 +1,10 @@
+{
+ "normalizable": {
+  "status": "partial",
+  "query": true
+ },
+ "unnormalizable": {
+  "status": "failed",
+  "query": null
+ }
+}
