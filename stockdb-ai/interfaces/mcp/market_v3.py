@@ -1196,11 +1196,12 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
             continue
         identity = identities[key]
         if identity.asset_type in ("index", "board"):
-            # 0.14.0 A 批：指数（腾讯 ifzq）/板块（eastmoney）独立序列读取
-            kinds[key] = identity.asset_type  # 失败序列也进目录（descriptor null）
+            # 0.14.0 A 批：指数（腾讯 ifzq 三主机→新浪 轮转）/板块（eastmoney）
+            kinds[key] = (identity.asset_type, None)  # 失败序列也进目录
             try:
-                _kind, rows = research.fetch_series_rows(
+                _kind, provider, rows = research.fetch_series_rows(
                     key, query["start"], query["end"])
+                kinds[key] = (_kind, provider)
                 rows_by_code[key] = rows
             except (research.ResearchError, V3Error) as exc:
                 code = getattr(exc, "code", "SOURCE_UNAVAILABLE")
@@ -1252,10 +1253,11 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
                 "kline tables over HTTP, unadjusted)"),
             finality=_bars_finality_evidence()),
     }
-    for key, kind in kinds.items():
+    for key, (kind, provider) in kinds.items():
         # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析
         sources[research.series_source_id(key)] = (
-            research.series_source_record(kind, key, _now_iso()))
+            research.series_source_record(kind, key, _now_iso(),
+                                          provider=provider))
     snapshot_id = SNAPSHOTS.new_id("kline")
     SNAPSHOTS.capture(snapshot_id, {
         "kind": "kline", "query": dict(query),
@@ -1273,11 +1275,14 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
         catalog_desc: dict[str, dict | None] = {}
         cal_ver = _calendar().XSHG_HOLIDAYS_THROUGH
         for key in codes:
-            kind = kinds.get(key)
+            entry = kinds.get(key)
+            kind = entry[0] if entry else None
+            provider = entry[1] if entry else None
             if kind and rows_by_code.get(key):
                 catalog_desc[key] = research.series_descriptor(
                     key, kind=kind, rows=rows_by_code[key],
-                    calendar_id=CALENDAR_ID, calendar_version=cal_ver)
+                    calendar_id=CALENDAR_ID, calendar_version=cal_ver,
+                    provider_used=provider)
             elif key in identities and identities[key].asset_type not in (
                     "index", "board") and rows_by_code.get(key):
                 catalog_desc[key] = research.series_descriptor(

@@ -173,6 +173,63 @@ def _ifzq_get(param: str, timeout: float) -> dict:
     raise last_exc  # type: ignore[misc]
 
 
+_SINA_URL = ("https://quotes.sina.cn/cn/api/json_v2.php/"
+             "CN_MarketDataService.getKLineData")
+
+
+def _sina_index_daily(symbol: str, start8: str, end8: str, *,
+                      timeout: float = 15.0) -> list[dict]:
+    """新浪指数日K（第四提供者；2026-10-25 实测三腾讯主机同遭 WAF 后引入）。
+
+    单次 datalen 覆盖窗口交易日数（实测 ≤1100 稳定）；行 {day,open,high,low,
+    close,volume}。volume 单位同样不可独立证明 → 不取（price-only 一致口径）。
+    """
+    from interfaces.mcp import market_v3 as v3
+    try:
+        slots = v3._expected_slots("XSHG", start8, end8)
+    except Exception:  # noqa: BLE001
+        slots = None
+    datalen = min(1100, (len(slots) + 16 if slots else 64))
+    data = _http_json(
+        f"{_SINA_URL}?symbol={urllib.parse.quote(symbol)}"
+        f"&scale=240&ma=no&datalen={datalen}",
+        referer="https://finance.sina.com.cn/", timeout=timeout)
+    rows: dict[str, dict] = {}
+    if isinstance(data, list):
+        for item in data:
+            day = str(item.get("day", ""))
+            d8 = day.replace("-", "")
+            if start8 <= d8 <= end8:
+                rows[d8] = {"date8": d8, "open": str(item.get("open")),
+                            "close": str(item.get("close")),
+                            "high": str(item.get("high")),
+                            "low": str(item.get("low"))}
+    return [rows[k] for k in sorted(rows)]
+
+
+def fetch_index_daily(symbol: str, start8: str, end8: str,
+                      *, timeout: float = 12.0) -> tuple[str, list[dict]]:
+    """指数日K多提供者轮转：腾讯三主机 → 新浪。返回 (provider, rows)。
+
+    单一提供者整体故障（如 WAF 封 IP）时换提供者如实续供；series_catalog 的
+    series_id/source_catalog 按实际服务提供者记录（不冒充单一来源）。
+    """
+    errors: list[str] = []
+    for provider, fetch in (("tencent", tencent_index_daily),
+                            ("sina", _sina_index_daily)):
+        try:
+            rows = fetch(symbol, start8, end8, timeout=timeout)
+            if rows:
+                return provider, rows
+            errors.append(f"{provider}: empty window")
+        except Exception as exc:  # noqa: BLE001 - 逐提供者收集
+            errors.append(f"{provider}: {type(exc).__name__}: {exc}"[:120])
+    raise ResearchError(
+        "SOURCE_UNAVAILABLE",
+        "指数日K全部提供者失败（腾讯三主机 + 新浪）；" + "; ".join(errors)[:200],
+        details={"providers": ["tencent", "sina"], "errors": errors})
+
+
 def tencent_index_daily(symbol: str, start8: str, end8: str, *,
                         timeout: float = 12.0) -> list[dict]:
     """腾讯日K → 行 [{date8, open, high, low, close}]（升序、去重、区间过滤）。
@@ -504,7 +561,7 @@ class PersistentSnapshotStore:
 
 def series_descriptor(key: str, *, kind: str, rows: list[dict] | None,
                       calendar_id: str, calendar_version: str,
-                      provider_hint: str | None = None) -> dict | None:
+                      provider_used: str | None = None) -> dict | None:
     """成功序列 → SeriesDescriptor；错误序列（rows=None）→ None。
 
     history_start/end 取该次响应实际可证明边界（首批行/末批行日期），
@@ -520,9 +577,13 @@ def series_descriptor(key: str, *, kind: str, rows: list[dict] | None,
     exchange, asset_type, namespace, native = key.split("/")
     if kind == "index":
         meta = INDEX_SERIES[key]
+        access = provider_used or "tencent"
+        series_prefix = {"tencent": "tencent-ifzq-index-daily",
+                         "sina": "sina-kline-index-daily"}.get(
+                             access, f"{access}-index-daily")
         return {
             "instrument_id": key,
-            "series_id": f"tencent-ifzq-index-daily:{meta['symbol']}",
+            "series_id": f"{series_prefix}:{meta['symbol']}",
             "provider": meta["compiler"],
             "methodology_id": f"{meta['compiler']}-index-{native}",
             "methodology_version": None,  # 编制方法版本不可取得（限制如实声明）
@@ -1366,12 +1427,14 @@ def resolve_research_identity(key: str) -> tuple[str, str, str, str]:
                      instrument_id=key, details={"asset_type": asset_type})
 
 
-def fetch_series_rows(key: str, start8: str, end8: str) -> tuple[str, list[dict]]:
-    """已解析键 → (kind, 日K行)。失败抛 ResearchError（合同错误码）。"""
+def fetch_series_rows(key: str, start8: str, end8: str) -> tuple[
+        str, str, list[dict]]:
+    """已解析键 → (kind, provider, 日K行)。失败抛 ResearchError（合同错误码）。"""
     kind, native, _name, _cal = resolve_research_identity(key)
     if kind == "index":
-        return "index", tencent_index_daily(native, start8, end8)
-    return "board", eastmoney_board_daily(native, start8, end8)
+        provider, rows = fetch_index_daily(native, start8, end8)
+        return "index", provider, rows
+    return "board", "eastmoney", eastmoney_board_daily(native, start8, end8)
 
 
 def series_units(kind: str) -> dict:
@@ -1429,17 +1492,29 @@ def series_source_id(key: str) -> str:
     return f"series-{key.split('/')[-1]}-{key.split('/')[1]}"
 
 
-def series_source_record(kind: str, key: str, retrieved_at: str) -> dict:
+def series_source_record(kind: str, key: str, retrieved_at: str,
+                          provider: str | None = None) -> dict:
     v3 = _v3()
     if kind == "index":
         meta = INDEX_SERIES[key]
+        access = provider or "tencent"
+        if access == "sina":
+            reference = (f"{_SINA_URL}?symbol={meta['symbol']}&scale=240 "
+                         f"(index OHLC; identity: "
+                         f"{meta['identity_evidence']})")
+            finality = ("sina publishes completed daily bars after close; "
+                        "finality cross-checked against engine latest trade "
+                        "date")
+        else:
+            reference = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+                         f"param={meta['symbol']},day (index OHLC; identity: "
+                         f"{meta['identity_evidence']})")
+            finality = ("tencent ifzq publishes completed daily bars after "
+                        "close; finality cross-checked against engine latest "
+                        "trade date")
         return v3._source_record(
-            retrieved_at=retrieved_at,
-            reference=(f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-                       f"param={meta['symbol']},day (index OHLC; identity: "
-                       f"{meta['identity_evidence']})"),
-            finality=("tencent ifzq publishes completed daily bars after close; "
-                      "finality cross-checked against engine latest trade date"))
+            retrieved_at=retrieved_at, reference=reference,
+            finality=finality)
     meta = BOARD_SERIES[key]
     return v3._source_record(
         retrieved_at=retrieved_at,

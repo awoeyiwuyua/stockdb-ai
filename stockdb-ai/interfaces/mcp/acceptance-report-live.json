@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "live",
-  "generated_at": "2026-10-24T10:32:12+0800",
-  "server_version": "0.13.2",
+  "generated_at": "2026-10-25T05:00:37+0800",
+  "server_version": "0.14.0",
   "cases": [
     {
       "case_id": "C01",
@@ -132,7 +132,7 @@
         {
           "assertion": "live finality evidence present (post-close sync based)",
           "status": "PASS",
-          "evidence": "bar_states={'final'}"
+          "evidence": "bar_states={'unknown'}"
         }
       ]
     },

@@ -932,5 +932,39 @@ class CompatAndIsolationTest(ResearchTestCase):
             self.assertNotIn(banned, text.lower())
 
 
+@unittest.skipIf(jsonschema is None, "jsonschema 不可用")
+class SinaFallbackTest(ResearchTestCase):
+    """0.14.0 补：腾讯全挂时新浪第四提供者接管（2026-10-25 WAF 实证）。"""
+
+    def test_sina_fallback_serves_and_records_provider(self):
+        def tencent_dead(symbol, start8, end8, *, timeout=12.0):
+            raise RuntimeError("HTTP Error 501: Not Implemented (waf)")
+
+        def sina(symbol, start8, end8, *, timeout=15.0):
+            rows = _index_rows()
+            return [row for row in rows if start8 <= row["date8"] <= end8]
+
+        with mock.patch.object(r, "tencent_index_daily", tencent_dead),                 mock.patch.object(r, "_sina_index_daily", sina):
+            env = self.kline(code=INDEX_KEY)
+        self.assertEqual(env["status"], "complete")
+        desc = env["extensions"]["research_v1"]["series_catalog"][INDEX_KEY]
+        self.assertTrue(desc["series_id"].startswith(
+            "sina-kline-index-daily:"))
+        ref = env["source_catalog"][desc is None or
+                                    r.series_source_id(INDEX_KEY)]
+        self.assertIn("CN_MarketDataService", ref["reference"])
+        self.validate(env, "KlineResponse")
+
+    def test_all_index_providers_dead_is_honest_failure(self):
+        def dead(symbol, start8, end8, *, timeout=12.0):
+            raise RuntimeError("501")
+
+        with mock.patch.object(r, "tencent_index_daily", dead),                 mock.patch.object(r, "_sina_index_daily", dead):
+            env = self.kline(code=INDEX_KEY)
+        self.assertEqual(env["status"], "failed")
+        self.assertEqual(env["errors"][0]["code"], "SOURCE_UNAVAILABLE")
+        self.assertIn("sina", env["errors"][0]["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

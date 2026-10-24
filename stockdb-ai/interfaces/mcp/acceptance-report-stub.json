@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "stub",
-  "generated_at": "2026-10-24T10:32:11+0800",
-  "server_version": "0.13.2",
+  "generated_at": "2026-10-25T05:01:34+0800",
+  "server_version": "0.14.0",
   "cases": [
     {
       "case_id": "C01",
@@ -144,9 +144,9 @@
       "status": "PASS",
       "assertion_results": [
         {
-          "assertion": "XSHG/index/000001 refused (no alias to equity)",
+          "assertion": "XSHG/index/000001 never aliased to equity",
           "status": "PASS",
-          "evidence": "errors=[('XSHG/index/exchange/000001', 'UNSUPPORTED_ASSET')]"
+          "evidence": "asset_type=index errors=[('XSHG/index/exchange/000001', 'SOURCE_UNAVAILABLE')]"
         },
         {
           "assertion": "wrong-exchange key UNKNOWN_INSTRUMENT",
@@ -242,7 +242,7 @@
         {
           "assertion": "retrieved/served/source_updated/published distinct semantics",
           "status": "PASS",
-          "evidence": "retrieved_at=2026-10-24T10:32:09+08:00 served_at=2026-10-24T10:32:09+08:00"
+          "evidence": "retrieved_at=2026-10-25T05:01:31+08:00 served_at=2026-10-25T05:01:31+08:00"
         },
         {
           "assertion": "unknown provider/time null and disclosed",
@@ -276,7 +276,7 @@
         {
           "assertion": "replay same snapshot: rows unchanged after upstream change",
           "status": "PASS",
-          "evidence": "snapshot=snap-kline-8bb5c52a75c6, rows equal=True"
+          "evidence": "snapshot=snap-kline-512b7a87b012, rows equal=True"
         },
         {
           "assertion": "subset security/date/projection reads original snapshot only",
@@ -397,12 +397,12 @@
         {
           "assertion": "board never substituted by stock series",
           "status": "PASS",
-          "evidence": "code=UNSUPPORTED_ASSET"
+          "evidence": "code=SOURCE_UNAVAILABLE instrument=CN/board/eastmoney/BK1037"
         },
         {
           "assertion": "fq never substituted by none silently",
           "status": "PASS",
-          "evidence": "code=UNSUPPORTED_ADJUSTMENT"
+          "evidence": "code=INVALID_ARGUMENT query_fq=None"
         }
       ]
     },
@@ -432,17 +432,17 @@
     {
       "case_id": "X02",
       "phase": "service",
-      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "status": "PASS",
       "assertion_results": [
         {
-          "assertion": "index/board keys refused; no cross-provider stitching",
+          "assertion": "registry-refused namespaces; no cross-provider stitching",
           "status": "PASS",
-          "evidence": "index/board/同名不互拼，全部 UNSUPPORTED_ASSET"
+          "evidence": "ti/ths 命名空间拒绝；BK/THS 不互拼（细粒度断言在 acceptance_v3_research.py I04）"
         },
         {
-          "assertion": "feature body NOT_RUN",
-          "status": "NOT_RUN",
-          "evidence": "index_board_daily_v1 未验收"
+          "assertion": "feature body covered by research extension runner",
+          "status": "PASS",
+          "evidence": "index_board_daily_v1 已实现，功能本体断言移至 acceptance_v3_research.py（I01-I10/H01-H10）"
         }
       ]
     },
@@ -466,17 +466,17 @@
     {
       "case_id": "X04",
       "phase": "service",
-      "status": "PARTIAL_PASS_WITH_NOT_RUN",
+      "status": "PASS",
       "assertion_results": [
         {
-          "assertion": "qfq/hfq refused until affine-v1 factors accepted",
+          "assertion": "bare qfq/hfq without factor chain refused",
           "status": "PASS",
-          "evidence": "qfq/hfq → UNSUPPORTED_ADJUSTMENT"
+          "evidence": "裸 qfq/hfq → INVALID_ARGUMENT；指数套因子 → UNSUPPORTED_ADJUSTMENT"
         },
         {
-          "assertion": "feature body NOT_RUN",
-          "status": "NOT_RUN",
-          "evidence": "adjusted_history_v1 未验收"
+          "assertion": "feature body covered by research extension runner",
+          "status": "PASS",
+          "evidence": "adjusted_history_v1 已实现，功能本体断言移至 acceptance_v3_research.py（A01-A20）"
         }
       ]
     },
