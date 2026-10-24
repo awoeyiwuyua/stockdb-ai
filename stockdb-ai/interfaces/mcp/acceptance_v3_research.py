@@ -591,8 +591,10 @@ def run_I(runner: Runner, latest: str | None) -> dict:
     env = runner.kline(code=INDICES[0], start=sessions250[-5:][0],
                        end=sessions250[-1])
     meta = env.get("meta", {}).get(INDICES[0], {})
-    row = env.get("data", {}).get(INDICES[0], [{}])[-1]
-    units_ok = (meta.get("units", {}).get("price") == "points"
+    rows_i06 = env.get("data", {}).get(INDICES[0], [])
+    row = rows_i06[-1] if rows_i06 else {}
+    units_ok = (bool(rows_i06)
+                and meta.get("units", {}).get("price") == "points"
                 and row.get("volume") is None
                 and row.get("amount") is None
                 and bool(meta.get("units", {}).get("null_reason")))
@@ -810,8 +812,9 @@ def run_H(runner: Runner, latest: str | None, ctx: dict) -> None:
                        end=sessions250[-1], limit=5)
     full_rows = full.get("data", {}).get(INDICES[0], [])
     lim_rows = lim.get("data", {}).get(INDICES[0], [])
-    ascending = [x["date"] for x in lim_rows] == sorted(
-        x["date"] for x in lim_rows)
+    ascending = (bool(lim_rows)
+                 and [x["date"] for x in lim_rows] == sorted(
+                     x["date"] for x in lim_rows))
     runner.evidence("h06-limit", {"full": len(full_rows),
                                   "limited": len(lim_rows),
                                   "truncated": lim.get("truncated"),
@@ -838,13 +841,14 @@ def run_H(runner: Runner, latest: str | None, ctx: dict) -> None:
                         start=w0, end=w1)
     rebuilt = {INDICES[0]: part1.get("data", {}).get(INDICES[0], []),
                EQUITY_KEY: (whole.get("data", {}).get(EQUITY_KEY, [])[-10:])}
+    proj_rows = proj.get("data", {}).get(INDICES[0], [])
     consistent = (
         part1.get("data", {}).get(INDICES[0], [])
         == whole.get("data", {}).get(INDICES[0], [])
         and part2.get("data", {}).get(EQUITY_KEY, [])
         == whole.get("data", {}).get(EQUITY_KEY, [])[-10:]
-        and proj.get("data", {}).get(INDICES[0], [{}])[0].keys() >= {
-            "date", "close"})
+        and bool(proj_rows)
+        and proj_rows[0].keys() >= {"date", "close"})
     expand = runner.kline(code=INDICES[0], snapshot_id=snap,
                           start=sessions250[-21:][0], end=sessions250[-1])
     runner.evidence("h07-snapshot-segmentation", {
