@@ -615,10 +615,15 @@ def run_I(runner: Runner, latest: str | None) -> dict:
 
     c = runner.case("I08")
     comparisons, all_ok = [], True
+    served_providers = {}
     for key, symbol in (("XSHG/index/exchange/000001", "sh000001"),
                         ("XSHE/index/exchange/399006", "sz399006")):
         env = runner.kline(codes=[key], start=sessions250[-6:][0],
                            end=sessions250[-1])
+        served_providers[key] = ((env.get("extensions", {})
+                                  .get("research_v1", {}).get(
+                                      "series_catalog", {}).get(key)
+                                  or {}).get("series_id"))
         ours = {row["date"]: row for row in env.get("data", {}).get(key, [])}
         try:
             ref_rows = _sina_index_daily(symbol, datalen=10)
@@ -639,8 +644,17 @@ def run_I(runner: Runner, latest: str | None) -> dict:
         comparisons.append({"symbol": symbol, "compared_days":
                             len(set(ours) & set(ref)), "diffs": diffs[:20]})
         all_ok = all_ok and not diffs
+    same_provider = any("sina-kline" in (v or "")
+                        for v in served_providers.values())
     runner.evidence("i08-external-comparison", {
-        "provider": "sina CN_MarketDataService (independent of tencent ifzq)",
+        "reference_provider":
+            "sina CN_MarketDataService (independent of tencent ifzq)",
+        "serving_provider_per_series": served_providers,
+        "independence_note": (
+            "同源对照（本轮数据亦由新浪服务）——跨提供者独立性证明见 "
+            "live 轮证据（tencent 服务 vs sina 参考）"
+            if same_provider else
+            "跨提供者对照（数据 tencent 服务，参考 sina）"),
         "tolerance": "abs diff <= 0.01 (ROUND_HALF_UP to 2dp)",
         "results": comparisons})
     c.check("每序列末5日及规则抽样5日有公开参考和逐点差值",
