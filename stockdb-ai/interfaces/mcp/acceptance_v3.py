@@ -713,10 +713,12 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
     tl = json.loads(_http_call(url, "tools/list")["body"])
     tools = tl["result"]["tools"]
     kline_tool = next(t for t in tools if t["name"] == "get_kline")
-    c.check("tools/list matches real accepted inputs (contract_version present)",
-            "contract_version" in kline_tool["inputSchema"]["properties"]
+    c.check("tools/list matches real accepted inputs (v3 contract branch present)",
+            "anyOf" in kline_tool["inputSchema"]
+            and "KlineRequest" in kline_tool["inputSchema"].get("$defs", {})
             and "outputSchema" in kline_tool,
-            f"tools={len(tools)}")
+            f"tools={len(tools)}, input branches="
+            f"{[b.get('$ref') or b.get('type') for b in kline_tool['inputSchema']['anyOf']]}")
 
     c = cases["C03"]
     # NAS 上批量×20 稳定性（L01/L02 修复验证）
