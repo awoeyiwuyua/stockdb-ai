@@ -2418,19 +2418,32 @@ TOOLS: list[dict] = [
     },
     {
         "name": "get_adjust_factors",
-        "description": "获取股票复权因子。返回 [{date, div, give, trans, mult, cum}, ...]。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "6 位股票代码，如 600633"},
-                "date_pattern": {
-                    "type": "string",
-                    "description": "日期通配，如 2026* 或 *（默认 *）",
-                    "default": "*",
+        "description": (
+            "获取复权因子。旧版（不带 contract_version）：{code, date_pattern}"
+            "→ [{date, div, give, trans, mult, cum}, ...]。"
+            "v3（显式 contract_version=stockdb-market-v3）：FactorRequest"
+            "（code/codes、start/end、fq=qfq/hfq、adjustment_anchor 必填）→"
+            " FactorResponse（逐日 affine-v1 multiplier/offset、factor 快照、"
+            "derivation 与 series_catalog；extensions.research_v1）。"
+            "锚点必须是已完成交易日；qfq 锚请求末交易日、hfq 锚首交易日。"
+        ),
+        "inputSchema": _published_input_schema(
+            "get_adjust_factors",
+            {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string",
+                             "description": "6 位股票代码，如 600633"},
+                    "date_pattern": {
+                        "type": "string",
+                        "description": "日期通配，如 2026* 或 *（默认 *）",
+                        "default": "*",
+                    },
                 },
+                "required": ["code"],
             },
-            "required": ["code"],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_adjust_factors"),
     },
     {
         "name": "get_market_snapshot",

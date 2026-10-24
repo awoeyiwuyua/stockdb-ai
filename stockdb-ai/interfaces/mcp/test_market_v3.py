@@ -238,9 +238,16 @@ class RequestValidationTest(V3TestCase):
         env = v3.get_kline_v3(args)
         self._assert_tool_failure(env, "INVALID_ARGUMENT")
 
-    def test_qfq_refused_until_adjusted_history_accepted(self):
+    def test_qfq_without_factor_snapshot_rejected(self):
+        # 0.14.0（B 批）：qfq/hfq 已启用，但必须携带锚点+因子快照
         env = self.kline(code=EQUITY_KEY, fq="qfq")
-        self._assert_tool_failure(env, "UNSUPPORTED_ADJUSTMENT")
+        self._assert_tool_failure(env, "INVALID_ARGUMENT")
+
+    def test_qfq_with_unknown_factor_snapshot_not_found(self):
+        env = self.kline(code=EQUITY_KEY, fq="qfq",
+                         adjustment_anchor="20261020",
+                         factor_snapshot_id="snap-factor-nonexistent")
+        self._assert_tool_failure(env, "SNAPSHOT_NOT_FOUND")
 
     def test_minute_frequency_refused(self):
         env = self.kline(code=EQUITY_KEY, frequency="1m")
@@ -250,15 +257,21 @@ class RequestValidationTest(V3TestCase):
         env = self.kline(code=EQUITY_KEY, frequency="1w")
         self._assert_tool_failure(env, "UNSUPPORTED_FREQUENCY")
 
-    def test_index_refused(self):
-        env = self.kline(code="XSHG/index/exchange/000001")
-        self._assert_refusal(env, "UNSUPPORTED_ASSET",
-                             "XSHG/index/exchange/000001")
+    def test_unregistered_index_refused(self):
+        # 0.14.0（A 批）：4 个指定指数已支持；目录外指数仍拒绝
+        env = self.kline(code="XSHG/index/exchange/000300")
+        self._assert_refusal(env, "UNKNOWN_INSTRUMENT",
+                             "XSHG/index/exchange/000300")
 
-    def test_board_refused(self):
-        env = self.kline(code="CN/board/eastmoney/BK1037")
+    def test_index_ths_namespace_refused(self):
+        env = self.kline(code="CN/board/ths/886044")
         self._assert_refusal(env, "UNSUPPORTED_ASSET",
-                             "CN/board/eastmoney/BK1037")
+                             "CN/board/ths/886044")
+
+    def test_unregistered_board_refused(self):
+        env = self.kline(code="CN/board/eastmoney/BK9999")
+        self._assert_refusal(env, "UNKNOWN_INSTRUMENT",
+                             "CN/board/eastmoney/BK9999")
 
     def test_beijing_exchange_refused(self):
         env = self.kline(code="XBSE/equity/exchange/920002")
@@ -299,11 +312,21 @@ class RequestValidationTest(V3TestCase):
                          "stockdb-market-v4")
         self.assertTrue(result["isError"])
 
-    def test_v3_on_non_core_tool_rejected(self):
-        result = v3.maybe_dispatch("get_adjust_factors", {
-            "contract_version": "stockdb-market-v3", "code": "002600"})
+    def test_v3_on_non_contract_tool_rejected(self):
+        result = v3.maybe_dispatch("get_market_snapshot", {
+            "contract_version": "stockdb-market-v3", "date": "20261020"})
         env = result["structuredContent"]
         self._assert_tool_failure(env, "UNSUPPORTED_CONTRACT")
+
+    def test_v3_factor_tool_invalid_args_rejected(self):
+        # v3 分支存在；非法因子请求按 FactorRequest 规则拒绝（none 不是因子 fq）
+        result = v3.maybe_dispatch("get_adjust_factors", {
+            "contract_version": "stockdb-market-v3",
+            "codes": ["XSHE/equity/exchange/002600"],
+            "start": "20261020", "end": "20261023", "fq": "none",
+            "adjustment_anchor": "20261023"})
+        env = result["structuredContent"]
+        self._assert_tool_failure(env, "INVALID_ARGUMENT")
 
 
 class KlineEnvelopeTest(V3TestCase):
@@ -699,10 +722,19 @@ class ListCalendarStatusTest(V3TestCase):
             "core_daily_v1", "fullmarket_daily_v1", "index_board_daily_v1",
             "minute_v1", "adjusted_history_v1", "historical_identity_v1"})
         self.assertTrue(profiles["core_daily_v1"]["supported"])
-        for pid in ("fullmarket_daily_v1", "index_board_daily_v1",
-                    "minute_v1", "adjusted_history_v1", "historical_identity_v1"):
+        # 0.14.0（A/B 批）：index_board_daily_v1 与 adjusted_history_v1 启用
+        self.assertTrue(profiles["index_board_daily_v1"]["supported"])
+        self.assertTrue(profiles["adjusted_history_v1"]["supported"])
+        for pid in ("fullmarket_daily_v1", "minute_v1",
+                    "historical_identity_v1"):
             self.assertFalse(profiles[pid]["supported"])
             self.assertTrue(profiles[pid]["reason"])
+        research_v1 = env["extensions"]["research_v1"]
+        self.assertEqual(research_v1["extension_revision"], "1.0.0")
+        self.assertEqual(research_v1["history_targets"],
+                         {"index_sessions": 500, "board_sessions": 250,
+                          "stock_etf_sessions": 500})
+        self.assertTrue(research_v1["known_limitations"])
         self.assertEqual(env["limits"], {
             "max_codes": 50, "max_concurrency": 4,
             "request_timeout_ms": 30000, "max_response_rows": 200000,

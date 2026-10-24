@@ -39,6 +39,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+# 0.14.0：补充合同 stockdb-market-v3-research-extension 1.0.0（A 指数/板块日K +
+# B 复权因子与 R/F/A 快照链）。research 缺失只影响扩展分支，core 不受影响。
+try:  # noqa: E402
+    from interfaces.mcp import market_v3_research as research  # noqa: F401
+except Exception as _research_import_exc:  # noqa: BLE001
+    research = None  # type: ignore[assignment]
+    print(f"market_v3: market_v3_research 加载失败（扩展分支不可用）: "
+          f"{_research_import_exc}", file=sys.stderr)
+
 # ---------------------------------------------------------------------------
 # 合同常量与运行限额（README §13 首批基准；环境变量可覆盖，状态工具如实申报）
 # ---------------------------------------------------------------------------
@@ -255,14 +264,27 @@ def resolve_identity(key: str, *, catalog: set[str] | None) -> Identity:
 
     核验链：代码在引擎目录（提供方清单）∧ 官方代码段表给出的交易所/资产与
     键声明一致 → verified；段表/目录/键三方不一致 → UNKNOWN_INSTRUMENT。
+    指数/板块（0.14.0 A 批）路由到 research 序列目录（显式白名单 + 公开证据），
+    与股票/ETF 身份链完全隔离（I02：同码不同资产不串）。
     """
     exchange, asset_type, namespace, native = parse_instrument_id(key)
-    if asset_type in ("index", "board") or exchange in ("XBSE", "CN"):
+    if asset_type in ("index", "board"):
+        if research is None:
+            raise V3Error(
+                "UNSUPPORTED_ASSET",
+                "指数/板块能力（index_board_daily_v1）未加载（research 模块缺失）",
+                instrument_id=key,
+                details={"exchange": exchange, "asset_type": asset_type})
+        kind, _native, _name, calendar_exchange = (
+            research.resolve_research_identity(key))
+        return Identity(key, exchange, asset_type, namespace, native,
+                        verified=True, volume_unit="unknown")
+    if exchange in ("XBSE", "CN"):
         raise V3Error(
             "UNSUPPORTED_ASSET",
             "资产/交易所不在 core_daily_v1 首批能力内"
             "（首批仅 XSHG/XSHE × equity/etf × 1d × none；"
-            "index/board/北交所按合同逐项独立验收后开放）",
+            "北交所/CN 按合同逐项独立验收后开放）",
             instrument_id=key,
             details={"exchange": exchange, "asset_type": asset_type})
     if namespace != "exchange":
@@ -398,9 +420,9 @@ def _normalize_rows(data: Any) -> list[dict]:
 
 
 def _row_date_key(row: dict) -> int:
-    value = row.get("date")
+    value = row.get("date", row.get("date8"))
     try:
-        return int(str(value)[:8])
+        return int("".join(ch for ch in str(value) if ch.isdigit())[:8])
     except (TypeError, ValueError):
         return 0
 
@@ -656,6 +678,12 @@ class SnapshotStore:
 
 SNAPSHOTS = SnapshotStore()
 
+# 0.14.0（扩展 A15）：快照仓升级为「内存 + 磁盘」持久实现——正常进程/容器重启后
+# 未到期快照（含 R/F/A）仍可按 id 重读；过期/丢失仍明确失败，不同 id 返回新内容。
+# 基线允许重启丢快照（§10.3「服务重启若丢失快照也必须明确失败」），本实现更严。
+if research is not None:
+    SNAPSHOTS = research.PersistentSnapshotStore()  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
 # 公共信封构件
@@ -897,13 +925,26 @@ def _validate_kline_request(args: dict) -> dict:
     if fq not in ("none", "qfq", "hfq"):
         raise V3Error("INVALID_ARGUMENT", f"fq 取值非法: {fq!r}")
     if fq != "none":
-        raise V3Error("UNSUPPORTED_ADJUSTMENT",
-                      f"复权 {fq} 未实现（adjusted_history_v1 未验收；"
-                      "不能只返回 SDK 字符串冒充）",
-                      details={"requested": fq})
-    if "adjustment_anchor" in args or "factor_snapshot_id" in args:
-        raise V3Error("INVALID_ARGUMENT",
-                      "fq=none 时不能携带 adjustment_anchor/factor_snapshot_id")
+        # 0.14.0（B 批）：adjusted_history_v1 启用，qfq/hfq 走完整 R/F/A 链。
+        if research is None:
+            raise V3Error("UNSUPPORTED_ADJUSTMENT",
+                          f"复权 {fq} 分支未加载（research 模块缺失）",
+                          details={"requested": fq})
+        anchor = args.get("adjustment_anchor")
+        factor_id = args.get("factor_snapshot_id")
+        if anchor is None or factor_id is None:
+            raise V3Error(
+                "INVALID_ARGUMENT",
+                f"fq={fq} 时 adjustment_anchor 与 factor_snapshot_id 均必填"
+                "（先经 get_adjust_factors 建立因子快照 F，再以其读取复权行情）")
+        anchor = _date8(anchor, "adjustment_anchor")
+        if not isinstance(factor_id, str) or not factor_id:
+            raise V3Error("INVALID_ARGUMENT",
+                          "factor_snapshot_id 必须是非空字符串")
+    else:
+        if "adjustment_anchor" in args or "factor_snapshot_id" in args:
+            raise V3Error("INVALID_ARGUMENT",
+                          "fq=none 时不能携带 adjustment_anchor/factor_snapshot_id")
 
     fields_raw = args.get("fields")
     if fields_raw is None:
@@ -940,7 +981,8 @@ def _validate_kline_request(args: dict) -> dict:
     return {"codes": codes, "frequency": frequency, "start": start, "end": end,
             "fq": fq, "fields": fields, "limit": limit,
             "snapshot_id": snapshot_id,
-            "adjustment_anchor": None, "factor_snapshot_id": None}
+            "adjustment_anchor": args.get("adjustment_anchor"),
+            "factor_snapshot_id": args.get("factor_snapshot_id")}
 
 
 def _expected_slots(exchange: str, start: str, end: str) -> list[str] | None:
@@ -1014,11 +1056,15 @@ def _bars_from_rows(rows: list[dict], identity: Identity,
                         "SOURCE_SCHEMA_ERROR",
                         f"{identity.code} {iso_date} amount 为负: {value!r}")
                 text = decimal_str(value)
-                if "." in text:
+                # 0.14.0：长历史实测引擎存在带小数的成交额（如 002600 2026-06-23）。
+                # 合同 amount=非负十进制字符串（CNY 元），小数合法；声明精度 2 位，
+                # 超过 2 位视为源形状异常（不允许更高精度噪声）。
+                places = len(text.partition(".")[2])
+                if places > 2:
                     raise EngineFailure(
                         "SOURCE_SCHEMA_ERROR",
-                        f"{identity.code} {iso_date} amount 带小数"
-                        "（引擎口径应为整数元）")
+                        f"{identity.code} {iso_date} amount 小数位 {places} "
+                        "超过声明精度 2（引擎口径异常）")
                 bar[field] = text
         # 未复权股票/ETF OHLC 必须 > 0 且 low <= open/close <= high（README §6.1）
         from decimal import Decimal as _D
@@ -1042,21 +1088,26 @@ def _bars_from_rows(rows: list[dict], identity: Identity,
 def _units_block(identity: Identity) -> dict:
     return {"price": "CNY", "volume": identity.volume_unit, "amount": "CNY",
             "price_decimals": _price_decimals(identity.asset_type),
-            "amount_decimals": 0, "null_reason": None}
+            "amount_decimals": 2, "null_reason": None}
 
 
 def _error_meta(identity: Identity, *, expected: int | None) -> dict:
     """错误证券的 meta（coverage 未知、status=error；README §9）。"""
+    is_research_series = identity.asset_type in ("index", "board")
     return {
         "instrument": {
             "instrument_id": identity.instrument_id, "code": identity.code,
             "exchange": identity.exchange, "asset_type": identity.asset_type,
             "namespace": identity.namespace, "name": None,
             "identity_verified": identity.verified,
-            "identity_source_id": IDENTITY_SOURCE_ID if identity.verified else None,
+            "identity_source_id": (research.series_source_id(identity.instrument_id)
+                                   if is_research_series and identity.verified
+                                   else (IDENTITY_SOURCE_ID
+                                         if identity.verified else None)),
         },
         "status": "error",
-        "units": _units_block(identity),
+        "units": (research.series_units(identity.asset_type)
+                  if is_research_series else _units_block(identity)),
         "adjustment": {"mode": "none", "anchor_date": None,
                        "factor_snapshot_id": None, "algorithm": None},
         "coverage": {"state": "unknown", "expected_rows": expected,
@@ -1074,6 +1125,10 @@ def get_kline_v3(args: dict) -> dict:
 
     request_hash = digest(query)
     codes: list[str] = query["codes"]
+
+    # -- B 批（0.14.0）：fq=qfq/hfq 走 R/F/A 链（含 A 快照重读分支）--
+    if query["fq"] != "none":
+        return research.adjusted_kline(query, request_hash)
 
     # -- 快照重读（不触上游、不占行情槽；范围/证券/周期/复权不一致明确失败）--
     if query["snapshot_id"] is not None:
@@ -1127,6 +1182,7 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
     deadline = time.monotonic() + REQUEST_TIMEOUT_MS / 1000.0
     per_call_timeout = min(15.0, REQUEST_TIMEOUT_MS / 1000.0)
     rows_by_code: dict[str, list[dict]] = {}
+    kinds: dict[str, str] = {}
     for key in codes:
         if key in fetch_errors or key not in identities:
             continue
@@ -1137,6 +1193,22 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
                 "单请求期限（30s）耗尽，该证券未读取",
                 instrument_id=key,
                 details={"deadline_ms": REQUEST_TIMEOUT_MS})
+            continue
+        identity = identities[key]
+        if identity.asset_type in ("index", "board"):
+            # 0.14.0 A 批：指数（腾讯 ifzq）/板块（eastmoney）独立序列读取
+            kinds[key] = identity.asset_type  # 失败序列也进目录（descriptor null）
+            try:
+                _kind, rows = research.fetch_series_rows(
+                    key, query["start"], query["end"])
+                rows_by_code[key] = rows
+            except (research.ResearchError, V3Error) as exc:
+                code = getattr(exc, "code", "SOURCE_UNAVAILABLE")
+                fetch_errors[key] = V3Error(code, exc.message, instrument_id=key)
+            except Exception as exc:  # noqa: BLE001 - 上游异常统一分类
+                fetch_errors[key] = V3Error("SOURCE_UNAVAILABLE",
+                                            f"{type(exc).__name__}: {exc}"[:200],
+                                            instrument_id=key)
             continue
         try:
             rows_by_code[key] = engine_daily_rows(
@@ -1167,7 +1239,8 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
     bar_states: dict[str, str] = {}
     for key, rows in rows_by_code.items():
         if rows:
-            max_date = max(str(r.get("date"))[:8] for r in rows)
+            max_date = max((str(r.get("date8") or r.get("date"))[:8])
+                           for r in rows)
             bar_states[key] = _bar_state_for(max_date, latest)
 
     sources = {
@@ -1179,6 +1252,10 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
                 "kline tables over HTTP, unadjusted)"),
             finality=_bars_finality_evidence()),
     }
+    for key, kind in kinds.items():
+        # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析
+        sources[research.series_source_id(key)] = (
+            research.series_source_record(kind, key, _now_iso()))
     snapshot_id = SNAPSHOTS.new_id("kline")
     SNAPSHOTS.capture(snapshot_id, {
         "kind": "kline", "query": dict(query),
@@ -1188,14 +1265,35 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
         "bar_states": dict(bar_states), "latest": latest,
     }, row_count=total_rows)
 
-    return _kline_build_response(query, request_hash, codes, identities,
-                                 fetch_errors, expected_by_code, sources,
-                                 snapshot_id, rows_by_code, bar_states)
+    envelope = _kline_build_response(query, request_hash, codes, identities,
+                                     fetch_errors, expected_by_code, sources,
+                                     snapshot_id, rows_by_code, bar_states)
+    # A 批响应必带 extensions.research_v1（series_catalog 恰好覆盖 query.codes）
+    if kinds and research is not None:
+        catalog_desc: dict[str, dict | None] = {}
+        cal_ver = _calendar().XSHG_HOLIDAYS_THROUGH
+        for key in codes:
+            kind = kinds.get(key)
+            if kind and rows_by_code.get(key):
+                catalog_desc[key] = research.series_descriptor(
+                    key, kind=kind, rows=rows_by_code[key],
+                    calendar_id=CALENDAR_ID, calendar_version=cal_ver)
+            elif key in identities and identities[key].asset_type not in (
+                    "index", "board") and rows_by_code.get(key):
+                catalog_desc[key] = research.series_descriptor(
+                    key, kind="equity",
+                    rows=[{"date8": str(r.get("date"))[:8]}
+                          for r in rows_by_code[key]],
+                    calendar_id=CALENDAR_ID, calendar_version=cal_ver)
+            else:
+                catalog_desc[key] = None
+        envelope.update(research.research_extensions(None, catalog_desc))
+    return envelope
 
 
 def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
                           expected_by_code, sources, snapshot_id, rows_by_code,
-                          bar_states) -> dict:
+                          bar_states, *, prebuilt_bars: bool = False) -> dict:
     fields: list[str] = query["fields"]
     limit: int = query["limit"]
     data: dict[str, list[dict]] = {}
@@ -1230,7 +1328,16 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
             continue
 
         try:
-            bars = _bars_from_rows(rows, identity, bar_states.get(key, "unknown"))
+            if prebuilt_bars:
+                bars = list(rows)  # 已是合同 Bar（复权 A / 注入路径），不再转换
+            elif identity.asset_type in ("index", "board"):
+                bars = research.research_series_bars(
+                    rows, identity.asset_type, key,
+                    bar_states.get(key, "unknown"),
+                    research.series_source_id(key))
+            else:
+                bars = _bars_from_rows(rows, identity,
+                                       bar_states.get(key, "unknown"))
         except EngineFailure as exc:
             errors.append(V3Error(exc.code, exc.message,
                                   instrument_id=key).to_error_object())
@@ -1291,7 +1398,12 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
                              "reason": "unknown_gap_no_evidence"}
                 ).to_error_object())
 
-        name = rows[-1].get("name") if rows else None
+        is_research_series = identity.asset_type in ("index", "board")
+        if is_research_series:
+            name = (research.INDEX_SERIES.get(key, {}).get("name")
+                    or research.BOARD_SERIES.get(key, {}).get("name"))
+        else:
+            name = rows[-1].get("name") if rows else None
         if coverage_state == "complete":
             instrument_status = "ok" if bars else "empty"
         else:
@@ -1303,10 +1415,13 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
                 "asset_type": identity.asset_type,
                 "namespace": identity.namespace, "name": name,
                 "identity_verified": True,
-                "identity_source_id": IDENTITY_SOURCE_ID,
+                "identity_source_id": (research.series_source_id(key)
+                                       if is_research_series
+                                       else IDENTITY_SOURCE_ID),
             },
             "status": instrument_status,
-            "units": _units_block(identity),
+            "units": (research.series_units(identity.asset_type)
+                      if is_research_series else _units_block(identity)),
             "adjustment": {"mode": "none", "anchor_date": None,
                            "factor_snapshot_id": None, "algorithm": None},
             "coverage": {"state": coverage_state, "expected_rows": expected,
@@ -1380,6 +1495,13 @@ def _kline_from_snapshot(query, request_hash) -> dict:
     if snap is None:
         return tool_failure([snap_error])
     payload = snap["payload"]
+    if payload.get("kind") not in ("kline", "kline-adjusted"):
+        return tool_failure([V3Error(
+            "SNAPSHOT_SCOPE_MISMATCH",
+            f"快照 {query['snapshot_id']} 不是行情快照"
+            f"（kind={payload.get('kind')!r}；因子快照 F 不能作为行情 snapshot 重读）",
+            details={"snapshot_id": query["snapshot_id"],
+                     "kind": payload.get("kind")})])
     captured_query = payload["query"]
     scope_errors: list[V3Error] = []
     for key in query["codes"]:
@@ -1423,7 +1545,8 @@ def _kline_from_snapshot(query, request_hash) -> dict:
     return _kline_build_response(
         query, request_hash, query["codes"], identities, {},
         expected_by_code, payload["sources"], query["snapshot_id"],
-        rows_by_code, payload["bar_states"])
+        rows_by_code, payload["bar_states"],
+        prebuilt_bars=payload.get("kind") == "kline-adjusted")
 
 
 # ---------------------------------------------------------------------------
@@ -1734,19 +1857,25 @@ def get_data_status_v3(args: dict | None = None) -> dict:
         {"id": "fullmarket_daily_v1", "supported": False,
          "reason": "全市场逐证券×交易日覆盖解释未独立验收；首批仅按请求证券读取",
          "capabilities": []},
-        {"id": "index_board_daily_v1", "supported": False,
-         "reason": "指数/板块序列未验收（引擎目录无指数/板块日K；BK/TI 映射不等于行情支持）",
-         "capabilities": []},
+        {"id": "index_board_daily_v1", "supported": True,
+         "reason": None,
+         "capabilities": (research.index_board_capabilities(latest)
+                          if research is not None else [])},
         {"id": "minute_v1", "supported": False,
          "reason": "分钟K未接入 v3 合同（周期边界/竞价归属细则未冻结）",
          "capabilities": []},
-        {"id": "adjusted_history_v1", "supported": False,
-         "reason": "复权因子未按 affine-v1 合同导出，不能拿 SDK 字符串冒充",
-         "capabilities": []},
+        {"id": "adjusted_history_v1", "supported": True,
+         "reason": None,
+         "capabilities": (research.adjusted_history_capabilities(latest)
+                          if research is not None else [])},
         {"id": "historical_identity_v1", "supported": False,
          "reason": "历史身份（上市/退市/别名有效期）无证据源，清单仅 observed_current",
          "capabilities": []},
     ]
+    if research is not None:
+        for profile in profiles:
+            if not profile["supported"] and not profile["reason"]:
+                profile["reason"] = "未实现"
     issues = []
     status = "ready"
     if latest is None:
@@ -1759,6 +1888,19 @@ def get_data_status_v3(args: dict | None = None) -> dict:
                         "（后台每 60s 重试；行情读取不受影响，按逐码错误返回）"),
             "retryable": True,
         })
+    elif research is not None:
+        # §8.3：可选能力当前不可用 → 如实 degraded 并逐项说明（只读缓存，不现查上游）
+        em = research.em_board_availability()
+        if em["fail_at"] > em["ok_at"]:
+            status = "degraded"
+            issues.append({
+                "profile_id": "index_board_daily_v1",
+                "code": "SOURCE_UNAVAILABLE",
+                "message": ("eastmoney 板块源最近访问失败（BK 板块序列按合同"
+                            "如实 SOURCE_UNAVAILABLE；指数序列不受影响）："
+                            f"{em['fail_reason'] or 'unreachable'}"),
+                "retryable": True,
+            })
     return {
         "contract_version": CONTRACT_VERSION,
         "contract_revision": CONTRACT_REVISION,
@@ -1785,6 +1927,8 @@ def get_data_status_v3(args: dict | None = None) -> dict:
         "extensions": {
             "notice": "core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用",
             "snapshot_store_size": SNAPSHOTS.size(),
+            **({"research_v1": research.research_status_metadata()}
+               if research is not None else {}),
         },
     }
 
@@ -1982,15 +2126,18 @@ def published_output_schema(tool: str) -> dict:
 
 
 def published_tool_schemas() -> dict:
-    """四工具 {tool: {"inputSchema":…, "outputSchema":…}}（tools/list 装配用）。
+    """四工具 + 因子工具 {tool: {"inputSchema":…, "outputSchema":…}}（tools/list 装配用）。
 
     任一异常返回空 dict——TOOLS 装配退回旧版-only schema（v3 分发不受影响，
     缺陷只影响 schema 声明且会留 stderr 日志）。
     """
     try:
-        return {tool: {"inputSchema": published_input_schema(tool),
-                       "outputSchema": published_output_schema(tool)}
-                for tool in _TOOL_REQUEST_DEFS}
+        schemas = {tool: {"inputSchema": published_input_schema(tool),
+                          "outputSchema": published_output_schema(tool)}
+                   for tool in _TOOL_REQUEST_DEFS}
+        if research is not None:
+            schemas["get_adjust_factors"] = research.published_factor_schemas()
+        return schemas
     except Exception as exc:  # noqa: BLE001 - schema 装配失败降级并留痕
         print(f"market_v3: published_tool_schemas 生成失败（TOOLS 退回旧版 schema）: "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
@@ -2002,7 +2149,7 @@ def published_tool_schemas() -> dict:
 # ---------------------------------------------------------------------------
 
 _V3_TOOLS = frozenset({"get_kline", "get_stock_list", "get_trading_days",
-                       "get_data_status"})
+                       "get_data_status", "get_adjust_factors"})
 
 
 def maybe_dispatch(tool_name: str, args: Any) -> dict | None:
@@ -2030,8 +2177,9 @@ def maybe_dispatch(tool_name: str, args: Any) -> dict | None:
     if tool_name not in _V3_TOOLS:
         return _wrap(tool_failure([V3Error(
             "UNSUPPORTED_CONTRACT",
-            f"工具 {tool_name} 不在 {CONTRACT_VERSION} 首批四个工具"
-            "（get_kline/get_stock_list/get_trading_days/get_data_status）内",
+            f"工具 {tool_name} 不在 {CONTRACT_VERSION} 覆盖的工具集"
+            "（get_kline/get_stock_list/get_trading_days/get_data_status/"
+            "get_adjust_factors）内",
             details={"requested_contract": requested,
                      "tool": tool_name})]))
 
@@ -2042,6 +2190,12 @@ def maybe_dispatch(tool_name: str, args: Any) -> dict | None:
             envelope = get_stock_list_v3(args)
         elif tool_name == "get_trading_days":
             envelope = get_trading_days_v3(args)
+        elif tool_name == "get_adjust_factors":
+            envelope = (research.get_adjust_factors_v3(args)
+                        if research is not None else tool_failure([V3Error(
+                            "UNSUPPORTED_CONTRACT",
+                            "get_adjust_factors 的 v3 分支未加载"
+                            "（market_v3_research 缺失）")]))
         else:
             envelope = get_data_status_v3(args)
     except V3Error as exc:
