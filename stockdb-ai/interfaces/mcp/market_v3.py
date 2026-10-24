@@ -838,6 +838,13 @@ def _validate_kline_request(args: dict) -> dict:
                       f"未知参数: {sorted(unknown)}",
                       details={"unknown_parameters": sorted(unknown)})
 
+    # 显式 null 与缺省不等价（合同 Request 字段均不可空）：schema 与运行时
+    # 同判 INVALID_ARGUMENT，避免「schema 拒绝、运行时当缺省」的口径分叉
+    for _field in ("code", "codes", "fields", "limit", "snapshot_id"):
+        if _field in args and args[_field] is None:
+            raise V3Error("INVALID_ARGUMENT",
+                          f"{_field} 不允许显式传 null（缺省即省略该字段）",
+                          details={"argument": _field, "received": None})
     has_code = args.get("code") is not None
     has_codes = args.get("codes") is not None
     if has_code and has_codes:
@@ -920,8 +927,6 @@ def _validate_kline_request(args: dict) -> dict:
         fields = [f for f in FIELDS_ORDER if f in set(fields_raw)]
 
     limit = args.get("limit", 0)
-    if limit is None:
-        limit = 0
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
         raise V3Error("INVALID_ARGUMENT",
                       f"limit 必须是非负整数（收到 {limit!r}）",
@@ -1433,6 +1438,8 @@ def _validate_list_args(args: dict) -> tuple[list[str], list[str], str]:
     if unknown:
         raise V3Error("INVALID_ARGUMENT", f"未知参数: {sorted(unknown)}",
                       details={"unknown_parameters": sorted(unknown)})
+    if args.get("snapshot_id") is None and "snapshot_id" in args:
+        raise V3Error("INVALID_ARGUMENT", "snapshot_id 不允许显式传 null")
     asset_types = args.get("asset_types")
     exchanges = args.get("exchanges")
     if (not isinstance(asset_types, list) or not asset_types
@@ -1573,6 +1580,9 @@ def get_trading_days_v3(args: dict) -> dict:
         return tool_failure([V3Error("INVALID_ARGUMENT",
                                      f"未知参数: {sorted(unknown)}",
                                      details={"unknown_parameters": sorted(unknown)})])
+    if args.get("snapshot_id") is None and "snapshot_id" in args:
+        return tool_failure([V3Error("INVALID_ARGUMENT",
+                                     "snapshot_id 不允许显式传 null")])
     exchange = args.get("exchange")
     if exchange not in ("XSHG", "XSHE", "XBSE"):
         return tool_failure([V3Error(
@@ -1777,6 +1787,200 @@ def get_data_status_v3(args: dict | None = None) -> dict:
             "snapshot_store_size": SNAPSHOTS.size(),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# 实际发布的 tools/list schema（0.13.1：修复 C01 发现 schema 缺陷）
+#
+# 消费方复核（FEEDBACK 2026-10-24 §4）实证 0.13.0 发布的 outputSchema 旧版
+# 分支（仅 type:object）吞掉非法 v3 对象、inputSchema 未落实 required/互斥/
+# 类型，C01 判 FAIL。修补原则：
+#   - v3 分支 = 冻结合同对应 Request/Response 定义**原文**（程序化从
+#     contract/contract.schema.json 抽取 $defs 传递闭包嵌入，不手工抄写，
+#     不改合同一个字节）；
+#   - 旧版分支仅匹配**未携带 contract_version** 的请求/输出
+#     （not: required contract_version），不能再吞掉任何声明 v3 的对象；
+#   - 嵌入自包含 $defs，消费方可独立解析（无需外部文件）。
+# ---------------------------------------------------------------------------
+
+CONTRACT_SCHEMA_PATH = Path(__file__).resolve().parent / "contract" / "contract.schema.json"
+_DRAFT_SCHEMA = "https://json-schema.org/draft/2020-12/schema"
+
+
+def _contract_defs_closure(root_name: str) -> dict:
+    """从冻结合同抽取 root_name 定义及其传递依赖的全部 $defs（原样引用）。
+
+    兼容 `#/$defs/X` 与 `#/$defs/X/properties/y` 形式的内部引用（后者同样
+    只需 X 进入闭包即可在新文档内解析）。
+    """
+    schema = json.loads(CONTRACT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+    if root_name not in defs:
+        raise KeyError(f"contract def not found: {root_name}")
+    needed: set[str] = {root_name}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                name = ref.split("/")[2]
+                if name not in needed:
+                    needed.add(name)
+                    walk(defs[name])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(defs[root_name])
+    return {name: defs[name] for name in sorted(needed)}
+
+
+# 各工具旧版输入 schema = 0.13.0 之前实际发布形态（逐字保留，仅加
+# “未携带 contract_version”分支限定；旧客户端的校验行为不变）。
+_LEGACY_ONLY_CV = {"not": {"required": ["contract_version"]}}
+
+_LEGACY_KLINE_INPUT = {
+    "type": "object",
+    "description": "旧版分支：仅未携带 contract_version 的请求（行为与 0.12.x 一致）",
+    **_LEGACY_ONLY_CV,
+    "properties": {
+        "code": {"type": "string",
+                 "description": "6 位股票代码，如 600633（与 codes 二选一）"},
+        "codes": {"type": "array", "items": {"type": "string"},
+                  "description": "批量股票代码列表，最多 50 个（与 code 二选一；需 pybao SDK）"},
+        "frequency": {"type": "string",
+                      "enum": ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"],
+                      "description": "K 线周期；1d=日K，5m/15m/30m/60m=分钟K，1m/1w/1M 需 pybao SDK",
+                      "default": "1d"},
+        "fq": {"type": "string", "enum": ["none", "qfq", "hfq"],
+               "description": "复权方式；none=不复权(默认)，qfq=前复权，hfq=后复权（需 pybao SDK）",
+               "default": "none"},
+        "limit": {"type": "integer", "minimum": 0,
+                  "description": "最多返回行数；0=不截断（默认）", "default": 0},
+        "start": {"type": "string",
+                  "description": "日K：8位起始日期(如 20260620)；分钟K：14位时间戳(如 20260625145200)"},
+        "end": {"type": "string",
+                "description": "日K 结束日期(可选；与 start 构成闭区间 [start, end]，含端点)"},
+        "fields": {"type": "string", "description": "投影字段，逗号分隔（可选）"},
+    },
+    "required": [],
+}
+
+_LEGACY_LIST_INPUT = {
+    "type": "object",
+    "description": "旧版分支：仅未携带 contract_version 的请求（无参数，返回 {total, codes}）",
+    **_LEGACY_ONLY_CV,
+    "properties": {},
+}
+
+_LEGACY_CALENDAR_INPUT = {
+    "type": "object",
+    "description": "旧版分支：仅未携带 contract_version 的请求",
+    **_LEGACY_ONLY_CV,
+    "properties": {
+        "start": {"type": "string", "description": "8位起始日期（含）"},
+        "end": {"type": "string",
+                "description": "8位结束日期（含）；缺省=start 后 90 个自然日"},
+        "limit": {"type": "integer", "default": 60,
+                  "description": "返回上限（硬上限400，超出截断）"},
+    },
+    "required": ["start"],
+}
+
+_LEGACY_STATUS_INPUT = {
+    "type": "object",
+    "description": "旧版分支：仅未携带 contract_version 的请求（无参数摘要）",
+    **_LEGACY_ONLY_CV,
+    "properties": {},
+}
+
+# 旧版输出 envelope（_apply_contract 的 8 键恒在契约）：仅未携带
+# contract_version 的输出可进入本分支；v3 输出必须走完整合同 Response 校验。
+_LEGACY_RESULT_DEF = {
+    "type": "object",
+    "description": (
+        "旧版结果（未携带 contract_version 的请求；旧版 tools/call 不产生 "
+        "structuredContent，本分支仅在校验旧形状时生效）：8 键 envelope + 工具字段"
+    ),
+    "not": {"required": ["contract_version"]},
+    "required": ["source", "known_at", "is_partial", "truncated", "total",
+                 "errors", "known_limitations"],
+    "properties": {
+        "source": {"type": "string"},
+        "known_at": {"type": ["string", "null"]},
+        "is_partial": {"type": "boolean"},
+        "truncated": {"type": "boolean"},
+        "total": {"type": ["integer", "object", "null"]},
+        "errors": {"type": "array"},
+        "known_limitations": {"type": "array"},
+    },
+}
+
+_TOOL_REQUEST_DEFS = {
+    "get_kline": ("KlineRequest", _LEGACY_KLINE_INPUT),
+    "get_stock_list": ("StockListRequest", _LEGACY_LIST_INPUT),
+    "get_trading_days": ("TradingDaysRequest", _LEGACY_CALENDAR_INPUT),
+    "get_data_status": ("StatusRequest", _LEGACY_STATUS_INPUT),
+}
+_TOOL_RESPONSE_DEFS = {
+    "get_kline": "KlineResponse",
+    "get_stock_list": "StockListResponse",
+    "get_trading_days": "TradingDaysResponse",
+    "get_data_status": "StatusResponse",
+}
+
+
+def published_input_schema(tool: str) -> dict:
+    """tools/list 发布的 inputSchema：anyOf[旧版分支（无 contract_version），
+    v3 分支（合同 Request 定义原文 + 传递闭包 $defs）]。"""
+    request_def, legacy = _TOOL_REQUEST_DEFS[tool]
+    return {
+        "$schema": _DRAFT_SCHEMA,
+        "anyOf": [
+            {"$ref": f"#/$defs/{request_def}"},
+            legacy,
+        ],
+        "$defs": _contract_defs_closure(request_def),
+    }
+
+
+def published_output_schema(tool: str) -> dict:
+    """tools/list 发布的 outputSchema：anyOf[旧版 envelope（无
+    contract_version），v3 合同 Response 定义原文 + 传递闭包 $defs]。
+
+    旧版分支带 not:required[contract_version]——任何声明 v3 的对象（含
+    ToolFailureResponse 形状的失败信封）都只能走完整合同校验，宽泛分支
+    不再吞掉非法 v3 输出（FEEDBACK §4.1 反例）。
+    """
+    response_def = _TOOL_RESPONSE_DEFS[tool]
+    defs = _contract_defs_closure(response_def)
+    defs["LegacyToolResult"] = _LEGACY_RESULT_DEF
+    return {
+        "$schema": _DRAFT_SCHEMA,
+        "anyOf": [
+            {"$ref": f"#/$defs/{response_def}"},
+            {"$ref": "#/$defs/LegacyToolResult"},
+        ],
+        "$defs": defs,
+    }
+
+
+def published_tool_schemas() -> dict:
+    """四工具 {tool: {"inputSchema":…, "outputSchema":…}}（tools/list 装配用）。
+
+    任一异常返回空 dict——TOOLS 装配退回旧版-only schema（v3 分发不受影响，
+    缺陷只影响 schema 声明且会留 stderr 日志）。
+    """
+    try:
+        return {tool: {"inputSchema": published_input_schema(tool),
+                       "outputSchema": published_output_schema(tool)}
+                for tool in _TOOL_REQUEST_DEFS}
+    except Exception as exc:  # noqa: BLE001 - schema 装配失败降级并留痕
+        print(f"market_v3: published_tool_schemas 生成失败（TOOLS 退回旧版 schema）: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return {}
 
 
 # ---------------------------------------------------------------------------

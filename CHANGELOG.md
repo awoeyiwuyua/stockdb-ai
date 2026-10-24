@@ -5,6 +5,43 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.13.1] — 2026-10-24（**C01 修补：四个工具实际发布的 input/output schema 接上冻结合同**——消费方复核 FEEDBACK 2026-10-24 §4 实证 0.13.0 缺陷）
+
+> 起因：消费方复核（`stockdb-v3-service-feedback-20261024`，FEEDBACK.md + schema-repro.json
+> + 23 项实测证据）确认行情响应本身合格，但 **C01 工具发现 schema 判 FAIL**：
+> ① 四个 outputSchema 的旧版分支（仅 type:object）吞掉非法 v3 对象
+> （`{"contract_version":...,"status":"complete","data":"wrong"}` 四工具均判合法）；
+> ② inputSchema 未落实 required/code-codes 互斥/fields 类型（code+codes、
+> fields=123、缺 end 三反例均被接受；limit=true 对照被拒证明检查真实执行）；
+> ③ 描述把 603516 写成 XSHE（实为 XSHG）。**合同 3.0.0 及六源文件零变更**
+> （消费方 MANIFEST 验证 original_contract_bundle_unchanged=true）。
+
+- **修补原则（FEEDBACK §6.1-6.2）**：v3 分支 = 冻结合同 Request/Response 定义
+  **原文**——`market_v3._contract_defs_closure()` 从 contract/contract.schema.json
+  **程序化抽取 $defs 传递闭包**嵌入（不手工抄写、不改合同一个字节；测试锁定
+  逐定义一致）；旧版分支一律 `not: required [contract_version]`——**只匹配未携带
+  contract_version 的请求/输出**，宽泛分支不再吞掉任何声明 v3 的对象。
+- **发布结构**：inputSchema = anyOf[$ref 合同 Request + $defs 闭包, 旧版分支]；
+  outputSchema = anyOf[$ref 合同 Response + $defs 闭包, LegacyToolResult(8 键
+  envelope 且排除 contract_version)]。自包含可独立解析，不再只写文档路径。
+- **market_v3 缺失降级**：TOOLS 装配退回旧版-only schema（v3 分发不受影响）。
+- **运行时对齐（消除 schema/运行时口径分叉）**：显式 null（code/codes/fields/
+  limit/snapshot_id）与缺省不再等价——schema 与运行时同判 INVALID_ARGUMENT。
+- **示例修正**：603516 → `XSHG/equity/exchange/603516`（上交所代码）。
+- **回归（FEEDBACK §6.3，针对实际发布的 server.TOOLS）**：
+  `test_market_v3.PublishedSchemaTest` 13 项——4 坏输出 × 四工具全拒、3 坏输入 +
+  limit=true 对照全拒、未知版本不匹配任何分支（运行时对直连调用方仍返回
+  UNSUPPORTED_CONTRACT）、合同 examples.json 7 请求全收、真实 v3 信封（完整/部分/
+  失败/工具失败/清单/日历/状态）全收、旧版输入与 8 键 envelope 全收、
+  嵌入 $defs 与冻结合同逐定义一致、603516 修正、旧分支排除 contract_version。
+- **验收执行器**：`acceptance_v3.py` C01 增加同矩阵（stub 用 server.TOOLS；
+  **nas 模式对部署端点导出的 tools/list 重跑 FEEDBACK 正反例**——FEEDBACK §6.5）。
+- 分级更正：**C01 在 0.13.0 = FAIL**（消费方反例实证），0.13.1 修补后重验 PASS；
+  其余 C02—C22 服务侧结论不变（消费方 23 项实测与本服务报告一致）。
+- 身份分类表官方出处（FEEDBACK §5 要求可复核）：上交所《证券交易业务指南第4号——
+  证券代码段分配》（sse.com.cn 业务规则栏目）、深交所《股票发行与承销业务指南
+  第3号——股票代码管理》（docs.static.szse.cn PDF）。
+
 ## [0.13.0] — 2026-10-24（**公开行情合同 stockdb-market-v3（修订 3.0.0）服务端落地：core_daily_v1 首批**；根因修复 legacy 批量「成功空数据」）
 
 > 起因：消费方项目交付合同包 `stockdb-market-v3-3.0.0`（HANDOFF + README +

@@ -2,14 +2,60 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "stub",
-  "generated_at": "2026-10-24T00:23:53+0800",
+  "generated_at": "2026-10-24T10:01:13+0800",
   "server_version": "0.13.0",
   "cases": [
     {
       "case_id": "C01",
       "phase": "service",
-      "status": "NOT_RUN",
-      "assertion_results": []
+      "status": "PASS",
+      "assertion_results": [
+        {
+          "assertion": "FEEDBACK §4.1 反例：非法 v3 对象被四个 outputSchema 全部拒绝",
+          "status": "PASS",
+          "evidence": "bad_output={contract_version,status:complete,data:'wrong'} → rejected=True（0.13.0 时四工具均接受，已修复）"
+        },
+        {
+          "assertion": "FEEDBACK §4.2 反例：code+codes 同时传入 被 inputSchema 拒绝",
+          "status": "PASS",
+          "evidence": "rejected=True"
+        },
+        {
+          "assertion": "FEEDBACK §4.2 反例：fields=123 被 inputSchema 拒绝",
+          "status": "PASS",
+          "evidence": "rejected=True"
+        },
+        {
+          "assertion": "FEEDBACK §4.2 反例：缺必填 end 被 inputSchema 拒绝",
+          "status": "PASS",
+          "evidence": "rejected=True"
+        },
+        {
+          "assertion": "FEEDBACK §4.2 反例：limit=true（对照） 被 inputSchema 拒绝",
+          "status": "PASS",
+          "evidence": "rejected=True"
+        },
+        {
+          "assertion": "正例：合同 examples.json 7 请求对发布 inputSchema 全部合法",
+          "status": "PASS",
+          "evidence": "accepted=True"
+        },
+        {
+          "assertion": "正例：旧版输入（无 contract_version）仍匹配旧分支",
+          "status": "PASS",
+          "evidence": "accepted=True"
+        },
+        {
+          "assertion": "结构：四个 inputSchema 旧分支均排除 contract_version",
+          "status": "PASS",
+          "evidence": "excludes=True"
+        },
+        {
+          "assertion": "发布 $defs 与冻结合同逐定义一致（程序化抽取）",
+          "status": "PASS",
+          "evidence": "defs_equal=True"
+        }
+      ]
     },
     {
       "case_id": "C02",
@@ -196,7 +242,7 @@
         {
           "assertion": "retrieved/served/source_updated/published distinct semantics",
           "status": "PASS",
-          "evidence": "retrieved_at=2026-10-24T00:23:51+08:00 served_at=2026-10-24T00:23:51+08:00"
+          "evidence": "retrieved_at=2026-10-24T10:01:11+08:00 served_at=2026-10-24T10:01:11+08:00"
         },
         {
           "assertion": "unknown provider/time null and disclosed",
@@ -230,7 +276,7 @@
         {
           "assertion": "replay same snapshot: rows unchanged after upstream change",
           "status": "PASS",
-          "evidence": "snapshot=snap-kline-f9ac635a1c64, rows equal=True"
+          "evidence": "snapshot=snap-kline-91b5a622be53, rows equal=True"
         },
         {
           "assertion": "subset security/date/projection reads original snapshot only",

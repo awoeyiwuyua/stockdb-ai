@@ -810,7 +810,10 @@ class DualPayloadDispatchTest(V3TestCase):
                      "get_data_status"):
             self.assertIn(tool, names)
         kline_tool = next(t for t in server.TOOLS if t["name"] == "get_kline")
-        self.assertIn("contract_version", kline_tool["inputSchema"]["properties"])
+        # 0.13.1：inputSchema 为 anyOf[v3 合同分支, 旧版分支]；contract_version
+        # 约束在 v3 分支（$defs/KlineRequest）内
+        self.assertIn("anyOf", kline_tool["inputSchema"])
+        self.assertIn("KlineRequest", kline_tool["inputSchema"]["$defs"])
         self.assertIn("outputSchema", kline_tool)
 
     def test_protocol_and_version_identity_independent(self):
@@ -893,6 +896,186 @@ class HashCanonicalTest(V3TestCase):
         self.assertEqual(v3.decimal_str(1864140000), "1864140000")
         self.assertEqual(v3.decimal_str(2.549), "2.549")
         self.assertEqual(v3.decimal_str(10.0), "10")
+
+
+@unittest.skipUnless(validate_contract is not None,
+                     f"jsonschema 不可用: {_VC_REASON}")
+class PublishedSchemaTest(V3TestCase):
+    """FEEDBACK 2026-10-24 §4/§6.3：**实际发布** tools/list schema 的正反例矩阵。
+
+    反例/正例取自消费方 schema-repro.json 原文（4 坏输出 + 3 坏输入 + bool_limit
+    对照）；正例含合同 examples.json 请求、真实生成的 v3 信封与旧版 envelope。
+    针对运行部署所使用的工具描述（server.TOOLS），不是独立的合同文件。
+    """
+
+    # --- 消费方反例原文（schema-repro.json） ---
+    BAD_OUTPUT = {"contract_version": "stockdb-market-v3",
+                  "status": "complete", "data": "wrong"}
+    BAD_INPUT_BOTH_CODE_AND_CODES = {
+        "contract_version": "stockdb-market-v3",
+        "codes": ["XSHE/equity/exchange/002600"], "frequency": "1d",
+        "start": "20261020", "end": "20261023", "fq": "none", "limit": 0,
+        "code": "XSHE/equity/exchange/002600"}
+    BAD_INPUT_FIELDS_WRONG_TYPE = {
+        "contract_version": "stockdb-market-v3",
+        "codes": ["XSHE/equity/exchange/002600"], "frequency": "1d",
+        "start": "20261020", "end": "20261023", "fq": "none", "limit": 0,
+        "fields": 123}
+    BAD_INPUT_NO_END = {
+        "contract_version": "stockdb-market-v3",
+        "codes": ["XSHE/equity/exchange/002600"], "frequency": "1d",
+        "start": "20261020", "fq": "none", "limit": 0}
+
+    @staticmethod
+    def _schema(tool: str, kind: str) -> dict:
+        entry = next(t for t in server.TOOLS if t["name"] == tool)
+        return entry[kind]
+
+    def _assert_schema(self, tool: str, kind: str, instance, expected_valid: bool):
+        from jsonschema import Draft202012Validator
+        schema = self._schema(tool, kind)
+        errors = list(Draft202012Validator(schema).iter_errors(instance))
+        valid = not errors
+        self.assertEqual(
+            valid, expected_valid,
+            f"{tool}.{kind} 对实例的判定={valid}（期望={expected_valid}）；"
+            f"首个错误: {errors[0].message[:160] if errors else '无'}")
+
+    # --- 反例：必须全部拒绝 ---
+
+    def test_bad_v3_output_rejected_by_all_four_output_schemas(self):
+        """FEEDBACK §4.1：宽泛旧分支不得吞掉非法 v3 对象（0.13.0 缺陷反例）。"""
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            self._assert_schema(tool, "outputSchema", self.BAD_OUTPUT, False)
+
+    def test_bad_v3_inputs_rejected_by_kline_input_schema(self):
+        """FEEDBACK §4.2：code+codes / fields=123 / 缺 end 必须被发布 schema 拒绝。"""
+        for bad in (self.BAD_INPUT_BOTH_CODE_AND_CODES,
+                    self.BAD_INPUT_FIELDS_WRONG_TYPE,
+                    self.BAD_INPUT_NO_END):
+            self._assert_schema("get_kline", "inputSchema", bad, False)
+
+    def test_bool_limit_control_rejected(self):
+        """消费方对照用例：limit=true 必须仍被拒绝（证明真的执行了类型检查）。"""
+        bad = {**self.BAD_INPUT_NO_END, "end": "20261023", "limit": True}
+        self._assert_schema("get_kline", "inputSchema", bad, False)
+
+    def test_unknown_contract_version_rejected_by_published_schema(self):
+        """未知版本不匹配任何分支（v3 分支=合同 const；旧分支排除 contract_version）；
+        运行时对直连调用方仍返回 UNSUPPORTED_CONTRACT（分类不变）。"""
+        bad = {**BASE_ARGS, "contract_version": "stockdb-market-v4",
+               "code": EQUITY_KEY}
+        self._assert_schema("get_kline", "inputSchema", bad, False)
+
+    def test_null_values_rejected_by_schema_and_runtime(self):
+        """显式 null 与缺省不等价：schema 与运行时同判非法（口径一致）。"""
+        for field in ("limit", "snapshot_id", "fields"):
+            bad = {**BASE_ARGS, "code": EQUITY_KEY, field: None}
+            self._assert_schema("get_kline", "inputSchema", bad, False)
+            env = v3.get_kline_v3(bad)
+            self.assertEqual(env["status"], "failed", field)
+            self.assertEqual(env["errors"][0]["code"], "INVALID_ARGUMENT", field)
+
+    # --- 正例：必须仍然接受 ---
+
+    def test_contract_example_requests_accepted(self):
+        """合同 examples.json 的 7 个请求对相应发布 inputSchema 全部合法。"""
+        examples = json.loads((_MCP_DIR / "contract" / "examples.json")
+                              .read_text(encoding="utf-8"))
+        tool_by_schema = {"KlineRequest": "get_kline",
+                          "StockListRequest": "get_stock_list",
+                          "TradingDaysRequest": "get_trading_days",
+                          "StatusRequest": "get_data_status"}
+        for example in examples["requests"]:
+            tool = tool_by_schema[example["schema"]]
+            self._assert_schema(tool, "inputSchema", example["payload"], True)
+
+    def test_acceptance_c03_request_accepted(self):
+        request = {**BASE_ARGS, "codes": [
+            "XSHG/equity/exchange/603516", "XSHE/equity/exchange/000967",
+            "XSHE/equity/exchange/002328", "XSHE/equity/exchange/002600",
+            "XSHE/etf/exchange/159915"]}
+        self._assert_schema("get_kline", "inputSchema", request, True)
+
+    def test_legacy_inputs_accepted(self):
+        """旧版输入（无 contract_version）仍匹配旧分支，不受 v3 收紧影响。"""
+        self._assert_schema("get_kline", "inputSchema",
+                            {"code": "600633", "frequency": "1d",
+                             "start": "20260620"}, True)
+        self._assert_schema("get_kline", "inputSchema",
+                            {"codes": ["600633", "000001"],
+                             "fields": "close,volume", "limit": 10}, True)
+        self._assert_schema("get_stock_list", "inputSchema", {}, True)
+        self._assert_schema("get_trading_days", "inputSchema",
+                            {"start": "20260101"}, True)
+        self._assert_schema("get_data_status", "inputSchema", {}, True)
+
+    def test_real_v3_outputs_accepted(self):
+        """真实生成的 v3 信封（完整/部分/失败/工具失败/清单/日历/状态）
+        对各自发布 outputSchema 全部合法。"""
+        envelopes = {
+            "get_kline": [self.kline(codes=[EQUITY_KEY, ETF_KEY]),
+                          self.kline(codes=[EQUITY_KEY, ONEDAY_KEY]),
+                          self.kline(codes=[EMPTY_KEY]),
+                          v3.tool_failure([v3.V3Error("AMBIGUOUS_INSTRUMENT",
+                                                       "x")])],
+            "get_stock_list": [v3.get_stock_list_v3({
+                "contract_version": "stockdb-market-v3",
+                "asset_types": ["equity"], "exchanges": ["XSHE"],
+                "as_of": LATEST})],
+            "get_trading_days": [v3.get_trading_days_v3({
+                "contract_version": "stockdb-market-v3", "exchange": "XSHE",
+                "start": "20261020", "end": "20261023"})],
+            "get_data_status": [v3.get_data_status_v3(
+                {"contract_version": "stockdb-market-v3"})],
+        }
+        for tool, items in envelopes.items():
+            for env in items:
+                self._assert_schema(tool, "outputSchema", env, True)
+
+    def test_legacy_envelope_accepted(self):
+        """旧版 8 键 envelope（无 contract_version）仍匹配旧分支。"""
+        legacy = {"source": "http", "known_at": None, "is_partial": False,
+                  "truncated": False, "total": 4, "errors": [],
+                  "known_limitations": [], "code": "002600", "data": []}
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            self._assert_schema(tool, "outputSchema", legacy, True)
+
+    # --- 发布内容与冻结合同的一致性 ---
+
+    def test_published_defs_equal_contract_defs(self):
+        """嵌入 $defs 与冻结合同文件逐字节一致（程序化抽取，防漂移）。"""
+        contract = json.loads((_MCP_DIR / "contract" / "contract.schema.json")
+                              .read_text(encoding="utf-8"))
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            for kind in ("inputSchema", "outputSchema"):
+                for name, defn in self._schema(tool, kind).get("$defs", {}).items():
+                    if name == "LegacyToolResult":
+                        continue
+                    self.assertEqual(
+                        defn, contract["$defs"][name],
+                        f"{tool}.{kind} 的 def {name} 与合同定义不一致")
+
+    def test_603516_example_exchange_fixed(self):
+        """FEEDBACK §4.2：603516 是上交所代码，示例不得再写 XSHE。"""
+        entry = next(t for t in server.TOOLS if t["name"] == "get_kline")
+        self.assertIn("XSHG/equity/exchange/603516", entry["description"])
+        self.assertNotIn("XSHE/equity/exchange/603516", entry["description"])
+
+    def test_legacy_branch_excludes_contract_version(self):
+        """四个发布 schema 的旧分支都带 not:required[contract_version]。"""
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            legacy_branches = [
+                b for b in self._schema(tool, "inputSchema")["anyOf"]
+                if "not" in b]
+            self.assertTrue(legacy_branches, tool)
+            self.assertIn("required", legacy_branches[0]["not"])
+            self.assertEqual(legacy_branches[0]["not"]["required"],
+                             ["contract_version"])
 
 
 @unittest.skipUnless(os.environ.get("STOCKDB_V3_LIVE") == "1",

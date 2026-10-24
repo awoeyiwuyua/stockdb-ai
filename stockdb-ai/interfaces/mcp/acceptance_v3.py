@@ -125,6 +125,82 @@ def _validate_or_note(env, kind="KlineResponse"):
 # stub 模式断言（错误/覆盖/故障/快照/并发）
 # ---------------------------------------------------------------------------
 
+def _schema_matrix_checks(c: Case, schemas_by_tool: dict[str, dict]) -> None:
+    """C01 发现 schema 正反例矩阵（FEEDBACK 2026-10-24 反例原文 + 正例）。
+
+    schemas_by_tool: {tool: {"inputSchema":…, "outputSchema":…}}——
+    stub 模式取自 server.TOOLS，nas 模式取自部署端点导出的 tools/list。
+    """
+    import jsonschema
+    from jsonschema import Draft202012Validator
+
+    def verdict(tool, kind, instance):
+        errors = list(Draft202012Validator(
+            schemas_by_tool[tool][kind]).iter_errors(instance))
+        return not errors
+
+    bad_output = {"contract_version": "stockdb-market-v3",
+                  "status": "complete", "data": "wrong"}
+    rejected = all(not verdict(tool, "outputSchema", bad_output)
+                   for tool in schemas_by_tool)
+    c.check("FEEDBACK §4.1 反例：非法 v3 对象被四个 outputSchema 全部拒绝",
+            rejected,
+            "bad_output={contract_version,status:complete,data:'wrong'} → "
+            f"rejected={rejected}（0.13.0 时四工具均接受，已修复）")
+
+    bad_inputs = [
+        ("code+codes 同时传入", {"contract_version": "stockdb-market-v3",
+                                 "codes": ["XSHE/equity/exchange/002600"],
+                                 "code": "XSHE/equity/exchange/002600",
+                                 "frequency": "1d", "start": "20261020",
+                                 "end": "20261023", "fq": "none", "limit": 0}),
+        ("fields=123", {"contract_version": "stockdb-market-v3",
+                        "codes": ["XSHE/equity/exchange/002600"],
+                        "frequency": "1d", "start": "20261020",
+                        "end": "20261023", "fq": "none", "limit": 0,
+                        "fields": 123}),
+        ("缺必填 end", {"contract_version": "stockdb-market-v3",
+                        "codes": ["XSHE/equity/exchange/002600"],
+                        "frequency": "1d", "start": "20261020",
+                        "fq": "none", "limit": 0}),
+        ("limit=true（对照）", {"contract_version": "stockdb-market-v3",
+                              "codes": ["XSHE/equity/exchange/002600"],
+                              "frequency": "1d", "start": "20261020",
+                              "end": "20261023", "fq": "none", "limit": True}),
+    ]
+    for name, bad in bad_inputs:
+        ok = not verdict("get_kline", "inputSchema", bad)
+        c.check(f"FEEDBACK §4.2 反例：{name} 被 inputSchema 拒绝", ok,
+                f"rejected={ok}")
+
+    # 正例：合同 examples.json 请求 + 旧版输入仍接受
+    examples = json.loads((_MCP_DIR / "contract" / "examples.json")
+                          .read_text(encoding="utf-8"))
+    tool_by_schema = {"KlineRequest": "get_kline",
+                      "StockListRequest": "get_stock_list",
+                      "TradingDaysRequest": "get_trading_days",
+                      "StatusRequest": "get_data_status"}
+    accepted = all(verdict(tool_by_schema[e["schema"]], "inputSchema",
+                           e["payload"])
+                   for e in examples["requests"])
+    c.check("正例：合同 examples.json 7 请求对发布 inputSchema 全部合法",
+            accepted, f"accepted={accepted}")
+    legacy_ok = (verdict("get_kline", "inputSchema",
+                         {"code": "600633", "frequency": "1d",
+                          "start": "20260620"})
+                 and verdict("get_data_status", "inputSchema", {}))
+    c.check("正例：旧版输入（无 contract_version）仍匹配旧分支", legacy_ok,
+            f"accepted={legacy_ok}")
+
+    # 旧分支排除 contract_version（结构断言）
+    excludes = all(
+        any("not" in b and b["not"].get("required") == ["contract_version"]
+            for b in schemas_by_tool[tool]["inputSchema"]["anyOf"])
+        for tool in schemas_by_tool)
+    c.check("结构：四个 inputSchema 旧分支均排除 contract_version", excludes,
+            f"excludes={excludes}")
+
+
 @_with_stubs
 def run_stub(cases: dict[str, Case]) -> None:
     # C02 参数边界
@@ -377,6 +453,26 @@ def run_stub(cases: dict[str, Case]) -> None:
     c.check("fq never substituted by none silently",
             env["errors"][0]["code"] == "UNSUPPORTED_ADJUSTMENT",
             f"code={env['errors'][0]['code']}")
+
+    # C01（0.13.1 修补）：实际发布 schema 的正反例矩阵（FEEDBACK 反例原文）
+    c = cases["C01"]
+    schemas_by_tool = {
+        tool: {"inputSchema": entry["inputSchema"],
+               "outputSchema": entry["outputSchema"]}
+        for tool, entry in ((t["name"], t) for t in server.TOOLS)
+        if tool in ("get_kline", "get_stock_list", "get_trading_days",
+                    "get_data_status")}
+    _schema_matrix_checks(c, schemas_by_tool)
+    contract = json.loads((_MCP_DIR / "contract" / "contract.schema.json")
+                          .read_text(encoding="utf-8"))
+    defs_equal = all(
+        defn == contract["$defs"][name]
+        for tool_schemas in schemas_by_tool.values()
+        for kind in ("inputSchema", "outputSchema")
+        for name, defn in tool_schemas[kind].get("$defs", {}).items()
+        if name != "LegacyToolResult")
+    c.check("发布 $defs 与冻结合同逐定义一致（程序化抽取）", defs_equal,
+            f"defs_equal={defs_equal}")
 
     # X01—X05 拒绝声明
     x = cases["X01"]
@@ -637,6 +733,26 @@ def run_nas(cases: dict[str, Case], url: str) -> None:
             empty_runs += 1
     c.check("legacy-defect regression: 20× batch, zero silent-empty runs",
             empty_runs == 0, f"empty_runs={empty_runs}/20")
+
+    # C01（0.13.1 修补后复验）：部署端点导出的 tools/list 跑 FEEDBACK 正反例
+    c = cases["C01"]
+    deployed_tools = {t["name"]: t for t in tools}
+    deployed_schemas = {
+        tool: {"inputSchema": deployed_tools[tool]["inputSchema"],
+               "outputSchema": deployed_tools[tool]["outputSchema"]}
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status")}
+    _schema_matrix_checks(c, deployed_schemas)
+    contract = json.loads((_MCP_DIR / "contract" / "contract.schema.json")
+                          .read_text(encoding="utf-8"))
+    defs_equal = all(
+        defn == contract["$defs"][name]
+        for tool_schemas in deployed_schemas.values()
+        for kind in ("inputSchema", "outputSchema")
+        for name, defn in tool_schemas[kind].get("$defs", {}).items()
+        if name != "LegacyToolResult")
+    c.check("部署端点 $defs 与冻结合同逐定义一致", defs_equal,
+            f"defs_equal={defs_equal}")
 
     c = cases["C20"]
     sse = _http_call(url, "tools/call", {

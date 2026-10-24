@@ -135,7 +135,36 @@ try:  # noqa: E402
 except Exception as _v3_import_exc:  # noqa: BLE001
     market_v3 = None  # type: ignore[assignment]
     print(f"stockdb_mcp_server: market_v3 加载失败（v3 分支不可用）: {_v3_import_exc}",
-          file=sys.stderr)  # type: ignore[assignment]
+          file=sys.stderr)
+
+# 0.13.1（C01 修补）：四个首批工具实际发布的 input/output schema。v3 分支 =
+# 冻结合同 Request/Response 定义**原文**（market_v3 从 contract/contract.schema.json
+# 程序化抽取 $defs 闭包嵌入）；旧版分支仅匹配未携带 contract_version 的请求/输出。
+# 消费方复核（FEEDBACK 2026-10-24 §4）实证 0.13.0 的宽泛旧分支会吞掉非法 v3
+# 对象、inputSchema 缺 required/互斥——本装配生成的 schema 由
+# test_market_v3.PublishedSchemaTest 以消费方反例原文锁定回归。
+_PUBLISHED_TOOL_SCHEMAS: dict = (market_v3.published_tool_schemas()
+                                 if market_v3 is not None else {})
+
+
+def _published_input_schema(tool: str, legacy_fallback: dict) -> dict:
+    """tools/list 的 inputSchema：优先 v3+旧版 anyOf；market_v3 缺失时退回
+    旧版-only schema（v3 分发本身不受影响）。"""
+    entry = _PUBLISHED_TOOL_SCHEMAS.get(tool) or {}
+    return entry.get("inputSchema", legacy_fallback)
+
+
+def _published_output_schema(tool: str) -> dict:
+    """tools/list 的 outputSchema；退化为仅旧版 envelope 校验的降级形态。"""
+    entry = _PUBLISHED_TOOL_SCHEMAS.get(tool) or {}
+    published = entry.get("outputSchema")
+    if published is not None:
+        return published
+    if market_v3 is not None:  # 降级：仅旧版 envelope 校验
+        return {"$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {"LegacyToolResult": market_v3._LEGACY_RESULT_DEF},
+                "$ref": "#/$defs/LegacyToolResult"}
+    return {"type": "object"}  # type: ignore[assignment]
 
 _WAREHOUSE_HINT = (
     "仓库层（DuckDB+Parquet）不可用：本机需 uv sync 安装 duckdb；"
@@ -2340,127 +2369,38 @@ TOOLS: list[dict] = [
             "fq复权(qfq/hfq)、批量codes需pybao(容器镜像自动携带)，不可用时返回明确降级错误。"
             "fields为逗号分隔投影字段。limit>0时只保留最新limit行并标记truncated。"
             "v3（显式 contract_version=stockdb-market-v3）：code/codes 用规范证券键"
-            "（如 XSHE/equity/exchange/002600），start/end/frequency/fq 必填，fields 为数组，"
+            "（如 XSHG/equity/exchange/603516 或 XSHE/equity/exchange/002600），"
+            "start/end/frequency/fq 必填，fields 为数组，"
             "limit 为每证券最新 N 行；返回统一信封（data/meta/coverage/来源/哈希/快照）。"
             "首批能力：XSHG/XSHE × equity/etf × 1d × none（未复权日K）。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "contract_version": {
-                    "type": "string",
-                    "description": (
-                        "显式选择合同版本。stockdb-market-v3 = v3 分支（规范证券键、"
-                        "统一信封、快照/来源/哈希）；缺省 = 旧版行为。其他值返回 "
-                        "UNSUPPORTED_CONTRACT。"
-                    ),
+        "inputSchema": _published_input_schema(
+            "get_kline",
+            {  # market_v3 缺失时的旧版-only 退路（与 0.12.x 发布形态一致）
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "6 位股票代码，如 600633（与 codes 二选一）"},
+                    "codes": {"type": "array", "items": {"type": "string"},
+                              "description": "批量股票代码列表，最多 50 个（与 code 二选一；需 pybao SDK）"},
+                    "frequency": {"type": "string",
+                                  "enum": ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"],
+                                  "description": "K 线周期；1d=日K，5m/15m/30m/60m=分钟K，1m/1w/1M 需 pybao SDK",
+                                  "default": "1d"},
+                    "fq": {"type": "string", "enum": ["none", "qfq", "hfq"],
+                           "description": "复权方式；none=不复权(默认)（需 pybao SDK）",
+                           "default": "none"},
+                    "limit": {"type": "integer", "minimum": 0,
+                              "description": "最多返回行数；0=不截断（默认）", "default": 0},
+                    "start": {"type": "string",
+                              "description": "日K：8位起始日期(如 20260620)；分钟K：14位时间戳(如 20260625145200)"},
+                    "end": {"type": "string",
+                            "description": "日K 结束日期(可选；与 start 构成闭区间 [start, end]，含端点)"},
+                    "fields": {"type": "string", "description": "投影字段，逗号分隔（可选）"},
                 },
-                "code": {
-                    "type": "string",
-                    "description": (
-                        "旧版：6 位股票代码，如 600633（与 codes 二选一）。"
-                        "v3：规范证券键，如 XSHE/equity/exchange/603516（与 codes 二选一）。"
-                    ),
-                },
-                "codes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "批量查询（与 code 二选一）。旧版：最多 50 个 6 位代码（需 pybao SDK）。"
-                        "v3：最多 50 个唯一规范证券键（无需 pybao）。"
-                    ),
-                },
-                "frequency": {
-                    "type": "string",
-                    "enum": ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"],
-                    "description": (
-                        "K 线周期；1d=日K，5m/15m/30m/60m=分钟K，1m/1w/1M 需 pybao SDK"
-                        "（旧版）。v3：首批仅 1d，其余周期明确拒绝（UNSUPPORTED_FREQUENCY）。"
-                    ),
-                    "default": "1d",
-                },
-                "fq": {
-                    "type": "string",
-                    "enum": ["none", "qfq", "hfq"],
-                    "description": (
-                        "复权方式；none=不复权。旧版默认 none；v3 必填，且首批仅 none"
-                        "（qfq/hfq 返回 UNSUPPORTED_ADJUSTMENT）。"
-                    ),
-                    "default": "none",
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": (
-                        "旧版：最多返回行数。v3：每个证券最多返回的行数；0=不截断"
-                        "（默认），正数取区间内最新 N 行（仍按时间升序）。"
-                    ),
-                    "default": 0,
-                },
-                "start": {
-                    "type": "string",
-                    "description": (
-                        "日K：8位起始日期(如 20260620)；分钟K：14位时间戳。"
-                        "v3：必填，真实 YYYYMMDD，闭区间。"
-                    ),
-                },
-                "end": {
-                    "type": "string",
-                    "description": (
-                        "日K 结束日期；与 start 构成闭区间 [start, end]（含端点）。"
-                        "v3：必填。"
-                    ),
-                },
-                "fields": {
-                    "description": (
-                        "投影字段。旧版：逗号分隔字符串。v3：字符串数组（仅 "
-                        "open/high/low/close/volume/amount，缺省全部六字段）。"
-                    ),
-                },
-                "snapshot_id": {
-                    "type": "string",
-                    "description": "v3：重读已捕获快照（子集证券/区间/投影）；缺省创建新快照。",
-                },
-                "adjustment_anchor": {
-                    "type": "string",
-                    "description": "v3 预留：fq 非 none 时必填（adjusted_history_v1 未验收）。",
-                },
-                "factor_snapshot_id": {
-                    "type": "string",
-                    "description": "v3 预留：fq 非 none 时必填（adjusted_history_v1 未验收）。",
-                },
+                "required": [],
             },
-            "required": [],
-        },
-        "outputSchema": {
-            "anyOf": [
-                {
-                    "type": "object",
-                    "description": "旧版（无 contract_version）：8 键 envelope + 工具字段（不经 outputSchema 校验 structuredContent 时忽略）。",
-                },
-                {
-                    "type": "object",
-                    "description": "v3（stockdb-market-v3 修订 3.0.0）KlineResponse/ToolFailureResponse；完整 schema 见 interfaces/mcp/contract/contract.schema.json。",
-                    "required": ["contract_version", "contract_revision",
-                                "server_version", "server_build_id",
-                                "request_id", "served_at", "snapshot_id",
-                                "snapshot_expires_at", "status", "is_partial",
-                                "truncated", "errors", "source_catalog",
-                                "data_hash", "query", "request_hash",
-                                "data", "meta"],
-                    "properties": {
-                        "contract_version": {"const": "stockdb-market-v3"},
-                        "contract_revision": {"const": "3.0.0"},
-                        "status": {"enum": ["complete", "partial", "failed"]},
-                        "is_partial": {"type": "boolean"},
-                        "truncated": {"type": "boolean"},
-                        "errors": {"type": "array"},
-                        "data": {"type": "object"},
-                        "meta": {"type": "object"},
-                    },
-                },
-            ],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_kline"),
     },
     {
         "name": "get_stock_list",
@@ -2470,52 +2410,11 @@ TOOLS: list[dict] = [
             "必填 asset_types/exchanges/as_of，返回 instrument 对象数组（规范键、身份核验、"
             "来源与快照）；as_of 必须是当前观察清单的有效交易日（历史清单未支持）。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "contract_version": {
-                    "type": "string",
-                    "description": "显式选择 stockdb-market-v3 分支；缺省 = 旧版 {total, codes}。",
-                },
-                "asset_types": {
-                    "type": "array",
-                    "items": {"enum": ["equity", "etf", "index", "board"]},
-                    "description": "v3：非空唯一资产类型数组（首批支持 equity/etf）。",
-                },
-                "exchanges": {
-                    "type": "array",
-                    "items": {"enum": ["XSHG", "XSHE", "XBSE", "CN"]},
-                    "description": "v3：非空唯一交易所数组（首批支持 XSHG/XSHE）。",
-                },
-                "as_of": {
-                    "type": "string",
-                    "description": "v3：YYYYMMDD；必须是本清单观察日期（引擎最新交易日）。",
-                },
-                "snapshot_id": {
-                    "type": "string",
-                    "description": "v3：重读已捕获清单快照。",
-                },
-            },
-            "required": [],
-        },
-        "outputSchema": {
-            "anyOf": [
-                {"type": "object", "description": "旧版：{total, codes} + envelope。"},
-                {
-                    "type": "object",
-                    "description": "v3 StockListResponse；完整 schema 见 contract/contract.schema.json。",
-                    "required": ["contract_version", "contract_revision", "status",
-                                "is_partial", "truncated", "errors", "scope",
-                                "as_of_type", "data", "total", "universe_complete",
-                                "data_hash"],
-                    "properties": {
-                        "contract_version": {"const": "stockdb-market-v3"},
-                        "contract_revision": {"const": "3.0.0"},
-                        "status": {"enum": ["complete", "partial", "failed"]},
-                    },
-                },
-            ],
-        },
+        "inputSchema": _published_input_schema(
+            "get_stock_list",
+            {"type": "object", "properties": {}},
+        ),
+        "outputSchema": _published_output_schema("get_stock_list"),
     },
     {
         "name": "get_adjust_factors",
@@ -2819,57 +2718,21 @@ TOOLS: list[dict] = [
             "exchange/start/end 必填（闭区间），无调用方 limit（旧 400 日硬上限不截断 v3），"
             "返回升序唯一 ISO 日期 + 日历身份/版本/已核实边界 + 快照；范围越界报 OUT_OF_CALENDAR。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "contract_version": {
-                    "type": "string",
-                    "description": "显式选择 stockdb-market-v3 分支；缺省 = 旧版行为。",
+        "inputSchema": _published_input_schema(
+            "get_trading_days",
+            {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string", "description": "8位起始日期（含）"},
+                    "end": {"type": "string",
+                            "description": "8位结束日期（含）；缺省=start 后 90 个自然日"},
+                    "limit": {"type": "integer", "default": 60,
+                              "description": "返回上限（硬上限400，超出截断）"},
                 },
-                "exchange": {
-                    "type": "string",
-                    "enum": ["XSHG", "XSHE", "XBSE"],
-                    "description": "v3：必填（XSHE/XBSE 使用 XSHG 休市表，等价性已在响应声明）。",
-                },
-                "start": {
-                    "type": "string",
-                    "description": "8位起始日期（含）；v3 必填且不得超出已核实日历边界。",
-                },
-                "end": {
-                    "type": "string",
-                    "description": "8位结束日期（含）；旧版缺省=start 后 90 个自然日，v3 必填。",
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 60,
-                    "description": "旧版：返回上限（硬上限400，超出截断）。v3：不接受（无调用方 limit）。",
-                },
-                "snapshot_id": {
-                    "type": "string",
-                    "description": "v3：重读已捕获日历快照（相同 exchange/start/end）。",
-                },
+                "required": ["start"],
             },
-            "required": ["start"],
-        },
-        "outputSchema": {
-            "anyOf": [
-                {"type": "object", "description": "旧版：{trading_days, count, truncated, ...}。"},
-                {
-                    "type": "object",
-                    "description": "v3 TradingDaysResponse；完整 schema 见 contract/contract.schema.json。",
-                    "required": ["contract_version", "contract_revision", "status",
-                                 "is_partial", "truncated", "errors", "exchange",
-                                 "start", "end", "trading_days", "calendar_id",
-                                 "calendar_version", "coverage_start",
-                                 "coverage_end", "data_hash"],
-                    "properties": {
-                        "contract_version": {"const": "stockdb-market-v3"},
-                        "contract_revision": {"const": "3.0.0"},
-                        "status": {"enum": ["complete", "partial", "failed"]},
-                    },
-                },
-            ],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_trading_days"),
     },
     {
         "name": "get_data_status",
@@ -2882,34 +2745,11 @@ TOOLS: list[dict] = [
             "snapshot_retention_seconds）、legacy（default_contract=v2, sunset_at=null）。"
             "状态只读有界缓存，不现查上游。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "contract_version": {
-                    "type": "string",
-                    "description": "显式选择 stockdb-market-v3 分支；缺省 = 旧版摘要。",
-                },
-            },
-            "required": [],
-        },
-        "outputSchema": {
-            "anyOf": [
-                {"type": "object", "description": "旧版：{latest_trade_date, lag_days, ...} + envelope。"},
-                {
-                    "type": "object",
-                    "description": "v3 StatusResponse；完整 schema 见 contract/contract.schema.json。",
-                    "required": ["contract_version", "contract_revision",
-                                 "protocol_versions", "contract_versions",
-                                 "server", "status", "checked_at", "profiles",
-                                 "issues", "limits", "legacy", "data_status"],
-                    "properties": {
-                        "contract_version": {"const": "stockdb-market-v3"},
-                        "contract_revision": {"const": "3.0.0"},
-                        "status": {"enum": ["ready", "degraded", "unavailable"]},
-                    },
-                },
-            ],
-        },
+        "inputSchema": _published_input_schema(
+            "get_data_status",
+            {"type": "object", "properties": {}},
+        ),
+        "outputSchema": _published_output_schema("get_data_status"),
     },
     {
         "name": "get_point_snapshot",
