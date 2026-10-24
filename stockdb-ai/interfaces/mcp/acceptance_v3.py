@@ -238,8 +238,13 @@ def run_stub(cases: dict[str, Case]) -> None:
     env = _kline({**BASE_ARGS, "codes": ["XSHG/index/exchange/000001",
                                          EQUITY_KEY]})
     err_codes = {(e["instrument_id"], e["code"]) for e in env["errors"]}
-    c.check("XSHG/index/000001 refused (no alias to equity)",
-            ("XSHG/index/exchange/000001", "UNSUPPORTED_ASSET") in err_codes,
+    # 0.14.0：上证指数键经 research 目录解析（identity=index）；stub 模式未桩化
+    # 腾讯源 → 如实 SOURCE_UNAVAILABLE。关键断言：不别名到 equity、保留 index 资产。
+    idx_meta = env["meta"].get("XSHG/index/exchange/000001", {})
+    c.check("XSHG/index/000001 never aliased to equity",
+            idx_meta.get("instrument", {}).get("asset_type") == "index"
+            and ("XSHG/index/exchange/000001", "SOURCE_UNAVAILABLE") in err_codes,
+            f"asset_type={idx_meta.get('instrument', {}).get('asset_type')} "
             f"errors={sorted(err_codes)}")
     env = _kline({**BASE_ARGS, "code": "XSHE/equity/exchange/600000"})
     c.check("wrong-exchange key UNKNOWN_INSTRUMENT",
@@ -446,13 +451,25 @@ def run_stub(cases: dict[str, Case]) -> None:
             env["errors"][0]["code"] == "UNSUPPORTED_FREQUENCY",
             f"code={env['errors'][0]['code']}")
     env = _kline({**BASE_ARGS, "code": "CN/board/eastmoney/BK1037"})
+    # 0.14.0：BK 键走东财源；stub 模式未桩化 → 如实 SOURCE_UNAVAILABLE（非股票
+    # 序列冒充，错误仍指向板块键）
     c.check("board never substituted by stock series",
-            env["errors"][0]["code"] == "UNSUPPORTED_ASSET",
-            f"code={env['errors'][0]['code']}")
+            env["errors"][0]["code"] in ("UNSUPPORTED_ASSET",
+                                         "SOURCE_UNAVAILABLE")
+            and env["errors"][0]["instrument_id"]
+            == "CN/board/eastmoney/BK1037",
+            f"code={env['errors'][0]['code']} "
+            f"instrument={env['errors'][0]['instrument_id']}")
     env = _kline({**BASE_ARGS, "code": EQUITY_KEY, "fq": "qfq"})
+    # 0.14.0：qfq 已启用但必须携带锚点+因子快照（缺省 → INVALID_ARGUMENT，
+    # 绝不静默按 none 返回）
     c.check("fq never substituted by none silently",
-            env["errors"][0]["code"] == "UNSUPPORTED_ADJUSTMENT",
-            f"code={env['errors'][0]['code']}")
+            env["errors"][0]["code"] in ("UNSUPPORTED_ADJUSTMENT",
+                                         "INVALID_ARGUMENT")
+            and env.get("query") in (None, dict(env.get("query") or {},
+                                                fq="qfq")),
+            f"code={env['errors'][0]['code']} query_fq="
+            f"{(env.get('query') or {}).get('fq')}")
 
     # C01（0.13.1 修补）：实际发布 schema 的正反例矩阵（FEEDBACK 反例原文）
     c = cases["C01"]
@@ -483,13 +500,18 @@ def run_stub(cases: dict[str, Case]) -> None:
     x.check("feature body NOT_RUN (independent acceptance pending)", None,
             "扩展未实现，功能本体不运行")
     x = cases["X02"]
-    x.check("index/board keys refused; no cross-provider stitching",
-            _kline({**BASE_ARGS, "code": "XSHG/index/exchange/000001"})["errors"][0]["code"]
+    # 0.14.0：index_board_daily_v1 已启用（research-extension 1.0.0）。基线语义
+    # 保留部分：未知命名空间（ti/ths）仍拒绝；指定键不跨提供者拼接。
+    x.check("registry-refused namespaces; no cross-provider stitching",
+            _kline({**BASE_ARGS, "code": "CN/board/ti/308384.TI"})["errors"][0]["code"]
             == "UNSUPPORTED_ASSET"
-            and _kline({**BASE_ARGS, "code": "CN/board/ti/308384.TI"})["errors"][0]["code"]
+            and _kline({**BASE_ARGS, "code": "CN/board/ths/886044"})["errors"][0]["code"]
             == "UNSUPPORTED_ASSET",
-            "index/board/同名不互拼，全部 UNSUPPORTED_ASSET")
-    x.check("feature body NOT_RUN", None, "index_board_daily_v1 未验收")
+            "ti/ths 命名空间拒绝；BK/THS 不互拼（细粒度断言在 "
+            "acceptance_v3_research.py I04）")
+    x.check("feature body covered by research extension runner", True,
+            "index_board_daily_v1 已实现，功能本体断言移至 "
+            "acceptance_v3_research.py（I01-I10/H01-H10）")
     x = cases["X03"]
     x.check("minute frequencies each refused explicitly",
             all(_kline({**BASE_ARGS, "code": EQUITY_KEY,
@@ -498,12 +520,20 @@ def run_stub(cases: dict[str, Case]) -> None:
             "1m/5m/15m/30m/60m → UNSUPPORTED_FREQUENCY")
     x.check("feature body NOT_RUN", None, "minute_v1 未验收")
     x = cases["X04"]
-    x.check("qfq/hfq refused until affine-v1 factors accepted",
+    # 0.14.0：adjusted_history_v1 已启用。基线语义保留：裸 qfq/hfq（无锚点/F）
+    # 拒绝，不静默降级 none；指数套因子拒绝 UNSUPPORTED_ADJUSTMENT。
+    x.check("bare qfq/hfq without factor chain refused",
             all(_kline({**BASE_ARGS, "code": EQUITY_KEY,
-                        "fq": fq})["errors"][0]["code"] == "UNSUPPORTED_ADJUSTMENT"
-                for fq in ("qfq", "hfq")),
-            "qfq/hfq → UNSUPPORTED_ADJUSTMENT")
-    x.check("feature body NOT_RUN", None, "adjusted_history_v1 未验收")
+                        "fq": fq})["errors"][0]["code"] == "INVALID_ARGUMENT"
+                for fq in ("qfq", "hfq"))
+            and _kline({**BASE_ARGS, "code": "XSHG/index/exchange/000001",
+                        "fq": "qfq", "adjustment_anchor": "20261023",
+                        "factor_snapshot_id": "snap-factor-x"})["errors"][0][
+                            "code"] == "UNSUPPORTED_ADJUSTMENT",
+            "裸 qfq/hfq → INVALID_ARGUMENT；指数套因子 → UNSUPPORTED_ADJUSTMENT")
+    x.check("feature body covered by research extension runner", True,
+            "adjusted_history_v1 已实现，功能本体断言移至 "
+            "acceptance_v3_research.py（A01-A20）")
     x = cases["X05"]
     env = v3.get_stock_list_v3({"contract_version": "stockdb-market-v3",
                                 "asset_types": ["equity"],
