@@ -1,6 +1,0 @@
-{
- "compose": "# fnOS 本地构建部署（0.10.28：引擎 0.3.5，同步失败修复）：镜像 = 本机 docker build，不走 ghcr\nservices:\n  stockdb:\n    build:\n      args:\n        GIT_COMMIT: \"ed871e1\"\n      context: ./src\n      dockerfile: docker/Dockerfile\n    image: stockdb-ai:0.14.0\n    container_name: stockdb\n    restart: unless-stopped\n    ports:\n      - \"7899:7899\"\n      - \"8081:8080\"\n    volumes:\n      - ./data:/data\n      - ./mydb:/mydb\n    environment:\n      TZ: Asia/Shanghai\n      # 0.10.27 token 门禁：值来自同目录 .env（空 = 关闭）\n      WEBUI_TOKEN: ***REDACTED***\n      # 2026-10-20（上游 10-08 公告）：镜像页探针**不得**指向 a.123128.xyz\n      # （它 302 → dns.novapi.cc，而 novapi 已被禁止直接用于更新——会把源站拉满）。\n      # 官方更新入口 = http://ad.123128.xyz（见 docs/ops/runbook.md §2.8）\n      MIRROR_PAGE_URL: ${MIRROR_PAGE_URL:-http://ad.123128.xyz}\n    healthcheck:\n      test: [\"CMD-SHELL\", \"curl -fsS 'http://127.0.0.1:7899/?cmd=get&t=%E8%82%A1%E7%A5%A8%E4%BB%A3%E7%A0%81' >/dev/null 2>&1 || exit 1\"]\n      interval: 60s\n      timeout: 10s\n      retries: 5\n      start_period: 15s",
- "image": "sha256:e8b773f52c090b3c7469c9310061c820a5d1497d281ab47af3b2cc00cf9d1171 stockdb-ai:0.14.0 2026-10-24T20:59:56.19132468Z",
- "digest": "e8b773f52c09 2026-10-25 04:56:24 +0800 CST",
- "env-build": "IMAGE_TAG=0.3.5\nSTOCKDB_BUILD_COMMIT=ed871e1"
-}

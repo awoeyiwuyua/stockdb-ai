@@ -1,7 +1,0 @@
-{
- "cold_ms": 212,
- "hot_ms": 243,
- "status_p95_ms": 0.1,
- "cold_status": "complete",
- "rows": 1000
-}
