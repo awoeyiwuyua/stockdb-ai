@@ -1938,6 +1938,9 @@ def published_input_schema(tool: str) -> dict:
     request_def, legacy = _TOOL_REQUEST_DEFS[tool]
     return {
         "$schema": _DRAFT_SCHEMA,
+        # MCP 2025-06-18 Tool 定义要求 inputSchema 根节点显式 type=object
+        #（内部 $ref 指向 object 不足以替代该必填字段——FEEDBACK 1024 §3）
+        "type": "object",
         "anyOf": [
             {"$ref": f"#/$defs/{request_def}"},
             legacy,
@@ -1947,22 +1950,33 @@ def published_input_schema(tool: str) -> dict:
 
 
 def published_output_schema(tool: str) -> dict:
-    """tools/list 发布的 outputSchema：anyOf[旧版 envelope（无
-    contract_version），v3 合同 Response 定义原文 + 传递闭包 $defs]。
+    """tools/list 发布的 outputSchema：anyOf[v3 合同 Response 原文（+非kline
+    工具另加 ToolFailureResponse 联合分支）， 旧版 envelope（无
+    contract_version）]，各分支均为传递闭包 $defs 的自包含定义。
 
-    旧版分支带 not:required[contract_version]——任何声明 v3 的对象（含
-    ToolFailureResponse 形状的失败信封）都只能走完整合同校验，宽泛分支
-    不再吞掉非法 v3 输出（FEEDBACK §4.1 反例）。
+    - 旧版分支带 not:required[contract_version]——任何声明 v3 的对象都只能
+      走完整合同校验，宽泛分支不再吞掉非法 v3 输出（FEEDBACK 1024 §4.1）；
+    - 状态/清单/日历的统一失败信封（ToolFailureResponse）是合同 §4.3 要求的
+      合法输出，须被自身 schema 接受（FEEDBACK 1024 §2 的 3 例实测遗漏）；
+    - 根节点显式 type=object（MCP 2025-06-18 Tool 定义，FEEDBACK 1024 §3）。
     """
     response_def = _TOOL_RESPONSE_DEFS[tool]
     defs = _contract_defs_closure(response_def)
+    branches = [{"$ref": f"#/$defs/{response_def}"}]
+    # 合同 README §4.3：状态/清单/日历的 v3 输出必须接受各自正常 Response 与
+    # ToolFailureResponse 的联合；KlineResponse 自身已包含失败形状（对照项）。
+    # FEEDBACK 1024 §2 实证缺失该分支时，服务自己返回的合法失败信封会被
+    # 自己发布的 outputSchema 判非法（3 例实测）。
+    if response_def != "KlineResponse":
+        defs.update(_contract_defs_closure("ToolFailureResponse"))
+        branches.append({"$ref": "#/$defs/ToolFailureResponse"})
     defs["LegacyToolResult"] = _LEGACY_RESULT_DEF
+    branches.append({"$ref": "#/$defs/LegacyToolResult"})
     return {
         "$schema": _DRAFT_SCHEMA,
-        "anyOf": [
-            {"$ref": f"#/$defs/{response_def}"},
-            {"$ref": "#/$defs/LegacyToolResult"},
-        ],
+        # MCP 2025-06-18 Tool 定义要求 outputSchema 根节点显式 type=object
+        "type": "object",
+        "anyOf": branches,
         "$defs": defs,
     }
 

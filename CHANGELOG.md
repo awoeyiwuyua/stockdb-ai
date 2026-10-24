@@ -2,8 +2,30 @@
 
 > **本文件是版本流水账（每次改了什么、为什么改），不是运维知识库。**
 > 可复用的坑位/症状/判据/处置已归 [`docs/ops/runbook.md`](docs/ops/runbook.md)——
-> 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
+> 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
+
+## [0.13.2] — 2026-10-24（**C01 收尾：发布 schema 两处协议/兼容遗漏**——消费方复验 `stockdb-v3-schema-completion-20261024`）
+
+> 0.13.1 反例已全部修复，但消费方复验（FEEDBACK 1024）以 **46 项离线回归 +
+> 部署端点实测**确认 C01 仍差两处：① 状态/清单/日历的 outputSchema 未声明
+> `ToolFailureResponse` 联合分支——**服务自己返回的合法失败信封（如未知参数 →
+> INVALID_ARGUMENT 统一失败信封）被自己发布的 schema 判非法**（3 例实测，合同
+> README §4.3 明确要求联合）；② MCP 2025-06-18 Tool 定义要求 input/output
+> schema 根节点显式 `type:object`（当前只有 $schema/anyOf/$defs）。
+
+- **修补**（与消费方候选补丁 `proposed-published-schema-completion.patch` 语义一致，
+  保留中文文档注释）：`published_output_schema()` 为非kline三工具追加
+  `#/$defs/ToolFailureResponse` 分支（合并传递依赖闭包；KlineResponse 自身已含
+  失败形状为对照项）；两个发布 schema 生成器根节点显式 `type:"object"`。
+- **回归新增 4 项**（`PublishedSchemaTest`）：8 个发布 schema 根 type=object；
+  三个工具的真实失败信封（缺必填/未知参数/UNSUPPORTED_CONTRACT）被自身
+  outputSchema 接受；新增失败分支不吞坏 v3 输出（反例仍全拒）；$defs 覆盖
+  ToolFailureResponse 闭包。
+- **消费方验证器离线复跑**：`verify_published_schemas.py` 对本实现导出的
+  tools/list **46/46 通过**（0.13.1 基线 35/46；11 项失败=8 根 type + 3 合法失败）。
+- 部署后从实际端点重新导出 tools/list 复跑 46 项 + 三工具现场失败触发验证（见
+  部署台账与回交包）。
 
 ## [0.13.1] — 2026-10-24（**C01 修补：四个工具实际发布的 input/output schema 接上冻结合同**——消费方复核 FEEDBACK 2026-10-24 §4 实证 0.13.0 缺陷）
 

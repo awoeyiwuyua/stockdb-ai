@@ -1065,6 +1065,61 @@ class PublishedSchemaTest(V3TestCase):
         self.assertIn("XSHG/equity/exchange/603516", entry["description"])
         self.assertNotIn("XSHE/equity/exchange/603516", entry["description"])
 
+    def test_output_schema_root_type_object(self):
+        """FEEDBACK 1024 §3：MCP Tool 定义要求 input/output schema 根节点
+        显式 type=object（8 个发布 schema 全部检查）。"""
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            for kind in ("inputSchema", "outputSchema"):
+                self.assertEqual(self._schema(tool, kind).get("type"), "object",
+                                 f"{tool}.{kind} 根节点缺 type:object")
+
+    def test_legal_failure_envelopes_accepted_by_own_output_schema(self):
+        """FEEDBACK 1024 §2：状态/清单/日历的统一失败信封（ToolFailureResponse）
+        是合同 §4.3 要求的合法输出——服务自己返回的失败必须被自己发布的
+        outputSchema 接受（0.13.1 遗漏，3 例实测被自拒）。"""
+        failures = {
+            "get_stock_list": v3.get_stock_list_v3(
+                {"contract_version": "stockdb-market-v3"}),  # 缺必填 → 参数失败
+            "get_trading_days": v3.get_trading_days_v3(
+                {"contract_version": "stockdb-market-v3",
+                 "exchange": "XSHG", "start": "20261020"}),  # 缺 end
+            "get_data_status": v3.get_data_status_v3(
+                {"contract_version": "stockdb-market-v3",
+                 "unexpected_public_parameter": True}),  # 未知参数
+        }
+        for tool, envelope in failures.items():
+            self.assertEqual(envelope["status"], "failed", tool)
+            self.validate(envelope, "ToolFailureResponse")
+            self._assert_schema(tool, "outputSchema", envelope, True)
+        # UNSUPPORTED_CONTRACT（v3 分发层统一失败信封）同样必须被接受
+        result = v3.maybe_dispatch("get_stock_list", {
+            "contract_version": "stockdb-market-v4"})
+        for tool in ("get_stock_list", "get_trading_days", "get_data_status"):
+            self._assert_schema(tool, "outputSchema",
+                                result["structuredContent"], True)
+        # 对照：get_kline 的失败信封由 KlineResponse 分支覆盖（0.13.1 起即通过）
+        self._assert_schema("get_kline", "outputSchema",
+                            self.kline(code="000001"), True)
+
+    def test_failure_branch_does_not_swallow_malformed_v3(self):
+        """新增 ToolFailureResponse 分支不得重新放宽：坏 v3 输出仍被全拒。"""
+        for tool in ("get_kline", "get_stock_list", "get_trading_days",
+                     "get_data_status"):
+            self._assert_schema(tool, "outputSchema", self.BAD_OUTPUT, False)
+
+    def test_published_defs_cover_tool_failure_closure(self):
+        """非kline三工具的 $defs 含 ToolFailureResponse 及其传递依赖。"""
+        for tool in ("get_stock_list", "get_trading_days", "get_data_status"):
+            defs = self._schema(tool, "outputSchema")["$defs"]
+            self.assertIn("ToolFailureResponse", defs, tool)
+            # ToolFailureResponse 依赖 KlineResponse 全链（allOf $ref）
+            self.assertIn("KlineResponse", defs, tool)
+            self.assertIn("ResponseHeader", defs, tool)
+        # get_kline 无需显式 ToolFailureResponse 分支（KlineResponse 已含失败形状）
+        self.assertNotIn("ToolFailureResponse",
+                         self._schema("get_kline", "outputSchema")["$defs"])
+
     def test_legacy_branch_excludes_contract_version(self):
         """四个发布 schema 的旧分支都带 not:required[contract_version]。"""
         for tool in ("get_kline", "get_stock_list", "get_trading_days",
