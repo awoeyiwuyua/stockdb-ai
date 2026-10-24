@@ -476,13 +476,15 @@ def run_S(runner: Runner, latest: str | None) -> None:
                     for x in concurrent_results) and len(concurrent_results) == 4,
             f"cold={cold_ms:.0f}ms hot={hot_ms:.0f}ms concurrent={concurrent_results}")
     c.check("慢负载至少20次status本地p95<=2秒，失败后槽位恢复",
-            bool(slow_timings) and p95 <= 2000
-            and recovery.get("status") in ("complete", "partial"),
+            (bool(slow_timings) and p95 <= 2000
+             and recovery.get("status") in ("complete", "partial"))
+            if slow_timings else None,
             f"slow-inject p95={p95:.0f}ms over {len(slow_timings)} samples; "
             f"recovery={recovery.get('status')}"
             if slow_timings else
-            f"并发负载期间 {len(timings)} 次 status（无注入权限的 nas 轮："
-            f"p95 见 live 模式证据）")
+            f"NOT_RUN（nas 端无故障注入接口）：并发负载期间 {len(timings)} 次 "
+            f"status 正常；慢负载 p95 实测见 live 模式证据（s06-timing，"
+            f"同代码路径注入 20 次）")
 
     c = runner.case("S07")
     if runner.mode == "nas":
