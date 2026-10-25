@@ -87,7 +87,7 @@ FROM python:3.14-slim AS runtime-amd64
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tzdata curl bash libgcc-s1 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir duckdb==1.5.5
+    && pip install --no-cache-dir duckdb==1.5.5        requests pandas lxml py-mini-racer
 
 # ================= 运行时：arm64 保留 alpine(musl)，补 libgcc + libc.so 软链 =================
 FROM python:3.14-alpine AS runtime-arm64
