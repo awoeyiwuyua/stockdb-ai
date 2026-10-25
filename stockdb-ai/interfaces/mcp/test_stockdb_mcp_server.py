@@ -381,7 +381,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self.assertEqual(response["jsonrpc"], "2.0")
         self.assertEqual(response["id"], 1)
         tool_names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(tool_names), 16)  # 0.10.15：12 原生 + 4 warehouse（D12 + run）
+        self.assertEqual(len(tool_names), 18)  # 0.15.0：+2 astock public-facts
         self.assertIn("get_stock_list", tool_names)
         self.assertIn("warehouse_run_sql", tool_names)
         self.assertIn("get_board_open_effect_history", tool_names)
@@ -1446,7 +1446,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         payload = json.loads(response["result"]["content"][0]["text"])
         self.assertEqual(payload["latest_trade_date"], "20260813")
         self.assertFalse(payload["pybao_available"])
-        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
+        self.assertEqual(payload["tool_count"], 18)  # 0.15.0：+2 astock public-facts
 
     def test_get_data_status_ttl_dedup_single_http_round(self):
         with mock.patch.object(server, "_TTL", server._TTLCache()):
@@ -1930,7 +1930,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self._assert_envelope(
             payload, source="http", contract="status-v1", known_at="20260813",
         )
-        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
+        self.assertEqual(payload["tool_count"], 18)  # 0.15.0：+2 astock public-facts
         self.assertFalse(payload["pybao_available"])
 
     @mock.patch.object(server, "_latest_trade_date")
