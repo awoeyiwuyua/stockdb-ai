@@ -1852,6 +1852,33 @@ _CORE_CAPS_EXCEPTIONS = [
 ]
 
 
+def _astock_lifecycle_status() -> dict:
+    """astock 上游升级状态（只读缓存；UPGRADE-RELEASE §1 拟新增扩展名）。"""
+    import json as _json
+    from pathlib import Path as _Path
+    out: dict = {"extension_contract": "stockdb-astock-provider-lifecycle",
+                 "extension_revision": "1.0.0"}
+    try:
+        obs_path = (_Path(__file__).resolve().parents[2] / "astock"
+                    / "observations.json")
+        if obs_path.exists():
+            history = _json.loads(obs_path.read_text(encoding="utf-8"))
+            last_ok = next((o for o in reversed(history)
+                            if o.get("status") != "query_failed"), None)
+            out["last_discovery"] = history[-1] if history else None
+            out["last_successful_observation"] = last_ok
+        store = (_Path(__file__).resolve().parents[2] / "astock"
+                 / "lifecycle-store.json")
+        if store.exists():
+            st = _json.loads(store.read_text(encoding="utf-8"))
+            out["active_candidate"] = st.get("active")
+            out["candidates"] = {k: v.get("state") for k, v in
+                                 (st.get("candidates") or {}).items()}
+    except Exception:  # noqa: BLE001 - 状态只读失败不影响核心
+        pass
+    return out
+
+
 def get_data_status_v3(args: dict | None = None) -> dict:
     if args:
         extra = set(args) - {"contract_version"}
@@ -1950,6 +1977,8 @@ def get_data_status_v3(args: dict | None = None) -> dict:
             "notice": "core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用",
             "snapshot_store_size": SNAPSHOTS.size(),
             **({"research_v1": research.research_status_metadata()}
+               if research is not None else {}),
+            **({"astock_lifecycle_v1": _astock_lifecycle_status()}
                if research is not None else {}),
         },
     }

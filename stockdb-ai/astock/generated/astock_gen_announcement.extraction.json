@@ -1,0 +1,187 @@
+{
+ "schema_version": 1,
+ "vendor_root": "astock\\vendor\\candidate-main-02aa8b4d",
+ "upstream_commit": "02aa8b4d1316629e819cdc17a14297ca1a70edcd",
+ "source_file": "SKILL.md",
+ "source_file_sha256": "a774151626a5389b1eaf45d5d38f83314e96826bdf20fd25057fe4ca5bb6ccb8",
+ "vendor_tree_sha256": "78718f1e2734c5764756b3289835171349f601af2fe3832c7f15645da8b39d2a",
+ "entry_symbols": [
+  "cninfo_announcements",
+  "_cninfo_ts_to_date",
+  "_cninfo_orgid"
+ ],
+ "selected_blocks": [
+  {
+   "index": 1,
+   "sha256": "43a05af128a6f10cd14c3c8c59093a32e68454b33d27f9af5e72afe49d11fd45",
+   "symbols": [
+    "get_prefix"
+   ],
+   "imports": []
+  },
+  {
+   "index": 3,
+   "sha256": "9a045253336eba72b08f6c85cc52d612958e41e7f8e4fcc391d197d289e23e5a",
+   "symbols": [
+    "em_get",
+    "eastmoney_datacenter"
+   ],
+   "imports": [
+    "time",
+    "random",
+    "requests",
+    "typing"
+   ]
+  },
+  {
+   "index": 54,
+   "sha256": "46784647b7bf1d91e1dd3fa20cd1a5091c29733a93133bf9707d6e6f95cb3677",
+   "symbols": [
+    "_cninfo_ts_to_date",
+    "_cninfo_orgid",
+    "cninfo_announcements"
+   ],
+   "imports": [
+    "requests",
+    "datetime"
+   ]
+  }
+ ],
+ "initialization_allowlist": [
+  "Assign:EM_SESSION = requests.Session()",
+  "Expr:EM_SESSION.headers.update({'User-Agent': UA})",
+  "Try:",
+  "Assign:_em_last_call = [0.0]",
+  "Assign:V39_RETRY_SESSION = requests.Session()",
+  "FunctionDef+initializers:(10, 40); ()",
+  "FunctionDef+initializers:_v39_contract",
+  "Assign:_SSE_CN_TZ = _dt.timezone(_dt.timedelta(hours=8))"
+ ],
+ "initialization_nodes": [
+  {
+   "kind": "Assign",
+   "detail": "SH_INDEX = {'000300', '000905', '000016', '000688', '000852', '000010'}",
+   "lineno": "11",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "13",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "time",
+   "lineno": "32",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "random",
+   "lineno": "33",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "34",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'",
+   "lineno": "35",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "DATACENTER_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get'",
+   "lineno": "36",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_SESSION = requests.Session()",
+   "lineno": "37",
+   "safe": "false"
+  },
+  {
+   "kind": "Try",
+   "detail": "",
+   "lineno": "38",
+   "safe": "false"
+  },
+  {
+   "kind": "import",
+   "detail": "from typing",
+   "lineno": "46",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_MIN_INTERVAL = 1.0",
+   "lineno": "47",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_em_last_call = [0.0]",
+   "lineno": "48",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "50",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "61",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "70",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "from datetime",
+   "lineno": "71",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "73",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_CNINFO_ORGID_MAP = {}",
+   "lineno": "78",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "80",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "96",
+   "safe": "true"
+  }
+ ],
+ "generated_module": "astock_gen_announcement",
+ "generated_module_sha256": "143d2e0ab1da2831d710d3c433318b152487b72e9e5076341fc08f1ad5f2b1e0",
+ "third_party_imports": [
+  "requests"
+ ]
+}
