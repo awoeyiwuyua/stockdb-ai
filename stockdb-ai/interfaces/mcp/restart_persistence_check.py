@@ -133,9 +133,28 @@ def main():
         "fq": "none", "limit": 0,
         "snapshot_id": "snap-kline-doesnotexist"}, 8).get(
             "errors", [{}])[0].get("code") == "SNAPSHOT_NOT_FOUND"
+    # R3：重启后 A 重放响应过完整冻结扩展校验器（不只 hash/可读）
+    try:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "frozen_replay_contract",
+            Path(__file__).resolve().parents[2]
+            / ".tmp-fb3-20261025/stockdb-adjusted-replay-feedback"
+            / "contract" / "validate_contract.py")
+        _wire = _ilu.module_from_spec(_spec)
+        sys.modules["frozen_replay_contract"] = _wire
+        _spec.loader.exec_module(_wire)
+        _wire.validate(f2, "FactorResponse")
+        _wire.validate(r2, "KlineResponse")
+        _wire.validate(a2, "KlineResponse")
+        out["frozen_validator_accepts_replay"] = True
+    except Exception as exc:  # noqa: BLE001
+        out["frozen_validator_accepts_replay"] = False
+        out["frozen_validator_error"] = str(exc)[:200]
     out["all_ok"] = all([
         out["F_data_hash_same"], out["F_data_same"], out["R_data_hash_same"],
         out["R_data_same"], out["A_data_hash_same"], out["A_data_same"],
+        out.get("frozen_validator_accepts_replay", False),
         out["r_has_research_metadata"], out["r_catalog_equals_a_catalog"],
         out["R_catalog_same_after_restart"],
         out["source_retrieved_at_unchanged"],
