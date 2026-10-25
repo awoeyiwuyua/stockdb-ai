@@ -7,7 +7,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 URL = "http://192.168.50.146:8081/mcp"
 KEY = "XSHE/equity/exchange/002600"
@@ -138,7 +138,7 @@ def main():
         import importlib.util as _ilu
         _spec = _ilu.spec_from_file_location(
             "frozen_replay_contract",
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / ".tmp-fb3-20261025/stockdb-adjusted-replay-feedback"
             / "contract" / "validate_contract.py")
         _wire = _ilu.module_from_spec(_spec)
