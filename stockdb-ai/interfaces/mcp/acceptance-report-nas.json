@@ -2,8 +2,8 @@
   "contract_version": "stockdb-market-v3",
   "contract_revision": "3.0.0",
   "mode": "nas",
-  "generated_at": "2026-10-25T06:25:04+0800",
-  "server_version": "0.14.1",
+  "generated_at": "2026-10-25T11:18:40+0800",
+  "server_version": "0.14.2",
   "cases": [
     {
       "case_id": "C01",
@@ -13,7 +13,7 @@
         {
           "assertion": "initialize follows negotiated protocol; identity independent",
           "status": "PASS",
-          "evidence": "serverInfo={'name': 'stockdb-native', 'version': '0.14.1'}"
+          "evidence": "serverInfo={'name': 'stockdb-native', 'version': '0.14.2'}"
         },
         {
           "assertion": "tools/list matches real accepted inputs (v3 contract branch present)",
