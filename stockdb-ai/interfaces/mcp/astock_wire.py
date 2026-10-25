@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-SCHEMA_PATH = (Path(__file__).resolve().parents[3] / "stockdb-ai" / "astock"
+SCHEMA_PATH = (Path(__file__).resolve().parents[2] / "astock"
                / "vendor" / "public-facts.schema.json")
 _DRAFT = "https://json-schema.org/draft/2020-12/schema"
 
