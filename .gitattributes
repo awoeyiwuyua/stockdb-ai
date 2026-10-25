@@ -1,0 +1,4 @@
+# 合同机器件与脚本必须保持 LF（sha256 锁定；CRLF 会破坏 MANIFEST/校验/entrypoint）
+stockdb-ai/interfaces/mcp/contract/** -text
+*.sh -text
+entrypoint.sh -text
