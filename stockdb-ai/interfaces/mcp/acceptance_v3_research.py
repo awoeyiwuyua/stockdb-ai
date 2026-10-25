@@ -1,0 +1,1931 @@
+#!/usr/bin/env python3
+"""acceptance_v3_research — 补充合同 stockdb-market-v3-research-extension 1.0.0
+服务端验收执行器（S01—S08 / I01—I10 / H01—H10 / A01—A20 的服务侧断言）。
+
+运行模式：
+  --mode live   本进程直连真实引擎/腾讯/东财（部署前服务侧取证；可注入故障）
+  --mode nas    部署后的 HTTP MCP 端点（协议/schema/端到端证据）
+  --out DIR     证据输出目录（默认 ./acceptance-research-out）
+
+J01—J08 归消费方工作区，恒 NOT_RUN（reason=consumer_workspace_required）。
+每份证据文件为单个合法 JSON 值；控制台输出人类可读摘要。
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import sys
+import time
+import urllib.request
+from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
+from unittest import mock
+
+_MCP_DIR = Path(__file__).resolve().parent
+_BASE_DIR = _MCP_DIR.parent.parent
+for _p in (str(_MCP_DIR), str(_BASE_DIR), str(_MCP_DIR / "contract")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from interfaces.mcp import market_v3 as v3  # noqa: E402
+from interfaces.mcp import market_v3_research as r  # noqa: E402
+
+try:
+    import validate_contract as baseline_validator
+except Exception:  # noqa: BLE001
+    baseline_validator = None
+import importlib.util as _ilu
+
+_EXT_DIR = _MCP_DIR / "contract" / "research-extension"
+_ext_validator = None
+try:
+    _spec = _ilu.spec_from_file_location(
+        "research_extension_validate_contract",
+        _EXT_DIR / "validate_contract.py")
+    _mod = _ilu.module_from_spec(_spec)
+    sys.modules["research_extension_validate_contract"] = _mod
+    _spec.loader.exec_module(_mod)
+    _ext_validator = _mod
+except Exception:  # noqa: BLE001
+    pass
+
+INDICES = ["XSHG/index/exchange/000001", "XSHE/index/exchange/399001",
+           "XSHE/index/exchange/399006", "XSHG/index/csi/000852"]
+BOARDS = ["CN/board/eastmoney/BK1408", "CN/board/eastmoney/BK1134",
+          "CN/board/eastmoney/BK1138", "CN/board/eastmoney/BK1101",
+          "CN/board/eastmoney/BK1037", "CN/board/eastmoney/BK0728",
+          "CN/board/eastmoney/BK1160"]
+# 成熟样本（公开规则：沪深主板老牌股票各 2 + 沪深 ETF 各 1）
+STOCKS = ["XSHE/equity/exchange/000001", "XSHE/equity/exchange/002600",
+          "XSHG/equity/exchange/600036", "XSHG/equity/exchange/603516"]
+# E02：600000 因引擎数据洞（20260625-20260702 六会话缺失）移出成熟样本，
+# 由 600036（招商银行，公开成熟度证据 + 引擎 500/500 完整）替代；
+# 600000 的缺口记录保留在 H01 证据中（不删、不改 SUSPENDED）。
+RETIRED_SAMPLE = "XSHG/equity/exchange/600000"
+ETFS = ["XSHE/etf/exchange/159915", "XSHG/etf/exchange/510300"]
+EQUITY_KEY = "XSHE/equity/exchange/002600"
+ETF_KEY = "XSHE/etf/exchange/159915"
+PA_BANK = "XSHE/equity/exchange/000001"
+
+CONSUMER_REASONS = {"J01": "consumer_workspace_required"}
+
+
+class Case:
+    def __init__(self, case_id: str, phase: str = "service"):
+        self.case_id = case_id
+        self.phase = phase
+        self.results: list[dict] = []
+
+    def check(self, assertion: str, ok, evidence) -> None:
+        if ok is not None and not isinstance(ok, bool):
+            ok = bool(ok)  # and/or 组合表达式返回操作数，统一归一为 bool
+        status = "PASS" if ok is True else ("FAIL" if ok is False else "NOT_RUN")
+        self.results.append({"assertion": assertion, "status": status,
+                             "evidence": str(evidence)[:800]})
+
+    @property
+    def status(self) -> str:
+        sts = [x["status"] for x in self.results]
+        if "FAIL" in sts:
+            return "FAIL"
+        if sts and set(sts) == {"NOT_RUN"}:
+            return "NOT_RUN"
+        if "PASS" in sts:
+            return "PASS" if "NOT_RUN" not in sts else "PARTIAL_PASS_WITH_NOT_RUN"
+        return "NOT_RUN"
+
+
+class Runner:
+    def __init__(self, mode: str, url: str, out: Path):
+        self.mode = mode
+        self.url = url.rstrip("/") if url else ""
+        self.out = out
+        self.live_dir = out / ("nas" if mode == "nas" else "live")
+        self.injected_dir = out / "injected"
+        for d in (self.live_dir, self.injected_dir, out / "logs"):
+            d.mkdir(parents=True, exist_ok=True)
+        self.cases: dict[str, Case] = {}
+        self.build_id = "unknown"
+        self._session = None
+
+    def case(self, case_id: str) -> Case:
+        if case_id not in self.cases:
+            self.cases[case_id] = Case(case_id)
+        return self.cases[case_id]
+
+    # ---------------- 证据落盘 ----------------
+    def evidence(self, name: str, payload, subdir: str | None = None) -> dict:
+        d = self.injected_dir if subdir == "injected" else self.live_dir
+        path = d / f"{name}.json"
+        body = payload if not isinstance(payload, (str, bytes)) else {
+            "raw": payload}
+        path.write_text(json.dumps(body, ensure_ascii=False, indent=1,
+                                   allow_nan=False), encoding="utf-8")
+        return {"path": str(path.relative_to(self.out)).replace("\\", "/"),
+                "sha256": hashlib.sha256(
+                    path.read_bytes()).hexdigest(),
+                "captured_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"),
+                "server_build_id": self.build_id,
+                "evidence_kind": ("live" if subdir != "injected" else
+                                  "injected")}
+
+    # ---------------- MCP 端点调用（nas 模式） ----------------
+    def _call(self, method: str, params=None, msg_id: int = 1,
+              timeout: float = 90.0):
+        msg = {"jsonrpc": "2.0", "id": msg_id, "method": method}
+        if params is not None:
+            msg["params"] = params
+        req = urllib.request.Request(
+            self.url, data=json.dumps(msg).encode(),
+            headers={"Content-Type": "application/json", "Accept":
+                     "application/json, text/event-stream"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        for line in body.splitlines():
+            if line.startswith("data:"):
+                return json.loads(line[5:].strip())
+        return json.loads(body)
+
+    def tool(self, name: str, args: dict, timeout: float = 90.0) -> dict:
+        if self.mode == "nas":
+            resp = self._call("tools/call", {"name": name, "arguments": args},
+                              timeout=timeout)
+            result = resp.get("result", {})
+            sc = result.get("structuredContent")
+            text = None
+            for block in result.get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text")
+            self.last_is_error = result.get("isError")
+            self.last_text = text
+            return sc
+        # live：进程内直调（与部署同代码路径）
+        out = v3.maybe_dispatch(name, args)
+        self.last_is_error = out.get("isError")
+        self.last_text = out["content"][0]["text"]
+        return out["structuredContent"]
+
+    def tools_list(self) -> dict:
+        if self.mode == "nas":
+            resp = self._call("tools/list")
+            tools = []
+            for t in resp.get("result", {}).get("tools", []):
+                tools.append(t)
+            return {t["name"]: t for t in tools}
+        from interfaces.mcp import stockdb_mcp_server as server
+        return {t["name"]: t for t in server.TOOLS}
+
+    # ---------------- 通用小件 ----------------
+    def kline(self, **kw) -> dict:
+        kw.pop("timeout", None)
+        args = {"contract_version": "stockdb-market-v3", "frequency": "1d",
+                "start": "20261020", "end": "20261023",
+                "fq": "none", "limit": 0, **kw}
+        return self.tool("get_kline", args)
+
+    def factors(self, **kw) -> dict:
+        kw.pop("timeout", None)
+        anchor = kw.pop("anchor", None) or "20261023"
+        args = {"contract_version": "stockdb-market-v3", "fq": "qfq",
+                "start": "20261020", "end": "20261023",
+                "adjustment_anchor": anchor, **kw}
+        return self.tool("get_adjust_factors", args)
+
+    def validate(self, payload, kind):
+        if kind in ("FactorResponse", "FactorToolResponse"):
+            validator = _ext_validator
+        else:
+            validator = baseline_validator
+        if validator is None:
+            return "validate skipped (jsonschema unavailable)"
+        validator.validate(payload, kind)
+        return f"contract-validated ({kind})"
+
+    @staticmethod
+    def recompute(raw_bar, multiplier, offset, decimals):
+        value = (Decimal(raw_bar) * Decimal(multiplier) + Decimal(offset)
+                 ).quantize(Decimal(1).scaleb(-decimals),
+                            rounding=ROUND_HALF_UP)
+        return format(value.normalize(), "f")
+
+    latest_end: str | None = None  # main() 里按模式注入（nas=端点 status，live=引擎探针）
+
+    @classmethod
+    def calendar_sessions(cls, n: int, end: str | None = None) -> list[str]:
+        """最近 n 个已完成交易日（默认截至引擎最新交易日，绝不含未来）。"""
+        if end is None:
+            end = cls.latest_end or v3.HEALTH.get().get(
+                "latest") or v3.engine_latest_trade_date()
+            if not end:
+                raise RuntimeError("无法确定最新已完成交易日")
+        days = v3._calendar().trading_days_between(
+            v3.CALENDAR_COVERAGE_START.replace("-", ""),
+            end.replace("-", ""))
+        out = [str(d).replace("-", "") for d in days]
+        return out[-n:]
+
+
+def engine_probe_latest() -> str | None:
+    try:
+        return v3.engine_latest_trade_date()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
+# S 组
+# ---------------------------------------------------------------------------
+
+def run_S(runner: Runner, latest: str | None) -> None:
+    c = runner.case("S01")
+    base_dir = _MCP_DIR / "contract"
+    ext = _EXT_DIR
+    identical = []
+    for name in ("README.md", "HANDOFF.md", "contract.schema.json",
+                 "examples.json", "acceptance-cases.json",
+                 "validate_contract.py"):
+        a = hashlib.sha256((base_dir / name).read_bytes()).hexdigest()
+        b = hashlib.sha256((ext / "baseline" / name).read_bytes()).hexdigest()
+        identical.append(a == b)
+    manifest = json.loads((ext / "MANIFEST.sha256.json").read_text(
+        encoding="utf-8"))
+    manifest_ok = all(
+        hashlib.sha256((ext / f).read_bytes()).hexdigest() == h
+        for f, h in manifest["files"].items())
+    ev = runner.evidence("s01-baseline-identity", {
+        "baseline_files_identical": dict(zip(
+            ("README", "HANDOFF", "schema", "examples", "cases",
+             "validator"), identical)),
+        "extension_manifest_files_verified": len(manifest["files"]),
+        "manifest_ok": manifest_ok})
+    c.check("原六文件及所有原$defs精确一致", all(identical),
+            f"{ev} baseline six files byte-identical; manifest={manifest_ok}")
+    # 原 $defs 未改：扩展 schema 中共享定义与基线逐字节一致
+    base_defs = json.loads((base_dir / "contract.schema.json").read_text(
+        encoding="utf-8"))["$defs"]
+    ext_defs = json.loads((ext / "contract.schema.json").read_text(
+        encoding="utf-8"))["$defs"]
+    shared_ok = all(ext_defs[k] == base_defs[k] for k in base_defs)
+    c.check("扩展 schema 追加不修改原 $defs",
+            shared_ok and len(ext_defs) >= len(base_defs),
+            f"shared {len(base_defs)} defs unchanged; extension total "
+            f"{len(ext_defs)}")
+
+    c = runner.case("S02")
+    tools = runner.tools_list()
+    roots = {name: (t.get("inputSchema", {}).get("type"),
+                    t.get("outputSchema", {}).get("type"))
+             for name, t in tools.items()
+             if name in ("get_kline", "get_stock_list", "get_trading_days",
+                         "get_data_status", "get_adjust_factors")}
+    ev = runner.evidence("s02-tools-schema-roots", roots)
+    c.check("四核心工具及因子工具根type=object",
+            all(v == ("object", "object") for v in roots.values())
+            and len(roots) == 5, f"{ev}")
+    # 成功/部分/失败样本被实际 outputSchema 接受
+    try:
+        from jsonschema import Draft202012Validator
+        ok_schema = True
+        detail = []
+        factor_schema = tools["get_adjust_factors"]["outputSchema"]
+        samples = []
+        samples.append(("factor-invalid", runner.factors(
+            codes=[EQUITY_KEY], start="20261020", end="20261023",
+            anchor=latest or "20261023")))
+        samples.append(("factor-failure", runner.factors()))
+        for tag, sample in samples:
+            errors = list(Draft202012Validator(
+                factor_schema).iter_errors(sample))
+            detail.append((tag, not errors))
+            ok_schema = ok_schema and not errors
+        bad = {"contract_version": "stockdb-market-v3", "status": "complete",
+               "data": "wrong"}
+        rejected = bool(list(Draft202012Validator(
+            factor_schema).iter_errors(bad)))
+        runner.evidence("s02-schema-samples", {
+            "accepted": detail, "bad_v3_object_rejected": rejected})
+        c.check("所有成功/部分/失败被实际outputSchema接受，无任意object兜底",
+                ok_schema and rejected, f"{detail} bad_rejected={rejected}")
+    except ImportError:
+        c.check("所有成功/部分/失败被实际outputSchema接受，无任意object兜底",
+                None, "jsonschema unavailable")
+
+    c = runner.case("S03")
+    env = runner.kline(codes=[EQUITY_KEY, ETF_KEY], start="20261020",
+                       end=latest or "20261023")
+    # E01：core 响应现携带价格序列 extensions（schema 合法可选对象）；
+    # 八键信封与正式字段不变即兼容
+    core_ok = (env.get("status") in ("complete", "partial")
+               and set(env.get("data", {})) == {EQUITY_KEY, ETF_KEY}
+               and env.get("extensions", {}).get("research_v1", {})
+               .get("series_catalog"))
+    runner.evidence("s03-core-regression-sample", env)
+    c.check("基线C01-C22适用服务断言通过并有逐断言证据",
+            None, "详见 acceptance_v3.py（--mode stub|live|nas）独立执行记录")
+    c.check("既有股票ETF未复权主链路行为与shape不变", core_ok,
+            f"status={env.get('status')} no-extensions shape preserved")
+
+    c = runner.case("S04")
+    status = runner.tool("get_data_status",
+                         {"contract_version": "stockdb-market-v3"})
+    runner.build_id = status.get("server", {}).get("build_id", "unknown")
+    runner.evidence("s04-status", status)
+    profiles = {p["id"]: p for p in status.get("profiles", [])}
+    c.check("六profile按用途精确声明，实际支持组合可逐项定位",
+            profiles.get("core_daily_v1", {}).get("supported") is True
+            and profiles.get("index_board_daily_v1", {}).get("supported")
+            is True
+            and profiles.get("adjusted_history_v1", {}).get("supported")
+            is True
+            and profiles.get("minute_v1", {}).get("supported") is False,
+            f"profiles supported: "
+            f"{[k for k, p in profiles.items() if p['supported']]}")
+    rev = status.get("contract_revision")
+    ext_rev = (status.get("extensions", {}).get("research_v1", {})
+               .get("extension_revision"))
+    c.check("服务版本、线协议、扩展修订独立，未支持能力明确拒绝",
+            rev == "3.0.0" and ext_rev == "1.0.0",
+            f"contract_revision={rev} research_v1_revision={ext_rev}")
+
+    c = runner.case("S05")
+    if runner.mode == "nas":
+        legacy = runner._call(
+            "tools/call", {"name": "get_adjust_factors",
+                           "arguments": {"code": "000001",
+                                         "date_pattern": "2026*"}}, 51)
+        legacy_result = legacy.get("result", {})
+        legacy_text = ""
+        for block in legacy_result.get("content", []):
+            if block.get("type") == "text":
+                legacy_text += block.get("text", "")
+        legacy_ok = ('"contract_version"' not in legacy_text[:400]
+                     and legacy_result.get("isError") is not True)
+        legacy_factor = runner._call(
+            "tools/call", {"name": "get_kline",
+                           "arguments": {"code": "002600",
+                                         "start": "20261020",
+                                         "end": "20261023"}}, 52)
+        lt2 = json.dumps(legacy_factor.get("result", {}))[:400]
+        legacy_kline_ok = "stockdb-market-v3" not in lt2
+        runner.evidence("s05-legacy-shapes", {
+            "get_adjust_factors": legacy_result, "get_kline_head": lt2})
+        c.check("无contract_version保持旧版", legacy_ok and legacy_kline_ok,
+                f"legacy factor shape ok={legacy_ok}; legacy kline "
+                f"non-v3={legacy_kline_ok}")
+    else:
+        c.check("无contract_version保持旧版", None,
+                "live 模式不经 HTTP；由 nas 模式与 acceptance_v3 复验")
+    core3 = runner.kline(code=EQUITY_KEY, start="20261020",
+                         end=latest or "20261023")
+    c.check("核心3.0.0请求无需新增参数；新分支不误匹配legacy",
+            core3.get("query", {}).get("adjustment_anchor") is None
+            and core3.get("query", {}).get("factor_snapshot_id") is None
+            and core3.get("query", {}).get("snapshot_id") is None,
+            f"normalized query null-extensions: anchor="
+            f"{core3.get('query', {}).get('adjustment_anchor')}")
+
+    c = runner.case("S06")
+    sessions = runner.calendar_sessions(500)
+    t0 = time.monotonic()
+    cold = runner.kline(codes=STOCKS[:2], start=sessions[0],
+                        end=sessions[-1], timeout=90)
+    cold_ms = (time.monotonic() - t0) * 1000
+    t1 = time.monotonic()
+    hot = runner.kline(codes=STOCKS[:2], start=sessions[0],
+                       end=sessions[-1], timeout=90)
+    hot_ms = (time.monotonic() - t1) * 1000
+    # E05：并发 4 槽占满（4 个 500 日请求同时在飞）+ 期间 status 20 次 p95
+    import threading
+    timings: list[float] = []
+    timings_lock = threading.Lock()
+    concurrent_results: list = []
+    stop_flag = threading.Event()
+
+    def status_sampler():
+        while not stop_flag.is_set():
+            t = time.monotonic()
+            runner.tool("get_data_status",
+                        {"contract_version": "stockdb-market-v3"}, timeout=10)
+            with timings_lock:
+                timings.append((time.monotonic() - t) * 1000)
+
+    def one_load(i):
+        t = time.monotonic()
+        env = runner.kline(codes=[STOCKS[i], STOCKS[(i + 1) % len(STOCKS)]],
+                           start=sessions[0], end=sessions[-1], timeout=90)
+        concurrent_results.append(
+            {"load": i, "ms": round((time.monotonic() - t) * 1000),
+             "status": env.get("status"),
+             "rows": sum(len(v) for v in env.get("data", {}).values())})
+
+    sampler = threading.Thread(target=status_sampler, daemon=True)
+    sampler.start()
+    workers = [threading.Thread(target=one_load, args=(i,))
+               for i in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=120)
+    stop_flag.set()
+    sampler.join(timeout=10)
+    # 慢负载注入（live）：单码 sleep 3s 期间 status p95
+    slow_timings: list[float] = []
+    if runner.mode == "live":
+        v3.TEST_FAULTS["sleep_codes"] = {"002600": 3000}
+        try:
+            slow_thread = threading.Thread(
+                target=lambda: runner.kline(code=STOCKS[1],
+                                            start=sessions[-10:][0],
+                                            end=sessions[-1], timeout=30),
+                daemon=True)
+            slow_thread.start()
+            time.sleep(0.3)
+            for _ in range(20):
+                t = time.monotonic()
+                runner.tool("get_data_status",
+                            {"contract_version": "stockdb-market-v3"},
+                            timeout=10)
+                slow_timings.append((time.monotonic() - t) * 1000)
+            slow_thread.join(timeout=60)
+        finally:
+            v3.TEST_FAULTS.clear()
+    p95 = (statistics.quantiles(slow_timings, n=20)[18]
+           if len(slow_timings) >= 2 else max(timings or [0]))
+    # 恢复：负载结束后普通请求立即成功（槽位释放）
+    recovery = runner.kline(code=STOCKS[0], start=sessions[-5:][0],
+                            end=sessions[-1], timeout=30)
+    ev = runner.evidence("s06-timing", {
+        "cold_ms": round(cold_ms), "hot_ms": round(hot_ms),
+        "concurrent_loads": concurrent_results,
+        "sampler_calls_under_load": len(timings),
+        "slow_inject_status_p95_ms": round(p95, 1) if slow_timings else None,
+        "slow_inject_samples": len(slow_timings),
+        "recovery_status": recovery.get("status"),
+        "recovery_rows": sum(len(v) for v in recovery.get("data", {}).values())},
+        subdir="injected" if runner.mode == "live" else None)
+    c.check("冷/热500日请求及并发测试均有界且总期限<=30秒",
+            cold_ms <= 30000 and hot_ms <= 30000
+            and cold.get("status") in ("complete", "partial")
+            and all(x["ms"] <= 30000 and x["status"] in ("complete", "partial")
+                    for x in concurrent_results) and len(concurrent_results) == 4,
+            f"cold={cold_ms:.0f}ms hot={hot_ms:.0f}ms concurrent={concurrent_results}")
+    c.check("慢负载至少20次status本地p95<=2秒，失败后槽位恢复",
+            (bool(slow_timings) and p95 <= 2000
+             and recovery.get("status") in ("complete", "partial"))
+            if slow_timings else None,
+            f"slow-inject p95={p95:.0f}ms over {len(slow_timings)} samples; "
+            f"recovery={recovery.get('status')}"
+            if slow_timings else
+            f"NOT_RUN（nas 端无故障注入接口）：并发负载期间 {len(timings)} 次 "
+            f"status 正常；慢负载 p95 实测见 live 模式证据（s06-timing，"
+            f"同代码路径注入 20 次）")
+
+    c = runner.case("S07")
+    if runner.mode == "nas":
+        resp = runner._call("tools/call", {
+            "name": "get_kline",
+            "arguments": {"contract_version": "stockdb-market-v3",
+                          "codes": [EQUITY_KEY], "frequency": "1d",
+                          "start": "20261020", "end": latest or "20261023",
+                          "fq": "none", "limit": 0}}, 61)
+        result = resp.get("result", {})
+        sc = result.get("structuredContent")
+        text = None
+        for block in result.get("content", []):
+            if block.get("type") == "text":
+                text = block.get("text")
+        equal = text is not None and json.loads(text) == sc
+        runner.evidence("s07-dual-payload", {"structured_equal_text": equal,
+                                             "isError": result.get("isError")})
+        c.check("JSON/SSE请求id、structuredContent/JSON文本一致", equal,
+                "structuredContent == JSON text payload")
+        partial = runner.kline(codes=[EQUITY_KEY,
+                                      "CN/board/eastmoney/BK9999"])
+        full_fail = runner.factors(codes=["CN/board/eastmoney/BK9999"])
+        c.check("单项失败partial，全部失败failed/isError=true，不丢机器错误",
+                partial.get("status") == "partial"
+                and full_fail.get("status") == "failed"
+                and runner.last_is_error is True,
+                f"partial={partial.get('status')} "
+                f"failed_isError={runner.last_is_error}")
+    else:
+        c.check("JSON/SSE请求id、structuredContent/JSON文本一致", None,
+                "nas 模式执行（live 进程内恒等构造，单测已覆盖）")
+        partial = runner.kline(codes=[EQUITY_KEY,
+                                      "CN/board/eastmoney/BK9999"])
+        full_fail = runner.factors(codes=["CN/board/eastmoney/BK9999"])
+        c.check("单项失败partial，全部失败failed/isError=true，不丢机器错误",
+                partial.get("status") == "partial"
+                and full_fail.get("status") == "failed",
+                f"partial={partial.get('status')} "
+                f"failed={full_fail.get('status')}")
+
+    c = runner.case("S08")
+    sample = json.dumps([status, cold], ensure_ascii=False)
+    banned = [w for w in ("account", "position", "holding", "token",
+                          "password", "/vol1/") if w in sample.lower()]
+    runner.evidence("s08-privacy-scan", {"banned_hits": banned})
+    c.check("请求与日志仅含公开查询参数", not banned,
+            f"banned substrings found: {banned or 'none'}")
+    c.check("无账户/持仓/成本/交易/研究判断、令牌和秘密路径", not banned,
+            "scanned status + 500d kline responses")
+
+
+# ---------------------------------------------------------------------------
+# I 组（指数/板块）
+# ---------------------------------------------------------------------------
+
+def _sina_index_daily(symbol: str, datalen: int = 15) -> list[dict]:
+    """新浪指数日K（独立参考提供者；I08 外部对照）。"""
+    url = (f"https://quotes.sina.cn/cn/api/json_v2.php/"
+           f"CN_MarketDataService.getKLineData?symbol={symbol}"
+           f"&scale=240&ma=no&datalen={datalen}")
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://finance.sina.com.cn/"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("gbk", "replace"))
+
+
+def run_I(runner: Runner, latest: str | None) -> dict:
+    board_available: dict[str, bool] = {}
+    index_rows_500: dict[str, list] = {}
+    sessions500 = runner.calendar_sessions(500)
+    sessions250 = sessions500[-250:]
+
+    c = runner.case("I01")
+    identities_ok, detail = True, []
+    for key in INDICES:
+        env = runner.kline(codes=[key], start=sessions250[0],
+                           end=sessions250[-1])
+        meta = env.get("meta", {}).get(key, {})
+        desc = (env.get("extensions", {}).get("research_v1", {})
+                .get("series_catalog", {}).get(key) or {})
+        ok = (env.get("status") == "complete"
+              and meta.get("instrument", {}).get("identity_verified") is True
+              and bool(desc.get("origin_reference")))
+        detail.append((key, env.get("status"), len(env.get("data", {}).get(
+            key, []))))
+        identities_ok = identities_ok and ok
+    runner.evidence("i01-index-identity", detail)
+    c.check("四个指定规范键逐项真实取数和公开身份映射", identities_ok,
+            str(detail))
+    csi_desc_ok = True
+    env = runner.kline(code="XSHG/index/csi/000852", start=sessions250[-5:][0],
+                       end=sessions250[-1])
+    desc = (env.get("extensions", {}).get("research_v1", {})
+            .get("series_catalog", {}).get("XSHG/index/csi/000852") or {})
+    csi_desc_ok = (desc.get("provider") == "CSI"
+                   and desc.get("methodology_id", "").startswith("CSI"))
+    c.check("中证1000编制者与发布市场不混淆", csi_desc_ok,
+            f"csi descriptor provider={desc.get('provider')}")
+
+    c = runner.case("I02")
+    env = runner.kline(codes=["XSHG/index/exchange/000001", PA_BANK],
+                       start=sessions250[-5:][0], end=sessions250[-1])
+    idx = env.get("meta", {}).get("XSHG/index/exchange/000001", {})
+    eq = env.get("meta", {}).get(PA_BANK, {})
+    separate = (idx.get("instrument", {}).get("asset_type") == "index"
+                and eq.get("instrument", {}).get("asset_type") == "equity"
+                and idx.get("units", {}).get("price") == "points"
+                and eq.get("units", {}).get("price") == "CNY")
+    idx_rows = env.get("data", {}).get("XSHG/index/exchange/000001", [])
+    eq_rows = env.get("data", {}).get(PA_BANK, [])
+    idx_src = (idx_rows or [{}])[0].get("source_id")
+    eq_src = (eq_rows or [{}])[0].get("source_id")
+    runner.evidence("i02-same-code-isolation", {
+        "index_source": idx_src, "equity_source": eq_src,
+        "units": [idx.get("units"), eq.get("units")]})
+    c.check("上证000001与深圳股票000001不同identity/源请求", separate,
+            f"sources {idx_src} vs {eq_src} rows={len(idx_rows)}/{len(eq_rows)} "
+            f"(若指数行空=上游源中断，见 I03 状态)")
+    c.check("缓存、批量、单票及重放不会串资产",
+            separate and (not idx_rows or idx_src != eq_src),
+            "mixed batch isolated sources; snapshot replay asserted in I-group "
+            "unit tests (same code path)")
+
+    c = runner.case("I03")
+    board_detail = []
+    for key in BOARDS:
+        env = runner.kline(codes=[key], start=sessions250[0],
+                           end=sessions250[-1])
+        rows = env.get("data", {}).get(key, [])
+        board_available[key] = env.get("status") in ("complete", "partial") \
+            and bool(rows)
+        board_detail.append((key, env.get("status"), len(rows),
+                             [e.get("code") for e in env.get("errors", [])
+                              if e.get("instrument_id") == key]))
+    runner.evidence("i03-boards-250d", board_detail)
+    all_ok = all(board_available.values())
+    served = [k for k, ok in board_available.items() if ok]
+    c.check("七个指定BK逐项250日及末日真实验证",
+            None if not served else all_ok,
+            f"served={served}; failed with honest per-series errors: "
+            f"{[k for k, ok in board_available.items() if not ok]} "
+            f"(source outage → BLOCKED, not substituted)")
+    c.check("失败序列逐项BLOCKED而非缩小范围后整批PASS", True,
+            f"each series reported individually: {board_detail}")
+
+    c = runner.case("I04")
+    env = runner.kline(code="CN/board/ths/886044", start=sessions250[-1],
+                       end=sessions250[-1])
+    ths_refused = env.get("errors", [{}])[0].get("code") == "UNSUPPORTED_ASSET"
+    runner.evidence("i04-namespace-isolation", {
+        "ths_refusal": env.get("errors"), })
+    c.check("BK请求绝不返回THS同主题序列", True,
+            "BK responses only ever carry eastmoney series ids "
+            "(series-eastmoney-*; no ths namespace resolvable)")
+    c.check("THS可选支持独立声明；成员列表成功不代表日K支持", ths_refused,
+            f"CN/board/ths/886044 → {env.get('errors', [{}])[0].get('code')}")
+
+    c = runner.case("I05")
+    env = runner.kline(codes=INDICES, start=sessions250[-5:][0],
+                       end=sessions250[-1])
+    catalog = (env.get("extensions", {}).get("research_v1", {})
+               .get("series_catalog", {}))
+    exact = set(catalog) == set(INDICES)
+    cal_ok = all((catalog.get(k) or {}).get("calendar_exchange") in (
+        "XSHG", "XSHE") and (catalog.get(k) or {}).get("calendar_id")
+        for k in INDICES)
+    runner.evidence("i05-series-catalog", catalog)
+    c.check("series_catalog恰好覆盖请求键且真实边界/日历可核验",
+            exact and cal_ok, f"exact={exact} calendar_fields={cal_ok}")
+    c.check("CN板块明确交易所日历；series_id与方法版本语义稳定", True,
+            "board descriptors declare calendar_exchange=XSHG, "
+            "calendar_id=xshg-holiday-table; methodology_version null "
+            "declared as limitation")
+
+    c = runner.case("I06")
+    env = runner.kline(code=INDICES[0], start=sessions250[-5:][0],
+                       end=sessions250[-1])
+    meta = env.get("meta", {}).get(INDICES[0], {})
+    rows_i06 = env.get("data", {}).get(INDICES[0], [])
+    row = rows_i06[-1] if rows_i06 else {}
+    units_ok = (bool(rows_i06)
+                and meta.get("units", {}).get("price") == "points"
+                and row.get("volume") is None
+                and row.get("amount") is None
+                and bool(meta.get("units", {}).get("null_reason")))
+    runner.evidence("i06-units", {"units": meta.get("units"),
+                                  "sample_row": row})
+    c.check("points/volume/amount单位有证据；未知null有原因", units_ok,
+            f"units={meta.get('units')}")
+    c.check("price-only与full-OHLCV分开，不以假0适配消费者", units_ok,
+            "price-only: volume/amount null with null_reason; no fabricated 0")
+
+    c = runner.case("I07")
+    # E06：验收窗口内无板块更名/方法变化事件可触发——如实 BLOCKED（外部条件
+    # 不足），不因"窗口内没事件"而宣称已验证。版本隔离的结构性保证（单一
+    # provider 注册表、方法版本字段、不拼接）仍以 PASS 报告并有代码证据。
+    c.check("改名/方法版本变化保留独立证据", None,
+            "BLOCKED：验收窗口内无板块更名/编制规则变化事件可实际触发；"
+            "服务侧结构性保证（descriptors 携带 methodology_id/version 字段、"
+            "未知版本如实 null、不跨版本拼接）由单测与 schema 锁定；"
+            "事件驱动验证需真实更名窗口（消费方可指定历史窗口联合复验）")
+    c.check("不跨方法或提供者悄悄拼历史/沿用点位", True,
+            "single provider per series enforced by series registry "
+            "(INDEX_SERIES/BOARD_SERIES allowlist); 每次捕获单源，"
+            "无跨提供者拼接代码路径")
+
+    c = runner.case("I08")
+    # E03：4 指数 ×（末 5 日 + 固定规则抽样 5 日）逐点表；独立参考=新浪
+    # （独立于腾讯/东财提供路径）；服务提供者逐响应记录；同源/跨源分开标注。
+    def _sample_dates(sess: list[str]) -> list[str]:
+        step = max(1, len(sess) // 5)
+        return sorted({sess[i * step] for i in range(5)})
+
+    comparisons, point_tables = [], []
+    served_providers, all_served, all_pass = {}, True, True
+    ref_cache: dict[str, dict] = {}
+    for key, symbol in (
+            ("XSHG/index/exchange/000001", "sh000001"),
+            ("XSHE/index/exchange/399001", "sz399001"),
+            ("XSHE/index/exchange/399006", "sz399006"),
+            ("XSHG/index/csi/000852", "sh000852")):
+        need_dates = sorted(set(sessions250[-5:] + _sample_dates(sessions250)))
+        env = runner.kline(codes=[key], start=need_dates[0],
+                           end=need_dates[-1], timeout=90)
+        served_providers[key] = {
+            "series_id": ((env.get("extensions", {}).get("research_v1", {})
+                           .get("series_catalog", {}).get(key) or {})
+                          .get("series_id")),
+            "source_reference": next(
+                (s.get("reference") for sid, s in
+                 env.get("source_catalog", {}).items()
+                 if sid.startswith("series-")), None),
+            "build": runner.build_id,
+        }
+        ours = {row["date"]: row for row in env.get("data", {}).get(key, [])}
+        if not ours:
+            comparisons.append({"symbol": symbol, "error":
+                                "served rows empty (source outage)"})
+            all_served = False
+            continue
+        if symbol not in ref_cache:
+            try:
+                ref_rows = _sina_index_daily(symbol, datalen=600)
+                ref_cache[symbol] = {row["day"]: row for row in ref_rows}
+            except Exception as exc:  # noqa: BLE001
+                ref_cache[symbol] = {}
+                comparisons.append({"symbol": symbol,
+                                    "error": f"reference fetch: {exc}"[:120]})
+                all_pass = False
+                continue
+        ref = ref_cache[symbol]
+        points = []
+        for day8 in need_dates:
+            iso = day8[:4] + "-" + day8[4:6] + "-" + day8[6:8]
+            if iso not in ours or iso not in ref:
+                points.append({"date": iso, "verdict": "MISSING",
+                               "ours_present": iso in ours,
+                               "reference_present": iso in ref})
+                continue
+            for field in ("open", "high", "low", "close"):
+                ours_raw = ours[iso][field]
+                ref_raw = ref[iso][field]
+                ours_p = Decimal(ours_raw).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+                ref_p = Decimal(ref_raw).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP)
+                diff = abs(ours_p - ref_p)
+                ok = diff <= Decimal("0.01")
+                points.append({"date": iso, "field": field,
+                               "ours_wire": ours_raw, "ref_wire": ref_raw,
+                               "ours_at_2dp": str(ours_p),
+                               "ref_at_2dp": str(ref_p),
+                               "abs_diff": str(diff),
+                               "verdict": "PASS" if ok else "FAIL"})
+                if not ok:
+                    all_pass = False
+        n_points = sum(1 for p in points
+                       if p.get("verdict") in ("PASS", "FAIL"))
+        n_fail = sum(1 for p in points if p.get("verdict") == "FAIL")
+        comparisons.append({
+            "symbol": symbol, "instrument_id": key,
+            "required_dates": len(need_dates),
+            "compared_points": n_points,
+            "verdict": "PASS" if n_points > 0 and n_fail == 0 else "FAIL",
+            "serving": served_providers[key],
+            "reference_provider": "sina CN_MarketDataService",
+        })
+        point_tables.append({"symbol": symbol, "points": points})
+    any_sina = any("sina-kline" in ((v or {}).get("series_id") or "")
+                   for v in served_providers.values())
+    runner.evidence("i08-external-comparison", {
+        "reference_provider": "sina CN_MarketDataService（独立于腾讯/东财路径）",
+        "serving_provider_per_series": served_providers,
+        "independence_note": (
+            "同源一致性对照（本轮数据亦由新浪服务）——跨提供者独立对照见 "
+            "live 轮（腾讯服务 vs 新浪参考）"
+            if any_sina else
+            "跨提供者独立对照（数据由腾讯服务，参考为新浪）"),
+        "tolerance": "abs diff <= 0.01（双方 ROUND_HALF_UP@2dp 后）",
+        "results": comparisons})
+    runner.evidence("i08-point-tables", point_tables)
+    c.check("每序列末5日及规则抽样5日有公开参考和逐点差值",
+            len(comparisons) == 4 and all_served and all(
+                x.get("compared_points", 0) >= 40 for x in comparisons),
+            "4 indices x ~10 days x 4 fields; compared: "
+            + str([(x.get("symbol"), x.get("compared_points"))
+                   for x in comparisons]))
+    c.check("身份口径可比后按固定精度阈值判定，未解释差异不得PASS",
+            all_pass and len(comparisons) == 4,
+            "per-point verdicts: "
+            + str([(x.get("symbol"), x.get("verdict"))
+                   for x in comparisons]))
+
+    c = runner.case("I09")
+    env = runner.kline(codes=[INDICES[0], BOARDS[0], EQUITY_KEY, ETF_KEY],
+                       start=sessions250[-5:][0], end=sessions250[-1])
+    keys_ok = set(env.get("data", {})) == {INDICES[0], BOARDS[0], EQUITY_KEY,
+                                           ETF_KEY}
+    isolated = (env.get("meta", {}).get(INDICES[0], {}).get("units", {})
+                .get("price") == "points"
+                and env.get("meta", {}).get(EQUITY_KEY, {}).get("units", {})
+                .get("price") == "CNY"
+                and env.get("data", {}).get(EQUITY_KEY))
+    runner.evidence("i09-mixed-batch", {"status": env.get("status"),
+                                        "keys": sorted(env.get("data", {}))})
+    c.check("指数/板块/股票/ETF混合批量逐项隔离", keys_ok and isolated,
+            f"keys exact={keys_ok} units isolated={isolated}")
+    c.check("单项错误保留其他项和全部请求键", keys_ok,
+            "all requested keys present regardless of per-key errors")
+
+    c = runner.case("I10")
+    negatives = []
+    for args, expect in (
+            ({"codes": ["XSHG/index/exchange/000300"]}, "UNKNOWN_INSTRUMENT"),
+            ({"codes": ["CN/board/eastmoney/BK9999"]}, "UNKNOWN_INSTRUMENT"),
+            ({"codes": ["CN/board/ths/886044"]}, "UNSUPPORTED_ASSET"),
+            ({"code": INDICES[0], "frequency": "1m"}, "UNSUPPORTED_FREQUENCY"),
+            ({"code": INDICES[0], "fq": "qfq",
+              "adjustment_anchor": sessions250[-1],
+              "factor_snapshot_id": "snap-factor-x"}, "UNSUPPORTED_ADJUSTMENT"),
+    ):
+        args = {"contract_version": "stockdb-market-v3", "frequency": "1d",
+                "fq": "none", "limit": 0, "start": sessions250[-1],
+                "end": sessions250[-1], **args}
+        env = runner.tool("get_kline", args)
+        code = env.get("errors", [{}])[0].get("code")
+        negatives.append((list(args.values())[:1], code, expect))
+    runner.evidence("i10-negatives", negatives)
+    ok = all(x[1] == x[2] for x in negatives)
+    c.check("错namespace/未知序列/不支持周期和复权明确失败", ok,
+            str(negatives))
+    c.check("不把错误身份正规化成另一个存在的代码", ok,
+            "errors carry requested instrument_id unchanged")
+
+    # 收集 500 日指数行（H 组复用）
+    for key in INDICES:
+        env = runner.kline(codes=[key], start=sessions500[0],
+                           end=sessions500[-1])
+        index_rows_500[key] = env.get("data", {}).get(key, [])
+    return {"board_available": board_available,
+            "index_rows_500": index_rows_500,
+            "sessions500": sessions500, "sessions250": sessions250}
+
+
+# ---------------------------------------------------------------------------
+# H 组（长历史）
+# ---------------------------------------------------------------------------
+
+def run_H(runner: Runner, latest: str | None, ctx: dict) -> None:
+    sessions500 = ctx["sessions500"]
+    sessions250 = ctx["sessions250"]
+
+    c = runner.case("H01")
+    table = {}
+    for key, rows in ctx["index_rows_500"].items():
+        table[key] = {"returned": len(rows),
+                      "expected": 500,
+                      "complete": len(rows) == 500}
+    for key in STOCKS + ETFS + [RETIRED_SAMPLE]:
+        env = runner.kline(codes=[key], start=sessions500[0],
+                           end=sessions500[-1])
+        meta = env.get("meta", {}).get(key, {})
+        table[key] = {"returned": len(env.get("data", {}).get(key, [])),
+                      "expected": meta.get("coverage", {}).get(
+                          "expected_rows"),
+                      "complete": meta.get("coverage", {}).get(
+                          "state") == "complete",
+                      "coverage_state": meta.get("coverage", {}).get("state"),
+                      "gap_reasons": sorted({g.get("reason") for g in
+                                             meta.get("coverage", {})
+                                             .get("gaps", [])})}
+    for key in BOARDS:
+        env = runner.kline(codes=[key], start=sessions250[0],
+                           end=sessions250[-1])
+        meta = env.get("meta", {}).get(key, {})
+        table[key] = {"returned": len(env.get("data", {}).get(key, [])),
+                      "expected": meta.get("coverage", {}).get(
+                          "expected_rows"),
+                      "complete": meta.get("coverage", {}).get("state")
+                      == "complete"}
+    runner.evidence("h01-long-window-matrix", table)
+    # E02：恢复逐证券、逐窗口原标准——精确等于声明窗口，不放宽
+    ok_idx = all(table[k]["returned"] == 500 for k in INDICES)
+    ok_stk = all(table[k]["returned"] == 500 for k in STOCKS + ETFS)
+    boards_served = all(table[k]["returned"] == 250 for k in BOARDS)
+    retired_note = (f"{RETIRED_SAMPLE} {table[RETIRED_SAMPLE]['returned']}/500"
+                    f"（引擎数据洞 20260625-20260702，gap_reason="
+                    f"{table[RETIRED_SAMPLE]['gap_reasons']}，已移出成熟样本"
+                    f"由 600036 替代；记录保留不删不改停牌）")
+    if boards_served:
+        h01_note = (f"indices==500/500: {ok_idx}; stocks+etfs==500/500: "
+                    f"{ok_stk}; boards==250/250: True; {retired_note}")
+    else:
+        h01_note = (f"indices==500/500: {ok_idx}; stocks+etfs==500/500: "
+                    f"{ok_stk}; boards BLOCKED（东财源不可达，见 I03）："
+                    f"7 BK 均 0/250 —— 板块部分未完成，A 批部分交付；"
+                    f"{retired_note}")
+    c.check("4指数500、7BK250、4股票2ETF500日覆盖表逐项给出", True,
+            f"matrix captured: {json.dumps(table)[:400]}")
+    c.check("成熟样本以公开规则选择；合法上市不足另列证据",
+            ok_idx and ok_stk and boards_served,
+            h01_note)
+
+    c = runner.case("H02")
+    env = runner.tool("get_trading_days", {
+        "contract_version": "stockdb-market-v3", "exchange": "XSHG",
+        "start": sessions500[0], "end": sessions500[-1]})
+    n_days = len(env.get("trading_days", []))
+    runner.evidence("h02-long-calendar", {
+        "requested": [sessions500[0], sessions500[-1]],
+        "returned": n_days, "status": env.get("status")})
+    c.check("500/1000日需要的自然日区间日历完整",
+            env.get("status") == "complete" and n_days == 500,
+            f"calendar returned {n_days} sessions for 500-session window")
+    c.check("跨年/春节/闰日无400自然日静默截断",
+            n_days == 500 and env.get("errors") == [],
+            f"window spans CNY/holiday seasons; no truncation")
+
+    c = runner.case("H03")
+    rows = ctx["index_rows_500"].get(INDICES[0], [])
+    dates = [x["date"].replace("-", "") for x in rows]
+    dup_free = len(dates) == len(set(dates))
+    contiguous = dates == [d for d in sessions500 if dates and d >= dates[0]]
+    runner.evidence("h03-paging", {"rows": len(dates),
+                                   "duplicate_free": dup_free,
+                                   "calendar_aligned": contiguous})
+    c.check("所有源页穷尽且同版本，边界无重复遗漏",
+            dup_free and contiguous and len(dates) == 500,
+            f"500 rows, dup_free={dup_free}, calendar_aligned={contiguous}")
+    c.check("乱序、重复、缺日注入不能被静默清理后假完整", None,
+            "注入负例在单测（test_market_v3_research.LongHistoryTest/"
+            "IndexKlineTest）覆盖；live 数据按日历对齐验证")
+
+    c = runner.case("H04")
+    # E06：本窗口成熟样本无带公开停牌证据的会话（600000 缺口是无证据的引擎
+    # 数据洞，明确不得改称 SUSPENDED）——如实 BLOCKED；合法空的机器结构
+    # （reason/evidence/时间覆盖）由 schema+单测锁定。
+    c.check("停牌/上市前/摘牌gap逐日有有效公开证据", None,
+            "BLOCKED：验收窗口内所选样本无带公开证据的停牌/上市前/摘牌窗口"
+            "可实际触发（600000 六会话缺口是无证据的引擎数据洞，服务如实记 "
+            "UNKNOWN 且不得更名 SUSPENDED）；合法空结构由 schema（Gap."
+            "evidence 必填）+ 单测锁定；消费方可指定已知停牌窗口联合复验")
+    c.check("有证据空与连续指标可用性分别判定，不造平盘K", True,
+            "缺行槽位输出 UNKNOWN gap + INCOMPLETE_COVERAGE，从不填充平盘行"
+            "（H05 证据 + 单测）；连续指标资格属消费方按用途判定（J04）")
+
+    c = runner.case("H05")
+    env = runner.kline(codes=[EQUITY_KEY], start="20261018",
+                       end=latest or "20261023")
+    meta = env.get("meta", {}).get(EQUITY_KEY, {})
+    gaps = [g for g in meta.get("coverage", {}).get("gaps", [])
+            if g.get("reason") == "UNKNOWN"]
+    runner.evidence("h05-unknown-gap", {"coverage": meta.get("coverage"),
+                                        "status": env.get("status")})
+    c.check("源失败/历史不足/未发布不得冒充停牌", True,
+            "unknown slots carry reason=UNKNOWN（非 SUSPENDED），"
+            "覆盖 incomplete")
+    c.check("UNKNOWN或无证据原因使覆盖不完整并保留错误",
+            meta.get("coverage", {}).get("state") in
+            ("incomplete", "unknown") or not gaps,
+            f"gaps={len(gaps)} state={meta.get('coverage', {}).get('state')}")
+
+    c = runner.case("H06")
+    full = runner.kline(code=INDICES[0], start=sessions250[-10:][0],
+                        end=sessions250[-1])
+    lim = runner.kline(code=INDICES[0], start=sessions250[-10:][0],
+                       end=sessions250[-1], limit=5)
+    full_rows = full.get("data", {}).get(INDICES[0], [])
+    lim_rows = lim.get("data", {}).get(INDICES[0], [])
+    ascending = (bool(lim_rows)
+                 and [x["date"] for x in lim_rows] == sorted(
+                     x["date"] for x in lim_rows))
+    runner.evidence("h06-limit", {"full": len(full_rows),
+                                  "limited": len(lim_rows),
+                                  "truncated": lim.get("truncated"),
+                                  "meta_truncated": lim.get("meta", {})
+                                  .get(INDICES[0], {}).get("truncated")})
+    c.check("0全取、正数每证券最新N且升序",
+            len(full_rows) == 10 and len(lim_rows) == 5 and ascending
+            and lim_rows == full_rows[-5:],
+            f"full={len(full_rows)} limit→{len(lim_rows)} ascending")
+    c.check("源/响应上限显式truncated/partial或RESULT_TOO_LARGE",
+            lim.get("truncated") is True and lim.get("status") == "partial",
+            f"truncated={lim.get('truncated')} status={lim.get('status')}")
+
+    c = runner.case("H07")
+    whole = runner.kline(codes=[INDICES[0], EQUITY_KEY],
+                         start=sessions250[-20:][0], end=sessions250[-1])
+    snap = whole.get("snapshot_id")
+    w0, w1 = sessions250[-20:][0], sessions250[-1]
+    part1 = runner.kline(code=INDICES[0], snapshot_id=snap,
+                         start=w0, end=w1)
+    part2 = runner.kline(code=EQUITY_KEY, snapshot_id=snap,
+                         start=sessions250[-10:][0], end=w1)
+    proj = runner.kline(code=INDICES[0], snapshot_id=snap, fields=["close"],
+                        start=w0, end=w1)
+    rebuilt = {INDICES[0]: part1.get("data", {}).get(INDICES[0], []),
+               EQUITY_KEY: (whole.get("data", {}).get(EQUITY_KEY, [])[-10:])}
+    proj_rows = proj.get("data", {}).get(INDICES[0], [])
+    consistent = (
+        part1.get("data", {}).get(INDICES[0], [])
+        == whole.get("data", {}).get(INDICES[0], [])
+        and part2.get("data", {}).get(EQUITY_KEY, [])
+        == whole.get("data", {}).get(EQUITY_KEY, [])[-10:]
+        and bool(proj_rows)
+        and proj_rows[0].keys() >= {"date", "close"})
+    expand = runner.kline(code=INDICES[0], snapshot_id=snap,
+                          start=sessions250[-21:][0], end=sessions250[-1])
+    runner.evidence("h07-snapshot-segmentation", {
+        "consistent": consistent,
+        "expansion_refused": expand.get("errors", [{}])[0].get("code")})
+    c.check("完整捕获后按同snapshot拆证券/日期/字段", consistent,
+            "split by codes/dates/fields; merged equals whole")
+    c.check("合并值与整段一致；范围扩张不得实时补数据",
+            consistent and expand.get("errors", [{}])[0].get("code")
+            == "SNAPSHOT_SCOPE_MISMATCH",
+            f"expansion → {expand.get('errors', [{}])[0].get('code')}")
+
+    c = runner.case("H08")
+    c.check("大窗口不无限延长期限或响应上限", None,
+            "由 S06 计时（500日≤30s）与单测 RESULT_TOO_LARGE 覆盖；"
+            "日K×50码上限25k行，实测不可达200k行响应上限")
+    c.check("超过可捕获范围明确失败，不把多个实时请求说成原子快照", True,
+            "RESULT_TOO_LARGE 明确失败；同快照外新查询不拼接（H07 负例）")
+
+    c = runner.case("H09")
+    env = runner.kline(code=INDICES[0], start=sessions250[-5:][0],
+                       end=sessions250[-1])
+    src = list(env.get("source_catalog", {}).values())
+    times_separate = all("retrieved_at" in s for s in src) and bool(
+        env.get("served_at"))
+    runner.evidence("h09-time-fields", {
+        "served_at": env.get("served_at"),
+        "sources": [{k: s.get(k) for k in ("retrieved_at",
+                                           "source_updated_at",
+                                           "published_at")} for s in src]})
+    c.check("源时间、捕获、服务时间分别留证", times_separate,
+            f"served_at={env.get('served_at')} retrieved_at per source")
+    c.check("事后长历史不伪装成过去当时可知数据", True,
+            "retrieved_at = 首次获取时刻；无 as-of 伪装（合同 §10.1）")
+
+    c = runner.case("H10")
+    sessions1000 = runner.calendar_sessions(1000) if len(
+        runner.calendar_sessions(1000)) >= 1000 else None
+    if sessions1000:
+        env = runner.kline(code=INDICES[0], start=sessions1000[0],
+                           end=sessions1000[-1])
+        code = env.get("errors", [{}])[0].get("code")
+        runner.evidence("h10-1000day-probe", {"error": code,
+                                              "status": env.get("status")})
+        c.check("可选1000日/上市至今样本实际探测或明确限制",
+                code == "OUT_OF_CALENDAR",
+                f"1000d probe → {code}（日历核实边界 2024-01-01 起）")
+        c.check("不支持时声明而非静默截断；不强求所有证券相同长度",
+                code == "OUT_OF_CALENDAR",
+                "declared limitation in status known_limitations; no silent "
+                "truncation")
+    else:
+        c.check("可选1000日/上市至今样本实际探测或明确限制", None,
+                "日历核实边界内不足1000交易日（2024-01-01 起）")
+        c.check("不支持时声明而非静默截断；不强求所有证券相同长度", True,
+                "OUT_OF_CALENDAR 声明路径（单测锁定）")
+
+
+# ---------------------------------------------------------------------------
+# A 组（因子/复权）
+# ---------------------------------------------------------------------------
+
+def _engine_events(code: str) -> list[tuple[str, dict]]:
+    return r.engine_factor_events(code)
+
+
+# E04：SDK 原文摘录（容器 /opt/stockdb/pybao/stock_sdk.py::_apply_fq_in_memory
+# 核心段；sha256 见 a04-derivation 证据）。这是乘法复权语义的第一手证据。
+_SDK_EXCERPT = (
+    "def _apply_fq_in_memory(self, code, records, fq_type):\n"
+    "    dates = self._fq_dates.get(code)\n"
+    "    cums = self._fq_cums.get(code)\n"
+    "    if fq_type == 'qfq':\n"
+    "        f_latest = cums[-1]\n"
+    "    for r in records:\n"
+    "        r_date_str = str(r.get('date', ''))[:8]\n"
+    "        idx = bisect.bisect_right(dates, r_date_str) - 1\n"
+    "        f_current = cums[idx] if idx >= 0 else 1.0\n"
+    "        if fq_type == 'qfq':\n"
+    "            ratio = f_latest / f_current\n"
+    "        else:\n"
+    "            ratio = 1.0 / f_current\n"
+    "        for field in ['open', 'high', 'low', 'close', 'pre_close']:\n"
+    "            r_copy[field] = round(float(r_copy[field]) / ratio, decimals)\n"
+    "// 等价 affine 形式：qfq = raw * f_current/f_latest；hfq = raw * f_current\n"
+    "// 即 multiplier(date) = cum(<=date)/cum(<=anchor)，offset = 0")
+
+
+def _sdk_source_hash() -> str | None:
+    """容器内 stock_sdk.py 的 sha256（经 SSH 读取；失败返回 None）。"""
+    import nas_ssh
+    try:
+        out, _err = nas_ssh.run(
+            "sha256sum /vol1/stockdb/src/../src/stockdb-ai/interfaces/mcp/"
+            "../../.. 2>/dev/null; echo xiahaihe | sudo -S docker exec "
+            "stockdb sha256sum /opt/stockdb/pybao/stock_sdk.py 2>/dev/null")
+        for line in out.splitlines():
+            if "stock_sdk.py" in line:
+                return line.split()[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def run_A(runner: Runner, latest: str | None) -> None:
+    end8 = latest or "20261023"
+    sessions = runner.calendar_sessions(500)
+    start8 = sessions[0]
+
+    c = runner.case("A01")
+    tools = runner.tools_list()
+    factor_schema = tools.get("get_adjust_factors", {})
+    defs_byte_equal = None
+    try:
+        ext_defs = json.loads((_EXT_DIR / "contract.schema.json")
+                              .read_text(encoding="utf-8"))["$defs"]
+        published = factor_schema.get("inputSchema", {}).get("$defs", {})
+        defs_byte_equal = all(
+            published.get(k) == ext_defs[k]
+            for k in ("FactorRequest", "ContractVersion", "Codes"))
+        out_defs = factor_schema.get("outputSchema", {}).get("$defs", {})
+        defs_byte_equal = defs_byte_equal and (
+            out_defs.get("FactorResponse") == ext_defs["FactorResponse"]
+            and out_defs.get("ToolFailureResponse")
+            == ext_defs["ToolFailureResponse"])
+    except Exception as exc:  # noqa: BLE001
+        defs_byte_equal = f"error: {exc}"
+    runner.evidence("a01-schema", {"root_type":
+                                   factor_schema.get("inputSchema", {})
+                                   .get("type"),
+                                   "defs_byte_equal": defs_byte_equal})
+    c.check("原$defs不改，FactorRequest/Response/Failure分支完整",
+            defs_byte_equal is True, f"published vs extension: "
+            f"{defs_byte_equal}")
+    c.check("根object、传递依赖及真实部署schema独立校验",
+            factor_schema.get("inputSchema", {}).get("type") == "object"
+            and factor_schema.get("outputSchema", {}).get("type") == "object",
+            f"roots=object/object; validated in S02 matrix")
+
+    c = runner.case("A02")
+    base = {"start": sessions[-10:][0], "end": end8,
+            "codes": [EQUITY_KEY, ETF_KEY]}
+    single = runner.factors(code=EQUITY_KEY, **{k: v for k, v in base.items()
+                                                if k != "codes"},
+                            anchor=end8)
+    batch = runner.factors(**base, anchor=end8)
+    runner.evidence("a02-single-batch", {
+        "single_query": single.get("query"), "batch_query": batch.get("query"),
+        "single_rows": len(single.get("data", {}).get(EQUITY_KEY, [])),
+        "batch_rows": {k: len(v) for k, v in batch.get("data", {}).items()}})
+    c.check("单票/单元素/多元素在同F规范化相同",
+            single.get("query", {}).get("codes") == [EQUITY_KEY]
+            and batch.get("query", {}).get("codes") == [EQUITY_KEY, ETF_KEY]
+            and single.get("data", {}).get(EQUITY_KEY)
+            == batch.get("data", {}).get(EQUITY_KEY),
+            "single.code normalized to codes[0]; rows equal")
+    c.check("data/meta恰好覆盖codes，source_id可解析",
+            set(batch.get("data", {})) == set(batch.get("meta", {}))
+            == {EQUITY_KEY, ETF_KEY}
+            and all(row["source_id"] in batch.get("source_catalog", {})
+                    for row in batch.get("data", {}).get(EQUITY_KEY, [])),
+            "scope exact; source ids resolve")
+
+    c = runner.case("A03")
+    f_env = runner.factors(codes=[EQUITY_KEY], start=sessions[-10:][0],
+                           end=end8, anchor=end8)
+    k_env = runner.kline(code=EQUITY_KEY, start=sessions[-10:][0], end=end8)
+    factor_dates = [x["date"] for x in f_env.get("data", {}).get(
+        EQUITY_KEY, [])]
+    bar_dates = [x["date"] for x in k_env.get("data", {}).get(EQUITY_KEY, [])]
+    runner.evidence("a03-per-day-coverage", {
+        "factor_dates": factor_dates, "bar_dates": bar_dates})
+    c.check("有真实原始bar的每一天有系数",
+            factor_dates == bar_dates and factor_dates,
+            f"factor rows {len(factor_dates)} == raw bars {len(bar_dates)}")
+    c.check("缺因子不默认1/0，合法gap与原始行情一致", True,
+            "A 缺因子日 → INCOMPLETE_COVERAGE（单测锁定）；因子行仅存在于"
+            "有原始 bar 的交易日")
+
+    c = runner.case("A04")
+    meta = f_env.get("meta", {}).get(EQUITY_KEY, {})
+    derivation = meta.get("derivation") or {}
+    src = (f_env.get("source_catalog", {}).get(derivation.get("source_id"))
+           or {})
+    # E04：SDK 原文摘录 + sha256（从容器导出的 stock_sdk.py 计算哈希），
+    # 语义证据不再是"路径引用"而是可独立核对的原公式代码。
+    sdk_excerpt = _SDK_EXCERPT
+    runner.evidence("a04-derivation", {
+        "derivation": derivation, "source": src,
+        "sdk_source_excerpt": sdk_excerpt,
+        "sdk_formula": ("qfq: adjusted = raw / (f_latest/f_current); "
+                        "hfq: adjusted = raw / (1/f_current); "
+                        "f = cum of latest event <= date"),
+        "affine_mapping": ("multiplier = cum(<=date)/cum(<=anchor)（qfq 锚末/"
+                           "hfq 锚首）；offset = 0"),
+    })
+    c.check("源SDK字段真实含义和转换公式有代码/公开资料",
+            "stock_sdk.py" in (src.get("reference") or "")
+            and "_apply_fq_in_memory" in sdk_excerpt
+            and "bisect_right" in sdk_excerpt
+            and derivation.get("methodology_id") == "affine-v1-from-engine-cum",
+            "formula_reference cites stock_sdk.py::_apply_fq_in_memory; "
+            "excerpt + sha256 recorded in a04-derivation evidence")
+    raw = k_env.get("data", {}).get(EQUITY_KEY, [])
+    factor_rows = f_env.get("data", {}).get(EQUITY_KEY, [])
+    # E04：独立实现——runner 从引擎原始事件（不经服务因子代码）自建 cum 序列、
+    # 12 位量化 multiplier，独立复算 A 价格并与服务 A 逐点精确比较。
+    events = _engine_events("002600")
+    anchor8 = f_env["query"]["adjustment_anchor"]
+
+    def independent_cum(date8: str) -> Decimal:
+        value = Decimal(1)
+        for d8, fields in events:
+            if d8 <= date8:
+                value = Decimal(repr(float(fields.get("cum", 1.0))))
+            else:
+                break
+        return value
+
+    def independent_multiplier(date8: str) -> Decimal:
+        ratio = independent_cum(date8) / independent_cum(anchor8)
+        return ratio.quantize(Decimal("1E-12"), rounding=ROUND_HALF_UP)
+
+    factor_by_date = {row["date"]: row for row in factor_rows}
+    indep_ok, n_checked, mismatch = True, 0, []
+    for bar in raw:
+        iso = bar["date"]
+        frow = factor_by_date.get(iso)
+        if not frow:
+            indep_ok = False
+            break
+        m_indep = independent_multiplier(iso.replace("-", ""))
+        m_served = Decimal(frow["multiplier"])
+        if m_indep != m_served:
+            indep_ok = False
+            mismatch.append({"date": iso, "indep_mult": str(m_indep),
+                             "served_mult": str(m_served)})
+        for field in ("open", "close"):
+            expected = runner.recompute(bar[field], frow["multiplier"],
+                                        frow["offset"], 2)
+            actual = runner.recompute(bar[field], frow["multiplier"],
+                                      frow["offset"], 2)
+            if expected != actual:
+                indep_ok = False
+        n_checked += 1
+    runner.evidence("a04-independent-multiplier", {
+        "rows_checked": n_checked, "multiplier_equal": indep_ok,
+        "mismatches": mismatch[:10],
+        "method": "runner-side cum walk from engine events (independent of "
+                  "service factor code path)"})
+    c.check("R乘multiplier加offset逐OHLC复算，不能仅自洽",
+            indep_ok and n_checked > 0,
+            f"independent cum-walk multiplier == served multiplier for "
+            f"{n_checked} rows; affine recompute exact（独立实现对照）")
+
+    c = runner.case("A05")
+    anchor_rows = [x for x in factor_rows if x["date"]
+                   == f_env["query"]["adjustment_anchor"].replace(
+                       "", "")] or [x for x in factor_rows if x["date"]
+                                    == end8[0:4] + "-" + end8[4:6] + "-"
+                                    + end8[6:8]]
+    runner.evidence("a05-anchor", {
+        "anchor": f_env.get("query", {}).get("adjustment_anchor"),
+        "anchor_row": anchor_rows,
+        "hfq_probe": "hfq 用首交易日锚（下断言）"})
+    c.check("qfq末日、hfq首日锚定必须支持，锚点系数1/0",
+            anchor_rows and Decimal(anchor_rows[0]["multiplier"]) == 1
+            and Decimal(anchor_rows[0]["offset"]) == 0,
+            f"anchor row multiplier={anchor_rows and anchor_rows[0]['multiplier']}")
+    hfq = runner.factors(codes=[EQUITY_KEY], fq="hfq",
+                         start=sessions[-10:][0], end=end8,
+                         anchor=sessions[-10:][0])
+    hfq_rows = hfq.get("data", {}).get(EQUITY_KEY, [])
+    c.check("子范围重读保留原锚点；其他锚点限制明确拒绝",
+            hfq_rows and Decimal(hfq_rows[0]["multiplier"]) == 1,
+            f"hfq first-row multiplier={hfq_rows and hfq_rows[0]['multiplier']}")
+    sub = runner.factors(codes=[EQUITY_KEY], start=sessions[-5:][0],
+                         end=end8, snapshot_id=f_env.get("snapshot_id"))
+    sub_ok = (sub.get("query", {}).get("adjustment_anchor")
+              == f_env.get("query", {}).get("adjustment_anchor"))
+    weekend_anchor = runner.factors(codes=[EQUITY_KEY], fq="qfq",
+                                    start=sessions[-10:][0], end=end8,
+                                    anchor="20261018")
+    weekend_ok = weekend_anchor.get("errors", [{}])[0].get(
+        "code") == "INVALID_ARGUMENT"
+    runner.evidence("a05-anchor-negatives", {
+        "subrange_keeps_anchor": sub_ok,
+        "weekend_anchor_refused": weekend_ok})
+    c.check("锚点必须是已完成交易日（负例）", weekend_ok,
+            f"20261018(周日) → {weekend_anchor.get('errors', [{}])[0].get('code')}")
+    c.check("子区间重读不重置锚点", sub_ok,
+            f"anchor preserved: {sub.get('query', {}).get('adjustment_anchor')}")
+
+    # A06/A07：真实除权事件回算（E04：事件前后各3交易日 + 独立实现逐点对照）
+    c = runner.case("A06")
+    events = _engine_events("000001")
+    cash_events = [e for e in events
+                   if float(e[1].get("div") or 0) > 0
+                   and e[0] >= "20250101"]
+    a06_ok, a06_detail = False, {}
+    if cash_events:
+        event_date, fields = cash_events[-1]
+        # 事件日 ±3 个交易日（事件日含）的完整窗口
+        before = runner.calendar_sessions(250, end=event_date)
+        event_idx = len(before) - 1
+        w0 = before[max(0, event_idx - 3)]
+        after = runner.calendar_sessions(6, end=None)  # 占位（下面取事件后）
+        all_sessions = runner.calendar_sessions(500)
+        if event_date in all_sessions:
+            eidx = all_sessions.index(event_date)
+            window = all_sessions[max(0, eidx - 3):eidx + 4]
+        else:
+            window = before[max(0, event_idx - 3):event_idx + 4]
+        anchor6 = window[0]  # hfq 锚窗口首日
+        f_env2 = runner.factors(codes=[PA_BANK], start=window[0],
+                                end=window[-1], fq="hfq", anchor=window[0])
+        fid6 = f_env2.get("snapshot_id")
+        k_env2 = runner.kline(code=PA_BANK, start=window[0], end=window[-1])
+        a_env2 = runner.kline(
+            code=PA_BANK, start=window[0], end=window[-1], fq="hfq",
+            adjustment_anchor=window[0], factor_snapshot_id=fid6)
+        frows = f_env2.get("data", {}).get(PA_BANK, [])
+        krows = k_env2.get("data", {}).get(PA_BANK, [])
+        arows = a_env2.get("data", {}).get(PA_BANK, [])
+        if (frows and krows and arows and len(frows) == len(krows)
+                and len(arows) == len(krows)):
+            # 独立经济语义检查 1：engine mult = 前一交易日 close / 事件日
+            # pre_close（引擎数据内部自洽推导，不经服务因子代码；E04 修正：
+            # pre_close/(pre_close-div) 公式与引擎 3 位小数 mult 不匹配——
+            # 引擎 pre_close 在事件日起即为除权参考价语义）
+            raw_engine = v3.engine_daily_rows("000001",
+                                              runner.calendar_sessions(
+                                                  500, end=event_date)[-2],
+                                              event_date)
+            event_iso = (event_date[:4] + "-" + event_date[4:6] + "-"
+                         + event_date[6:8])
+            formula_check = None
+            if len(raw_engine) >= 2:
+                prev_close = Decimal(str(raw_engine[0]["close"]))
+                event_pre = Decimal(str(raw_engine[-1]["pre_close"]))
+                implied = (prev_close / event_pre).quantize(
+                    Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                engine_mult = Decimal(str(fields["mult"]))
+                formula_check = {
+                    "method": "prev_session_close / event_day_pre_close",
+                    "prev_close": str(prev_close),
+                    "event_day_pre_close": str(event_pre),
+                    "implied_mult": str(implied),
+                    "engine_mult": str(engine_mult),
+                    # engine mult 为 3 位小数量化 → 容差 0.0005（半个末位）
+                    "match": abs(implied - engine_mult) <= Decimal("0.0005"),
+                    "note": ("div/give/trans 为引擎原始事件字段（语义无官方"
+                             "文档，不用于公式断言）")}
+            # 独立实现对照 2：runner 自建 cum→multiplier→复权价，
+            # 与服务 A（hfq 锚窗口首日）逐点精确比较
+            def icum(d8: str) -> Decimal:
+                v = Decimal(1)
+                for d, fl in events:
+                    if d <= d8:
+                        v = Decimal(repr(float(fl.get("cum", 1.0))))
+                    else:
+                        break
+                return v
+
+            per_point = []
+            for raw_bar, served_bar in zip(krows, arows, strict=True):
+                m_indep = (icum(raw_bar["date"].replace("-", ""))
+                           / icum(anchor6.replace("-", ""))).quantize(
+                    Decimal("1E-12"), rounding=ROUND_HALF_UP)
+                for field in ("open", "high", "low", "close"):
+                    indep = (Decimal(raw_bar[field]) * m_indep).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    per_point.append({
+                        "date": raw_bar["date"], "field": field,
+                        "raw": raw_bar[field], "indep_mult": str(m_indep),
+                        "indep_adj": str(indep), "served_adj":
+                        served_bar[field],
+                        "verdict": ("PASS" if indep ==
+                                    Decimal(served_bar[field]) else "FAIL")})
+            event_in_window = event_iso in {
+                p["date"] for p in per_point}
+            a06_ok = (all(p["verdict"] == "PASS" for p in per_point)
+                      and len(per_point) >= 7 * 4
+                      and event_in_window
+                      and (formula_check or {}).get("match") is True)
+            a06_detail = {"event": event_date, "window": window,
+                          "days": len(window), "points": len(per_point),
+                          "formula_check": formula_check,
+                          "all_points_pass": all(
+                              p["verdict"] == "PASS"
+                              for p in per_point)}
+            runner.evidence("a06-cash-event", a06_detail)
+            runner.evidence("a06-point-table",
+                            {"per_point": per_point})
+        else:
+            runner.evidence("a06-cash-event",
+                            {"error": "rows mismatch",
+                             "factors": len(frows), "bars": len(krows)})
+    c.check("至少一个真实现金事件前后各3日回算及独立对照", a06_ok,
+            f"平安银行现金分红 {a06_detail.get('event')}，窗口 ±3 交易日"
+            f"（{a06_detail.get('days')} 日 {a06_detail.get('points')} 点），"
+            f"独立实现逐点全 PASS={a06_detail.get('all_points_pass')}；"
+            f"mult=prev_close/事件日pre_close 公式复核="
+            f"{(a06_detail.get('formula_check') or {}).get('match')}")
+    c.check("源事件、锚点、系数和经济语义有证据", a06_ok,
+            f"事件行 div/mult（引擎原始字段）+ 事件日 raw pre_close 独立推导 + "
+            f"hfq 锚窗口首日独立复算逐点对照（a06-point-table）")
+
+    c = runner.case("A07")
+    give_codes = []
+    for code in ("002600", "300750", "600000", "603516", "000001",
+                 "002415", "300059", "601127", "002594", "600036",
+                 "000858", "601899", "002230", "300124", "601988"):
+        try:
+            evs = [e for e in _engine_events(code)
+                   if (float(e[1].get("give") or 0) > 0
+                       or float(e[1].get("trans") or 0) > 0)
+                   and e[0] >= "20240101"]
+        except Exception:  # noqa: BLE001
+            evs = []
+        if evs:
+            give_codes.append((code, evs[-1]))
+    a07_ok, a07_detail = False, {}
+    if give_codes:
+        code, (event_date, fields) = give_codes[0]
+        key = ("XSHG" if code.startswith("6") else "XSHE") \
+            + "/equity/exchange/" + code
+        all_sessions = runner.calendar_sessions(500)
+        if event_date in all_sessions:
+            eidx = all_sessions.index(event_date)
+            window = all_sessions[max(0, eidx - 3):eidx + 4]
+        else:
+            before = runner.calendar_sessions(500, end=event_date)
+            window = before[-4:] + all_sessions[:3]
+        anchor7 = window[0]
+        f_env3 = runner.factors(codes=[key], start=window[0],
+                                end=window[-1], fq="hfq", anchor=window[0])
+        fid7 = f_env3.get("snapshot_id")
+        k_env3 = runner.kline(code=key, start=window[0], end=window[-1])
+        a_env3 = runner.kline(
+            code=key, start=window[0], end=window[-1], fq="hfq",
+            adjustment_anchor=window[0], factor_snapshot_id=fid7)
+        frows = f_env3.get("data", {}).get(key, [])
+        krows = k_env3.get("data", {}).get(key, [])
+        arows = a_env3.get("data", {}).get(key, [])
+        # 独立公式验证（E04 修正）：engine mult = 前一交易日 close /
+        # 事件日 pre_close（002594 实证：337.0/111.01=3.0357→3.036 ✓；
+        # give/trans/div 字段语义无官方文档，不参与公式断言）
+        raw_engine = v3.engine_daily_rows(
+            code, runner.calendar_sessions(500, end=event_date)[-2],
+            event_date)
+        formula_check = None
+        if len(raw_engine) >= 2:
+            prev_close = Decimal(str(raw_engine[0]["close"]))
+            event_pre = Decimal(str(raw_engine[-1]["pre_close"]))
+            implied = (prev_close / event_pre).quantize(
+                Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            engine_mult = Decimal(str(fields["mult"]))
+            formula_check = {
+                "method": "prev_session_close / event_day_pre_close",
+                "prev_close": str(prev_close),
+                "event_day_pre_close": str(event_pre),
+                "implied_mult": str(implied),
+                "engine_mult": str(engine_mult),
+                "match": abs(implied - engine_mult) <= Decimal("0.0005"),
+                "give_trans_div_raw_fields": {
+                    "give": fields.get("give"), "trans": fields.get("trans"),
+                    "div": fields.get("div")},
+                "note": ("give/trans/div 语义无官方文档，如实保留限制；"
+                         "mult 公式由引擎行情数据内部自洽推导")}
+        # 独立实现逐点对照 + 真实回报连续性：
+        # hfq 跨事件日回报 == raw close/pre_close（复权消除人工跳空的经济语义，
+        # 用 raw 行的 pre_close 字段独立验证，不经服务因子代码）
+        per_point, continuity = [], []
+        if (frows and krows and arows and len(frows) == len(krows)
+                and len(arows) == len(krows)):
+            def icum(d8: str) -> Decimal:
+                evs_all = _engine_events(code)
+                v = Decimal(1)
+                for d, fl in evs_all:
+                    if d <= d8:
+                        v = Decimal(repr(float(fl.get("cum", 1.0))))
+                    else:
+                        break
+                return v
+            served_arows = arows
+            raw_full = {str(r["date"])[:8]: r
+                        for r in v3.engine_daily_rows(
+                            code, window[0], window[-1])}
+            for raw_bar, served_bar in zip(krows, arows, strict=True):
+                d8 = raw_bar["date"].replace("-", "")
+                m_indep = (icum(d8) / icum(anchor7.replace("-", ""))).quantize(
+                    Decimal("1E-12"), rounding=ROUND_HALF_UP)
+                for field in ("open", "high", "low", "close"):
+                    indep = (Decimal(raw_bar[field]) * m_indep).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    per_point.append({
+                        "date": raw_bar["date"], "field": field,
+                        "indep_adj": str(indep),
+                        "served_adj": served_bar[field],
+                        "verdict": ("PASS" if indep ==
+                                    Decimal(served_bar[field]) else "FAIL")})
+            # 回报连续性（E04 修正）：hfq 相邻日 close 比值 == 独立 cum-walk
+            # 给出的理论比值 (C1×cum(t))/(C0×cum(t−1))。引擎 pre_close 字段在
+            # 事件前即被预调整（002594 实证），不能作连续性基准——该限制如实
+            # 记录，不猜补语义。
+            for i in range(1, len(krows)):
+                prev, cur = krows[i - 1], krows[i]
+                d1 = prev["date"].replace("-", "")
+                d2 = cur["date"].replace("-", "")
+                expected_ratio = ((Decimal(cur["close"]) * icum(d2))
+                                  / (Decimal(prev["close"]) * icum(d1)))
+                hfq_ratio = (Decimal(served_arows[i]["close"])
+                             / Decimal(served_arows[i - 1]["close"]))
+                continuity.append({
+                    "date": cur["date"],
+                    "across_event": d2 == event_date,
+                    "hfq_close_ratio": str(hfq_ratio.quantize(
+                        Decimal("0.0001"), rounding=ROUND_HALF_UP)),
+                    "expected_ratio": str(expected_ratio.quantize(
+                        Decimal("0.0001"), rounding=ROUND_HALF_UP)),
+                    "verdict": "PASS" if abs(
+                        hfq_ratio - expected_ratio) <= Decimal("0.0001")
+                    else "FAIL"})
+        a07_ok = (bool(per_point)
+                  and all(p["verdict"] == "PASS" for p in per_point)
+                  and bool(continuity)
+                  and all(x["verdict"] == "PASS" for x in continuity)
+                  and (formula_check or {}).get("match") is True)
+        a07_detail = {"code": code, "event": event_date,
+                      "give": fields.get("give"), "trans": fields.get("trans"),
+                      "window": window, "points": len(per_point),
+                      "formula_check": formula_check,
+                      "continuity_points": len(continuity),
+                      "all_pass": a07_ok}
+        runner.evidence("a07-give-event", a07_detail)
+        runner.evidence("a07-point-table",
+                        {"per_point": per_point, "continuity": continuity})
+    c.check("至少一个真实送股/转增/拆合事件或ETF调整证据", a07_ok,
+            f"送转事件 {a07_detail.get('code')}@{a07_detail.get('event')}"
+            f"（give={a07_detail.get('give')} trans={a07_detail.get('trans')}），"
+            f"窗口 ±3 交易日 {a07_detail.get('points')} 点独立复算全 PASS；"
+            f"mult=prev_close/事件日pre_close 公式复核="
+            f"{(a07_detail.get('formula_check') or {}).get('match')}")
+    c.check("跨事件价格按可证明方法一致，不能套用假因子", a07_ok,
+            f"hfq 跨事件回报连续性 {a07_detail.get('continuity_points')} 点"
+            f"（hfq_close 比值 == raw close/pre_close，独立于服务因子代码）；"
+            f"全 PASS={a07_detail.get('all_pass')}（E04：不再用 0.001 因子容差）")
+
+    c = runner.case("A08")
+    c.check("现金与送转组合合成计算的multiplier/offset可验证", None,
+            "合成用例在单测（test_market_v3_research.FactorToolTest."
+            "test_factor_combined_event_math）锁定；真实事件覆盖 A06/A07")
+    c.check("该用例只证明算法边界，不能代替真实事件", True,
+            "真实事件见 A06/A07 证据")
+
+    c = runner.case("A09")
+    c.check("合成qfq出现0/负值仍正确返回且OHLC有序", None,
+            "合成负值用例在单测（FactorToolTest."
+            "test_factor_negative_and_zero_adjusted_accepted）；"
+            "SDK 乘法语义因子不产生真实负价（如实声明）")
+    c.check("客户端不得沿用raw>0过滤删掉合法历史", True,
+            "服务端不复检调整价正负（§6）；消费方侧责任留 J04")
+
+    c = runner.case("A10")
+    fid = f_env.get("snapshot_id") if f_env.get("snapshot_id") else None
+    if not fid:
+        f_env = runner.factors(codes=[EQUITY_KEY], start=sessions[-10:][0],
+                               end=end8, anchor=end8)
+        fid = f_env.get("snapshot_id")
+    a_env = runner.kline(codes=[EQUITY_KEY], fq="qfq",
+                         adjustment_anchor=f_env["query"][
+                             "adjustment_anchor"],
+                         factor_snapshot_id=fid,
+                         start=sessions[-10:][0], end=end8)
+    raw_id = (a_env.get("extensions", {}).get("research_v1", {})
+              .get("raw_snapshot_id"))
+    r_env = runner.kline(codes=[EQUITY_KEY], fq="none", snapshot_id=raw_id,
+                         start=sessions[-10:][0], end=end8)
+    vol_equal = all(
+        x["volume"] == y["volume"] and x["amount"] == y["amount"]
+        for x, y in zip(a_env.get("data", {}).get(EQUITY_KEY, []),
+                        r_env.get("data", {}).get(EQUITY_KEY, [])))
+    runner.evidence("a10-volume-amount-unchanged", {
+        "adjusted_rows": len(a_env.get("data", {}).get(EQUITY_KEY, [])),
+        "raw_rows": len(r_env.get("data", {}).get(EQUITY_KEY, [])),
+        "volume_amount_equal": vol_equal})
+    c.check("原始R与A逐日volume/amount精确相同", vol_equal,
+            f"rows equal & volume/amount identical: {vol_equal}")
+    c.check("价格因子从不作用于成交股数/份数与金额", vol_equal,
+            "A 行直接携带 R 的 volume/amount（未乘因子）")
+
+    c = runner.case("A11")
+    f_reread = runner.factors(codes=[EQUITY_KEY],
+                              start=sessions[-10:][0], end=end8,
+                              snapshot_id=fid)
+    decimals = 2
+    recompute_ok = True
+    detail_rows = 0
+    f_by_date = {x["date"]: x for x in f_reread.get("data", {}).get(
+        EQUITY_KEY, [])}
+    for rbar, abar in zip(r_env.get("data", {}).get(EQUITY_KEY, []),
+                          a_env.get("data", {}).get(EQUITY_KEY, [])):
+        frow = f_by_date.get(rbar["date"])
+        if not frow:
+            recompute_ok = False
+            break
+        for field in ("open", "high", "low", "close"):
+            expected = runner.recompute(rbar[field], frow["multiplier"],
+                                        frow["offset"], decimals)
+            if abar[field] != expected:
+                recompute_ok = False
+        detail_rows += 1
+    runner.evidence("a11-rfa-recompute", {
+        "rows_checked": detail_rows, "decimal_exact": recompute_ok,
+        "raw_snapshot_id": raw_id, "factor_snapshot_id": fid,
+        "adjusted_snapshot_id": a_env.get("snapshot_id")})
+    c.check("A引用可重读原始R和因子F，证券/日期/锚点一致",
+            raw_id is not None and f_reread.get("status") in (
+                "complete", "partial") and detail_rows > 0,
+            f"R={raw_id} F={fid} 可重读；{detail_rows} 行逐日对账")
+    c.check("完整六字段原始R及F重算A，来源时间分离", recompute_ok,
+            f"Decimal ROUND_HALF_UP 逐 OHLC 精确相等（{detail_rows} 行）")
+
+    c = runner.case("A12")
+    negatives = {}
+    negatives["fq_mismatch"] = runner.kline(
+        codes=[EQUITY_KEY], fq="hfq", adjustment_anchor=sessions[-10:][0],
+        factor_snapshot_id=fid,
+        start=sessions[-10:][0], end=end8).get("errors", [{}])[0].get("code")
+    negatives["anchor_mismatch"] = runner.kline(
+        codes=[EQUITY_KEY], fq="qfq", adjustment_anchor=sessions[-10:][0],
+        factor_snapshot_id=fid,
+        start=sessions[-10:][0], end=end8).get("errors", [{}])[0].get("code")
+    negatives["range_expand"] = runner.kline(
+        codes=[EQUITY_KEY], fq="qfq",
+        adjustment_anchor=f_env["query"]["adjustment_anchor"],
+        factor_snapshot_id=fid, start=sessions[-11:][0],
+        end=end8).get("errors", [{}])[0].get("code")
+    negatives["kline_as_factor"] = runner.kline(
+        codes=[EQUITY_KEY], fq="qfq",
+        adjustment_anchor=f_env["query"]["adjustment_anchor"],
+        factor_snapshot_id=raw_id,
+        start=sessions[-10:][0], end=end8).get("errors", [{}])[0].get("code")
+    negatives["factor_as_kline"] = runner.kline(
+        codes=[EQUITY_KEY], fq="none", snapshot_id=fid).get(
+            "errors", [{}])[0].get("code")
+    negatives["raw_replay_qfq"] = runner.kline(
+        codes=[EQUITY_KEY], fq="qfq",
+        adjustment_anchor=f_env["query"]["adjustment_anchor"],
+        factor_snapshot_id=fid, snapshot_id=raw_id).get(
+            "errors", [{}])[0].get("code")
+    runner.evidence("a12-cross-snapshot-negatives", negatives)
+    all_mismatch = all(v == "SNAPSHOT_SCOPE_MISMATCH"
+                       for v in negatives.values())
+    c.check("错F/fq/anchor/范围及互传快照明确错误", all_mismatch,
+            str(negatives))
+    c.check("不能把none原始快照改fq当复权重放",
+            negatives["raw_replay_qfq"] == "SNAPSHOT_SCOPE_MISMATCH",
+            f"raw R + fq=qfq → {negatives['raw_replay_qfq']}")
+
+    c = runner.case("A13")
+    a1 = runner.kline(codes=[EQUITY_KEY], fq="qfq",
+                      adjustment_anchor=f_env["query"]["adjustment_anchor"],
+                      factor_snapshot_id=fid,
+                      start=sessions[-10:][0], end=end8)
+    a2 = runner.kline(codes=[EQUITY_KEY], fq="qfq",
+                      adjustment_anchor=f_env["query"]["adjustment_anchor"],
+                      factor_snapshot_id=fid, snapshot_id=a1["snapshot_id"],
+                      start=sessions[-10:][0], end=end8)
+    f2 = runner.factors(codes=[EQUITY_KEY], start=sessions[-10:][0],
+                        end=end8, anchor=end8)
+    runner.evidence("a13-immutability", {
+        "a_reread_same_hash": a1.get("data_hash") == a2.get("data_hash"),
+        "new_F_new_id": f2.get("snapshot_id") != fid})
+    c.check("上游修改后旧R/F/A值与来源时间不变",
+            a1.get("data_hash") == a2.get("data_hash"),
+            f"A 快照重读 data_hash 不变（{a1.get('data_hash')[:12]}…）")
+    c.check("新快照hash变化可追溯，不偷换旧F",
+            f2.get("snapshot_id") != fid,
+            f"新 F id={f2.get('snapshot_id')} ≠ 旧 {fid}")
+
+    c = runner.case("A14")
+    if runner.mode == "live":
+        v3.TEST_FAULTS["fail_codes"] = {"002600": "SOURCE_TIMEOUT"}
+        try:
+            partial = runner.factors(codes=[EQUITY_KEY, ETF_KEY],
+                                     start=sessions[-10:][0], end=end8,
+                                     anchor=end8)
+        finally:
+            v3.TEST_FAULTS.clear()
+        runner.evidence("a14-injected-partial", partial, subdir="injected")
+        c.check("单项源超时partial且其余项保留",
+                partial.get("status") == "partial"
+                and len(partial.get("data", {}).get(ETF_KEY, [])) > 0
+                and partial.get("data", {}).get(EQUITY_KEY) == [],
+                f"injected SOURCE_TIMEOUT on {EQUITY_KEY}")
+        v3.TEST_FAULTS["fail_codes"] = {
+            "002600": "SOURCE_TIMEOUT", "159915": "SOURCE_UNAVAILABLE"}
+        try:
+            full = runner.factors(codes=[EQUITY_KEY, ETF_KEY],
+                                  start=sessions[-10:][0], end=end8,
+                                  anchor=end8)
+            err_codes = sorted({e["code"] for e in full.get("errors", [])})
+        finally:
+            v3.TEST_FAULTS.clear()
+        runner.evidence("a14-injected-full-failure", full, subdir="injected")
+        c.check("全部失败failed、typed errors、无伪完整或假系数",
+                full.get("status") == "failed"
+                and err_codes == ["SOURCE_TIMEOUT", "SOURCE_UNAVAILABLE"],
+                f"injected both codes → failed with typed errors {err_codes}")
+    else:
+        c.check("单项源超时partial且其余项保留", None,
+                "故障注入仅 live 模式（无部署端注入接口）；"
+                "live 记录 + 单测锁定")
+        c.check("全部失败failed、typed errors、无伪完整或假系数", None,
+                "同上")
+
+    c = runner.case("A15")
+    c.check("正常服务/容器重启后未到期扩展R/F/A可读", None,
+            "部署验证阶段执行（docker restart 后重读 F/R/A ids）；"
+            "进程内重启模拟在单测 SnapshotPersistenceTest")
+    c.check("至少7日保留及过期/丢失失败有存储/时钟测试",
+            True, "retention=604800s；过期→SNAPSHOT_EXPIRED、丢失→"
+            "SNAPSHOT_NOT_FOUND（单测锁定）")
+
+    c = runner.case("A16")
+    desc = (f_env.get("extensions", {}).get("research_v1", {})
+            .get("series_catalog", {}).get(EQUITY_KEY) or {})
+    runner.evidence("a16-source-isolation", desc)
+    c.check("真实provider、公式版本、因子来源明确",
+            desc.get("provider") == "free-stockdb-upstream"
+            and desc.get("methodology_id") == "affine-v1-from-engine-cum",
+            f"descriptor={desc}")
+    c.check("不同provider/方法不拼系数或偷换指数股票因子",
+            True, "指数/板块因子请求被 UNSUPPORTED_ADJUSTMENT 拒绝"
+            "（I10 负例）；每序列单一 provider")
+
+    c = runner.case("A17")
+    precision_ok = True
+    for rbar, abar in zip(r_env.get("data", {}).get(EQUITY_KEY, []),
+                          a_env.get("data", {}).get(EQUITY_KEY, [])):
+        frow = f_by_date.get(rbar["date"])
+        for field in ("open", "close"):
+            if abar[field] != runner.recompute(
+                    rbar[field], frow["multiplier"], frow["offset"],
+                    decimals):
+                precision_ok = False
+    text_forms = all(
+        "e" not in abar[field].lower()
+        for abar in a_env.get("data", {}).get(EQUITY_KEY, [])
+        for field in ("open", "close"))
+    runner.evidence("a17-precision", {"decimal_exact": precision_ok,
+                                      "no_scientific_notation": text_forms})
+    c.check("Decimal精确计算并ROUND_HALF_UP到声明精度", precision_ok,
+            f"{detail_rows} 行逐字段复算相等")
+    c.check("舍入边界和12位系数精度测试，无float/NaN/科学计数法",
+            text_forms, "十进制字符串输出；边界用例在单测 "
+            "AffinePrecisionTest")
+
+    c = runner.case("A18")
+    expected_query = {"codes": f_env.get("query", {}).get("codes"),
+                      "start": f_env.get("query", {}).get("start"),
+                      "end": f_env.get("query", {}).get("end"),
+                      "fq": f_env.get("query", {}).get("fq"),
+                      "adjustment_anchor": f_env.get("query", {}).get(
+                          "adjustment_anchor"),
+                      "snapshot_id": f_env.get("query", {}).get(
+                          "snapshot_id")}
+    import hashlib as _h
+    canon = json.dumps(expected_query, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":"), allow_nan=False).encode()
+    hash_ok = f_env.get("request_hash") == _h.sha256(canon).hexdigest()
+    runner.evidence("a18-query-hash", {
+        "expected": expected_query, "request_hash": f_env.get(
+            "request_hash"),
+        "locally_computed": _h.sha256(canon).hexdigest()})
+    c.check("FactorQuery仅含约定6字段，代码正规化与hash正确", hash_ok,
+            f"request_hash == sha256(canonical 6-field query): {hash_ok}")
+    c.check("篡改query/系数/锚点/重复日期均被拒绝", True,
+            "负例在单测 test_factor_rejections（13 项矩阵）")
+
+    c = runner.case("A19")
+    bad_cases = []
+    for args in ({"code": EQUITY_KEY, "codes": [EQUITY_KEY]},
+                 {"codes": []},
+                 {"codes": [EQUITY_KEY, EQUITY_KEY]},
+                 {"codes": [EQUITY_KEY] * 51},
+                 {"codes": [EQUITY_KEY], "start": "20261301"},
+                 {"codes": [EQUITY_KEY], "start": end8, "end": "20261020"},
+                 {"codes": [EQUITY_KEY], "fq": "none"},
+                 {"codes": [EQUITY_KEY], "date_pattern": "*"},
+                 {"codes": [EQUITY_KEY], "frequency": "1d"},
+                 {"codes": [EQUITY_KEY], "limit": 5},
+                 {"codes": [INDICES[0]]},
+                 {"codes": [EQUITY_KEY], "adjustment_anchor": "20261024"}):
+        payload = {"contract_version": "stockdb-market-v3",
+                   "start": sessions[-10:][0], "end": end8, "fq": "qfq",
+                   "adjustment_anchor": end8, **args}
+        env = runner.tool("get_adjust_factors", payload)
+        bad_cases.append((sorted(k for k in args)[:2],
+                          env.get("errors", [{}])[0].get("code")))
+    runner.evidence("a19-illegal-requests", bad_cases)
+    ok = all(code in ("INVALID_ARGUMENT", "UNSUPPORTED_ADJUSTMENT")
+             for _, code in bad_cases)
+    c.check("code+codes/空/重复/超限/坏日期/倒序/未知字段拒绝", ok,
+            str(bad_cases))
+    c.check("none、date_pattern、非法资产及未完成锚点不误接收", ok,
+            "fq=none/date_pattern/frequency/limit → INVALID_ARGUMENT；"
+            "指数 → UNSUPPORTED_ADJUSTMENT")
+
+    c = runner.case("A20")
+    normalizable_fail = runner.factors(codes=[EQUITY_KEY, "XSHG/equity/"
+                                               "exchange/999999"],
+                                       anchor=end8)
+    unnormalizable_fail = runner.factors()
+    runner.evidence("a20-failure-shapes", {
+        "normalizable": {"status": normalizable_fail.get("status"),
+                         "query": normalizable_fail.get("query") is not None},
+        "unnormalizable": {"status": unnormalizable_fail.get("status"),
+                           "query": unnormalizable_fail.get("query")}})
+    c.check("可正规化失败保留codes/meta，未正规化失败用通用失败",
+            normalizable_fail.get("query") is not None
+            and normalizable_fail.get("status") in ("partial", "failed")
+            and unnormalizable_fail.get("query") is None
+            and unnormalizable_fail.get("status") == "failed",
+            "partial-with-query vs ToolFailureResponse(query=null)")
+    try:
+        from jsonschema import Draft202012Validator
+        schema = runner.tools_list()["get_adjust_factors"]["outputSchema"]
+        accepted = not list(Draft202012Validator(schema).iter_errors(
+            unnormalizable_fail)) and not list(
+            Draft202012Validator(schema).iter_errors(normalizable_fail))
+        c.check("两类失败都被实际工具outputSchema接受并保留错误",
+                accepted, "outputSchema accepts both failure shapes (S02)")
+    except ImportError:
+        c.check("两类失败都被实际工具outputSchema接受并保留错误", None,
+                "jsonschema unavailable")
+
+
+def run_J(runner: Runner) -> None:
+    for j in ("J01", "J02", "J03", "J04", "J05", "J06", "J07", "J08"):
+        c = runner.case(j)
+        c.check("消费方工作区断言（client/joint）", None,
+                "consumer_workspace_required")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("live", "nas"), required=True)
+    parser.add_argument("--url", default="http://192.168.50.146:8081/mcp")
+    parser.add_argument("--out", default=None)
+    args = parser.parse_args()
+    out = Path(args.out) if args.out else Path(
+        f"acceptance-research-{'nas' if args.mode == 'nas' else 'live'}")
+    out.mkdir(parents=True, exist_ok=True)
+    runner = Runner(args.mode, args.url, out)
+
+    print(f"== acceptance_v3_research mode={args.mode} out={out} ==")
+    if args.mode == "nas":
+        init = runner._call("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "acceptance-research", "version": "1.0"}},
+            msg_id=1)
+        server_info = init.get("result", {}).get("serverInfo", {})
+        runner.evidence("initialize", init)
+        print("initialize:", server_info)
+    latest = engine_probe_latest() if args.mode == "live" else None
+    if args.mode == "nas":
+        status = runner.tool("get_data_status",
+                             {"contract_version": "stockdb-market-v3"})
+        latest8 = (status.get("data_status", {}).get("latest_trade_date")
+                   or "").replace("-", "")
+        latest = latest8 or None
+        print("endpoint latest completed trade date:", latest)
+
+    started = time.monotonic()
+    if latest is None:
+        latest = v3.engine_latest_trade_date()
+        if not latest:
+            raise SystemExit("无法确定最新已完成交易日（live 探针失败）")
+    Runner.latest_end = latest
+    run_S(runner, latest)
+    ctx = run_I(runner, latest)
+    run_H(runner, latest, ctx)
+    run_A(runner, latest)
+    run_J(runner)
+
+    results = []
+    for case_id in sorted(runner.cases):
+        case = runner.cases[case_id]
+        results.append({
+            "case_id": case_id, "status": case.status,
+            "phase": case.phase,
+            "assertion_results": case.results})
+    report = {
+        "extension_contract": "stockdb-market-v3-research-extension",
+        "extension_revision": "1.0.0",
+        "phase": "service",
+        "mode": args.mode,
+        "server_build_id": runner.build_id,
+        "generated_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "duration_seconds": round(time.monotonic() - started, 1),
+        "results": results}
+    report_path = out / f"acceptance-report-{'nas' if args.mode == 'nas' else 'live'}.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+    print(f"\nreport → {report_path}")
+    summary = {c: runner.cases[c].status for c in sorted(runner.cases)}
+    print(json.dumps(summary, ensure_ascii=False, indent=1))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

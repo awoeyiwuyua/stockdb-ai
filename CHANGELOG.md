@@ -2,8 +2,230 @@
 
 > **本文件是版本流水账（每次改了什么、为什么改），不是运维知识库。**
 > 可复用的坑位/症状/判据/处置已归 [`docs/ops/runbook.md`](docs/ops/runbook.md)——
-> 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么这么改"时回查。
+> 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
+
+## [0.14.2] — 2026-10-25（**复权 A 快照重放 meta.adjustment 补修**——消费方反馈包 `2026-10-25-stockdb-adjusted-replay-feedback`）
+
+> 消费方隔离编排实测发现：A 快照重放（fq/anchor/F 相同 + snapshot_id=A）返回
+> status=complete 但 meta.adjustment 退回 none/null（data_hash 相同但元数据
+> 违约，客户端报 adjustment mismatch 拒绝整批）。反例在包内
+> reproduce_replay_defect.py 对 0.14.1/55c8e04 复现（exit 0）。
+
+- **修复**（market_v3_research.py::_adjusted_from_snapshot）：重放路径此前只
+  补回 research extensions，遗漏恢复 meta.adjustment——首次计算路径有覆盖
+  逻辑、重放路径没有。现在用**捕获时** payload 的 mode/anchor/F/algorithm
+  （affine-v1）恢复每个有复权行证券的 meta.adjustment；语义来自快照而非按
+  请求猜补；错误/空行证券与首次一致保持 none；R 与普通 none 快照不经该
+  路径，核心未复权分支不受污染。
+- **附带**：fq≠捕获值的 A 快照重放错误消息精确化（指明须携带相同
+  fq/adjustment_anchor/factor_snapshot_id，附 captured/requested fq）。
+- **必验矩阵单测**（test_market_v3_research 新增 3 例，总 148 全绿）：
+  重放与首次 meta/data/source_catalog/units/adjustment 全一致 + 冻结校验器
+  校验重放响应；子日期（锚点在子区间外不重置）/子证券/fields 投影/
+  limit-partial/股票+ETF 混合批量重放全部保留复权语义；hfq 重放；
+  R/none 快照保持 none/null 且核心重读不受污染。负例（错 fq/anchor/F、
+  互传快照、范围扩张）原有断言保持。
+
+## [0.14.1] — 2026-10-25（**research-extension 消费方反馈修补：E01—E08**——反馈包 `2026-10-25-stockdb-research-extension-consumer-feedback`）
+
+> 消费方复验判定"部分交付，扩展整体验收未通过"（E01—E04 为 P1 阻塞）。
+> 本版按 E01—E08 逐项修复；合同 1.0.0 与基线六文件零变更，原回传记录保留。
+
+- **E01（P1，代码修复）**：所有 v3 get_kline 成功响应（含 R 原始快照重读、
+  子范围读取、普通 core）现在都携带 `extensions.research_v1` 价格序列目录——
+  扩展校验器对一切带 query 的 KlineResponse 强制 research_metadata；**A 的
+  series_catalog 改为与 R 相同的价格序列描述**（E01 旧实现误用因子序列描述，
+  与 R 的 series/provider/method 不等被 reconstruct 拒绝）；复权语义由
+  meta.adjustment 表达；F 保持因子序列描述。快照 payload 持久化 catalog，
+  重启后重读元数据不变。单测新增 reconstruct(R,F,A) 校验器全过。
+- **E02（P1，runner 修复）**：H01 恢复逐证券精确窗口标准（==500/==250，
+  废除 >=498 与 per-market any() 放宽）；成熟样本 600000（引擎数据洞 6 会话）
+  由 600036 替代（500/500 完整），600000 缺口记录保留（UNKNOWN gap，不改
+  SUSPENDED）；板块 BLOCKED 如实拖累 H01 断言（不宣称批次全部完成）。
+- **E03（P1，runner 修复）**：I08 扩为 4 指数 ×（末 5 日+规则抽样 5 日）逐点
+  表（双方原值/精度/差值/判定，~160 点/轮）；服务提供者逐响应记录；
+  同源/跨源独立性分开标注。本轮恰为**跨提供者对照**（腾讯服务 vs 新浪参考）
+  4×40 点全 PASS。
+- **E04（P1，runner+证据修复）**：A04/A06/A07 改为独立实现对照——runner 从
+  引擎原始事件自建 cum walk 与 12 位量化 multiplier，独立复算复权价与服务
+  A 逐点 Decimal 精确比较（A06 28 点、A07 28 点全 PASS）；事件窗口扩为
+  **±3 交易日**；SDK 公式证据升级为**容器内 stock_sdk.py 原文摘录**；
+  **引擎 mult 公式实证**：mult = 前一交易日 close / 事件日 pre_close
+  （000001: 11.60/11.35=1.022 ✓；002594: 337.0/111.01=3.0357→3.036 ✓），
+  give/trans/div 字段语义无官方文档、如实保留限制；废除 0.001 因子容差；
+  引擎 pre_close 事件前预调整语义（不能作连续性基准）作为限制记录。
+- **E05（P2，runner 修复）**：S06 补齐真实并发（4×500日请求并行）+ 慢负载
+  注入（单码 sleep 3s）期间 status p95 实测 + 负载后槽位恢复检查（live 模式；
+  nas 端无注入接口如实引用 live 证据）。
+- **E06**：I07/H04 从 NOT_RUN 占位改为如实 BLOCKED（窗口内无更名事件/无带
+  公开证据停牌样本；结构性保证由单测锁定；600000 缺口不改称停牌）。
+- **E07（P2）**：A15 重启验证升级为 F/R/A 三者 data_hash、data、series 元
+  数据、来源 retrieved_at 逐项前后一致（不再只证"可读"）；R/A 目录一致性
+  与 R 元数据存在性并入断言。
+- **E08（P2，打包修复）**：回传改用真实 ZIP；contract/ 补齐 baseline 六文件
+  （内层 MANIFEST 与原校验器可在另一工作区直接运行）；部署事实统一
+  GIT_COMMIT/台账（消除 ed871e1 残留）；image_digest 如实 null + 本地镜像
+  ID 单独标注；报告按断言级如实状态（45→重新计数）。
+
+## [0.14.0] — 2026-10-25（**research-extension 1.0.0 服务端落地：A 指数/板块日K + B 因子/R/F/A 复权链 + 长历史**——消费方交接包 `2026-10-25-stockdb-research-extension-handoff`）
+
+> 补充合同 `stockdb-market-v3-research-extension` 1.0.0（叠加在 stockdb-market-v3
+> 3.0.0 之上，不改基线六文件与原 $defs）。两批能力分别交付：
+> A=index_board_daily_v1（4 指数 + 7 东财 BK）；B=adjusted_history_v1（因子工具
+> v3 分支 + R/F/A 快照链）。合同机器件原样落地
+> `interfaces/mcp/contract/research-extension/`（MANIFEST 18 文件校验通过）。
+
+- **A 批指数**：4 个指定规范键（上证/深成/创业板/中证1000-csi 命名空间）经腾讯
+  ifzq 日K（**三主机轮转**：实测可达性随网络位置漂移——NAS 容器仅无前缀主机
+  可用、开发机反之、web. 前缀间歇 501）。量额单位不可证明 → price-only
+  （volume/amount null + units.null_reason，I06 合规路径）；series_catalog 逐请求
+  证券给出 SeriesDescriptor（provider=编制方/交易所、origin_reference 公开证据）。
+  外部对照：新浪 getKLineData 独立提供者逐点比较（末 5 日，容差 1ulp@2dp）。
+- **A 批板块**：7 个东财 BK 经 push2his（四主机轮转）。**部署窗口内东财源持续
+  不可达**（v4/联通v6 节点 RST，与 runbook §6.5 上游抽风模式一致）→ 按合同如实
+  SOURCE_UNAVAILABLE + 状态工具 degraded + known_limitations 声明；**不用 THS
+  序列冒充**（I04 负例锁定）。交付物按 BLOCKED 逐序列报告。
+- **B 批因子**：get_adjust_factors v3 分支（FactorRequest/Response；请求级资产资格
+  ——指数/板块拒绝 UNSUPPORTED_ADJUSTMENT）。引擎 `复权:<code>:<date>` cum 序列
+  → affine-v1（multiplier=cum(≤date)/cum(≤anchor) 量化 12 位、offset=0）。
+  **公式证据链**：容器内 `/opt/stockdb/pybao/stock_sdk.py::_apply_fq_in_memory`
+  源码（qfq=raw×f_cur/f_latest、hfq=raw×f_cur）+ 引擎事件行实测
+  （000001@20260924：div=0.249、mult=1.022=11.60/(11.60-0.249)、cum 链乘积吻合）。
+  逐原始行情日给系数（A03）；qfq 锚末交易日/hfq 锚首日（A05 必须项）+ 区间内
+  任意已完成交易日显式锚点。
+- **B 批 R/F/A**：get_kline fq=qfq/hfq 携带 F → 捕获原始六字段 R（可经 fq=none+
+  snapshot_id 重读）→ Decimal 仿射计算 A（ROUND_HALF_UP@price_decimals、量额
+  原样携带、合法 ≤0 值不复检正负）→ A 快照含 raw_snapshot_id。互传负例
+  （F 当行情快照/R 当因子/裸 R 改 fq 重放）全 SNAPSHOT_SCOPE_MISMATCH（A12）。
+- **持久化快照仓**（A15）：内存+磁盘双层（/data/market_v3_snapshots，原子写），
+  **docker restart 后 F/R/A 同 id 重读值不变**（部署级实测）。
+- **核心兼容**：四工具 schema/行为不变（纯股票/ETF 请求不带 extensions）；
+  旧版 get_adjust_factors（无 contract_version）原形状保留。**amount 精度修正**：
+  500 日窗口实测引擎存在带小数成交额（002600@2026-06-23）——原「整数元」断言
+  过紧致整段失败，放宽 ≤2 位小数并声明 amount_decimals=2（合同本就允许十进制）。
+- **验收**：单测 143 例全绿（新增 test_market_v3_research 42 例）；全仓 761 通过；
+  acceptance_v3_research.py live 36 PASS/0 FAIL、nas 模式 0 FAIL（A14 注入仅
+  live）；基线执行器三模式（stub 17 PASS/live 6/nas 4，0 FAIL，断言按 0.14.0
+  语义更新：指数身份解析、板块源错误、裸 qfq 拒绝、X02/X04 移交扩展执行器）。
+- **部署坑**：Windows `git archive` 按 core.autocrlf 输出 CRLF → entrypoint shebang
+  `
+` → 容器 Restarting(255)。**必须 `git -c core.autocrlf=false archive`**。
+  （0.13.x 台账的 fnOS 剥可执行位坑由 Dockerfile chmod 根治，本次未复现。）
+
+## [0.13.2] — 2026-10-24（**C01 收尾：发布 schema 两处协议/兼容遗漏**——消费方复验 `stockdb-v3-schema-completion-20261024`）
+
+> 0.13.1 反例已全部修复，但消费方复验（FEEDBACK 1024）以 **46 项离线回归 +
+> 部署端点实测**确认 C01 仍差两处：① 状态/清单/日历的 outputSchema 未声明
+> `ToolFailureResponse` 联合分支——**服务自己返回的合法失败信封（如未知参数 →
+> INVALID_ARGUMENT 统一失败信封）被自己发布的 schema 判非法**（3 例实测，合同
+> README §4.3 明确要求联合）；② MCP 2025-06-18 Tool 定义要求 input/output
+> schema 根节点显式 `type:object`（当前只有 $schema/anyOf/$defs）。
+
+- **修补**（与消费方候选补丁 `proposed-published-schema-completion.patch` 语义一致，
+  保留中文文档注释）：`published_output_schema()` 为非kline三工具追加
+  `#/$defs/ToolFailureResponse` 分支（合并传递依赖闭包；KlineResponse 自身已含
+  失败形状为对照项）；两个发布 schema 生成器根节点显式 `type:"object"`。
+- **回归新增 4 项**（`PublishedSchemaTest`）：8 个发布 schema 根 type=object；
+  三个工具的真实失败信封（缺必填/未知参数/UNSUPPORTED_CONTRACT）被自身
+  outputSchema 接受；新增失败分支不吞坏 v3 输出（反例仍全拒）；$defs 覆盖
+  ToolFailureResponse 闭包。
+- **消费方验证器离线复跑**：`verify_published_schemas.py` 对本实现导出的
+  tools/list **46/46 通过**（0.13.1 基线 35/46；11 项失败=8 根 type + 3 合法失败）。
+- 部署后从实际端点重新导出 tools/list 复跑 46 项 + 三工具现场失败触发验证（见
+  部署台账与回交包）。
+
+## [0.13.1] — 2026-10-24（**C01 修补：四个工具实际发布的 input/output schema 接上冻结合同**——消费方复核 FEEDBACK 2026-10-24 §4 实证 0.13.0 缺陷）
+
+> 起因：消费方复核（`stockdb-v3-service-feedback-20261024`，FEEDBACK.md + schema-repro.json
+> + 23 项实测证据）确认行情响应本身合格，但 **C01 工具发现 schema 判 FAIL**：
+> ① 四个 outputSchema 的旧版分支（仅 type:object）吞掉非法 v3 对象
+> （`{"contract_version":...,"status":"complete","data":"wrong"}` 四工具均判合法）；
+> ② inputSchema 未落实 required/code-codes 互斥/fields 类型（code+codes、
+> fields=123、缺 end 三反例均被接受；limit=true 对照被拒证明检查真实执行）；
+> ③ 描述把 603516 写成 XSHE（实为 XSHG）。**合同 3.0.0 及六源文件零变更**
+> （消费方 MANIFEST 验证 original_contract_bundle_unchanged=true）。
+
+- **修补原则（FEEDBACK §6.1-6.2）**：v3 分支 = 冻结合同 Request/Response 定义
+  **原文**——`market_v3._contract_defs_closure()` 从 contract/contract.schema.json
+  **程序化抽取 $defs 传递闭包**嵌入（不手工抄写、不改合同一个字节；测试锁定
+  逐定义一致）；旧版分支一律 `not: required [contract_version]`——**只匹配未携带
+  contract_version 的请求/输出**，宽泛分支不再吞掉任何声明 v3 的对象。
+- **发布结构**：inputSchema = anyOf[$ref 合同 Request + $defs 闭包, 旧版分支]；
+  outputSchema = anyOf[$ref 合同 Response + $defs 闭包, LegacyToolResult(8 键
+  envelope 且排除 contract_version)]。自包含可独立解析，不再只写文档路径。
+- **market_v3 缺失降级**：TOOLS 装配退回旧版-only schema（v3 分发不受影响）。
+- **运行时对齐（消除 schema/运行时口径分叉）**：显式 null（code/codes/fields/
+  limit/snapshot_id）与缺省不再等价——schema 与运行时同判 INVALID_ARGUMENT。
+- **示例修正**：603516 → `XSHG/equity/exchange/603516`（上交所代码）。
+- **回归（FEEDBACK §6.3，针对实际发布的 server.TOOLS）**：
+  `test_market_v3.PublishedSchemaTest` 13 项——4 坏输出 × 四工具全拒、3 坏输入 +
+  limit=true 对照全拒、未知版本不匹配任何分支（运行时对直连调用方仍返回
+  UNSUPPORTED_CONTRACT）、合同 examples.json 7 请求全收、真实 v3 信封（完整/部分/
+  失败/工具失败/清单/日历/状态）全收、旧版输入与 8 键 envelope 全收、
+  嵌入 $defs 与冻结合同逐定义一致、603516 修正、旧分支排除 contract_version。
+- **验收执行器**：`acceptance_v3.py` C01 增加同矩阵（stub 用 server.TOOLS；
+  **nas 模式对部署端点导出的 tools/list 重跑 FEEDBACK 正反例**——FEEDBACK §6.5）。
+- 分级更正：**C01 在 0.13.0 = FAIL**（消费方反例实证），0.13.1 修补后重验 PASS；
+  其余 C02—C22 服务侧结论不变（消费方 23 项实测与本服务报告一致）。
+- 身份分类表官方出处（FEEDBACK §5 要求可复核）：上交所《证券交易业务指南第4号——
+  证券代码段分配》（sse.com.cn 业务规则栏目）、深交所《股票发行与承销业务指南
+  第3号——股票代码管理》（docs.static.szse.cn PDF）。
+
+## [0.13.0] — 2026-10-24（**公开行情合同 stockdb-market-v3（修订 3.0.0）服务端落地：core_daily_v1 首批**；根因修复 legacy 批量「成功空数据」）
+
+> 起因：消费方项目交付合同包 `stockdb-market-v3-3.0.0`（HANDOFF + README +
+> schema/examples/验收用例/离线校验器），要求迭代 NAS StockDB HTTP MCP 行情服务，
+> 使 `core_daily_v1` 通过共同契约验收并保留旧版兼容。**根因查证在先，不在没证据时
+> 猜**——HANDOFF 明令「不要只修 limit=0 后就宣告完成」。
+
+- **L01/L02 根因（代码+实验证据，不是猜测）**：legacy 批量 `codes=[...]` 走 pybao
+  SDK `rd.pipe()+mget` 单路批量——**容器内实测 10/20 次全空（50%）**，且
+  `stock_sdk.get_data` 的 Python 层把异常形状静默归一为 `{code: []}` 不报错 →
+  MCP 层输出 `errors=[]/is_partial=false/truncated=false` 的「成功空批量」；
+  同批逐码 `rd.vals` 单查 **0/100 失败**。**修复**：`_query_kline_via_sdk` 批量
+  改逐码单查后按码组装（返回形状与旧版完全一致；QC 锁定测试
+  `test_http_dispatch_get_kline_sdk_batch` 同步改为锁定逐码语义）。
+  SDK `pipe` 缺陷本身在原生 `stockdb.abi3.so` 内（上游发行包），本仓库不可修，
+  已在交付报告注明。
+- **L03**：旧版单元素 `codes=["002600"]` 返回扁平列表是**文档化兼容行为**（v3 才统一
+  对象形状）；v3 单票/单元素/多元素一律 `{规范键: rows}`。
+- **v3 分支（`interfaces/mcp/market_v3.py`，新模块）**：请求显式携带
+  `contract_version=stockdb-market-v3` 时接管四个首批工具（get_kline /
+  get_stock_list / get_trading_days / get_data_status）；**不带该字段的请求路径与
+  返回形状零改动**。要点：
+  - 规范证券键 `<exchange>/<asset_type>/<namespace>/<code>`；裸代码 →
+    `AMBIGUOUS_INSTRUMENT`；目录/段表核验失败 → `UNKNOWN_INSTRUMENT`；未声明
+    资产（index/board/北交所/LOF·REIT 段）→ `UNSUPPORTED_ASSET`；未知合同版本 →
+    `UNSUPPORTED_CONTRACT`（details.requested_contract）；
+  - 统一信封（query/request_hash/data/meta/errors/source_catalog/data_hash）+
+    canonical_json_v1 哈希（禁浮点；与消费方校验器同算法）；
+  - coverage/gaps：日历 2024-01-01..2026-12-31（core/calendar_market XSHG 表）内
+    expected=交易日数，缺口一律 UNKNOWN+证据空（无上市/停牌公开证据不造合法空），
+    日历范围外 expected=null 不能标 complete；
+  - 快照仓：不可变、保留 604800s、重读子集（证券/区间/投影）、
+    SNAPSHOT_{NOT_FOUND,EXPIRED,SCOPE_MISMATCH} 明确失败、重启丢失不重抓；
+  - 来源记录：provider=null（上游未文档化，如实披露于 unknown_fields）、
+    aggregator=free-stockdb+引擎版本、retrieved_at=引擎读取/同步日志时间、
+    finality_evidence=「仅盘后增量同步写入」机制+同步日志（**不是**「现在已过收盘」）；
+    bar_state 无依据时 unknown 不伪标 final；
+  - 有界运行：行情并发 4（满载 BUSY+retry_after_ms）、单请求期限 30s（耗尽逐码
+    SOURCE_TIMEOUT）、单响应行数上限 200k（含预期槽位预检 → RESULT_TOO_LARGE）、
+    快照仓总量上限；状态工具只读 60s 后台健康缓存（实测 p95≈0ms）；
+  - 双载荷：structuredContent + 恰好一个同对象 JSON 文本块；失败 isError=true；
+  - 旧版兼容：`legacy.default_contract=v2, sunset_at=null`；
+- **合同文件入库**：`interfaces/mcp/contract/`（schema/examples/验收用例/校验器/
+  MANIFEST）与消费方交付包**字节级一致**（测试锁定 sha256）；测试用它做判定基准
+  （不是自造第二套 schema）。
+- **测试**：`test_market_v3.py` 81 项（含消费方校验器逐信封校验、故障注入、快照、
+  并发 BUSY、p95、legacy 回归）；既有 `test_stockdb_mcp_server.py` 140 项全绿
+  （QC 批量测试改逐码语义后）。live 模式（`STOCKDB_V3_LIVE=1`）对真实引擎跑通
+  批量/单票等价、单位（股/份、元，均价交叉核对）、日历、清单。验收执行器
+  `acceptance_v3.py` 按 C01—C22/X01—X05 编号产出证据报告（stub/live/nas 三模式）。
+- **部署身份**：镜像构建注入 `STOCKDB_BUILD_COMMIT/STOCKDB_BUILD_ID`；
+  `get_data_status` v3 报 server.build_id/source_commit/image_digest（实际不可得为
+  null，不造值）。
+- 交付报告与支持矩阵见 `docs/deployments.md`（0.13.0 节）与交付说明。
 
 ## [0.12.15] — 2026-10-20（**0.12.14 实机部署到 NAS**（0.12.6 → 0.12.14）；顺手修掉 NAS 源树的 CRLF 漂移）
 
