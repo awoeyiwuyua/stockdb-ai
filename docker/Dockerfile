@@ -122,6 +122,8 @@ COPY stockdb-ai/app.py stockdb-ai/config.py stockdb-ai/entrypoint.sh /opt/webui/
 # 构建内显式 chmod 根治，不再依赖构建上下文的文件模式。
 RUN chmod +x /opt/webui/entrypoint.sh
 COPY stockdb-ai/interfaces/ /opt/webui/interfaces/
+# 0.15.0：astock provider lifecycle（vendor 原样快照 + 生成模块 + 冻结 schema）
+COPY stockdb-ai/astock/ /opt/webui/astock/
 COPY stockdb-ai/services/ /opt/webui/services/
 COPY stockdb-ai/core/ /opt/webui/core/
 COPY stockdb-ai/storage/ /opt/webui/storage/
