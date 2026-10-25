@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:stockdb:market:v3:3.0.0",
+  "title": "StockDB public market contract v3, revision 3.0.0",
+  "description": "Consumer specification, not a declaration of deployed server support. Cross-field rules are in README.md and validate_contract.py.",
+  "$ref": "#/$defs/KlineResponse",
+  "$defs": {
+    "ContractVersion": {"const": "stockdb-market-v3"},
+    "Date8": {"type": "string", "pattern": "^[0-9]{8}$"},
+    "Date": {"type": "string", "format": "date"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "MinuteTimestamp": {"type": "string", "format": "date-time", "pattern": "T[0-9]{2}:[0-9]{2}:[0-9]{2}\\+08:00$"},
+    "Hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "Decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]{1,12})?$"},
+    "NonnegativeDecimal": {"type": "string", "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,12})?$"},
+    "InstrumentId": {
+      "type": "string",
+      "pattern": "^(XSHG|XSHE|XBSE|CN)/(equity|etf|index|board)/[a-z][a-z0-9_-]*/[A-Za-z0-9._-]+$"
+    },
+    "Codes": {"type": "array", "items": {"$ref": "#/$defs/InstrumentId"}, "minItems": 1, "maxItems": 50, "uniqueItems": true},
+    "Fields": {
+      "type": "array", "items": {"enum": ["open", "high", "low", "close", "volume", "amount"]},
+      "minItems": 1, "uniqueItems": true
+    },
+    "Frequency": {"enum": ["1d", "1m", "5m", "15m", "30m", "60m", "1w", "1M"]},
+    "NullableString": {"type": ["string", "null"], "minLength": 1},
+    "NullableCount": {"type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991},
+    "KlineRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "frequency", "start", "end", "fq"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/ContractVersion"},
+        "code": {"$ref": "#/$defs/InstrumentId"},
+        "codes": {"$ref": "#/$defs/Codes"},
+        "frequency": {"$ref": "#/$defs/Frequency"},
+        "start": {"type": "string"}, "end": {"type": "string"},
+        "fq": {"enum": ["none", "qfq", "hfq"]},
+        "fields": {"$ref": "#/$defs/Fields"},
+        "limit": {"type": "integer", "minimum": 0, "default": 0},
+        "snapshot_id": {"type": "string", "minLength": 1},
+        "adjustment_anchor": {"$ref": "#/$defs/Date8"},
+        "factor_snapshot_id": {"type": "string", "minLength": 1}
+      },
+      "oneOf": [
+        {"required": ["code"], "not": {"required": ["codes"]}},
+        {"required": ["codes"], "not": {"required": ["code"]}}
+      ],
+      "allOf": [
+        {
+          "if": {"properties": {"frequency": {"enum": ["1d", "1w", "1M"]}}},
+          "then": {"properties": {"start": {"$ref": "#/$defs/Date8"}, "end": {"$ref": "#/$defs/Date8"}}},
+          "else": {"properties": {"start": {"$ref": "#/$defs/MinuteTimestamp"}, "end": {"$ref": "#/$defs/MinuteTimestamp"}}}
+        },
+        {
+          "if": {"properties": {"fq": {"const": "none"}}},
+          "then": {"not": {"anyOf": [{"required": ["adjustment_anchor"]}, {"required": ["factor_snapshot_id"]}]}},
+          "else": {"required": ["adjustment_anchor", "factor_snapshot_id"]}
+        }
+      ]
+    },
+    "NormalizedQuery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["codes", "frequency", "start", "end", "fq", "fields", "limit", "snapshot_id", "adjustment_anchor", "factor_snapshot_id"],
+      "properties": {
+        "codes": {"$ref": "#/$defs/Codes"}, "frequency": {"$ref": "#/$defs/Frequency"},
+        "start": {"type": "string"}, "end": {"type": "string"},
+        "fq": {"enum": ["none", "qfq", "hfq"]}, "fields": {"$ref": "#/$defs/Fields"},
+        "limit": {"type": "integer", "minimum": 0},
+        "snapshot_id": {"$ref": "#/$defs/NullableString"},
+        "adjustment_anchor": {"oneOf": [{"$ref": "#/$defs/Date8"}, {"type": "null"}]},
+        "factor_snapshot_id": {"$ref": "#/$defs/NullableString"}
+      }
+    },
+    "Instrument": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument_id", "code", "exchange", "asset_type", "namespace", "name", "identity_verified", "identity_source_id"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/InstrumentId"},
+        "code": {"type": "string", "minLength": 1},
+        "exchange": {"enum": ["XSHG", "XSHE", "XBSE", "CN"]},
+        "asset_type": {"enum": ["equity", "etf", "index", "board"]},
+        "namespace": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$"},
+        "name": {"type": ["string", "null"]},
+        "identity_verified": {"type": "boolean"},
+        "identity_source_id": {"$ref": "#/$defs/NullableString"}
+      },
+      "allOf": [
+        {"if": {"properties": {"identity_verified": {"const": true}}}, "then": {"properties": {"identity_source_id": {"type": "string", "minLength": 1}}}},
+        {"if": {"properties": {"exchange": {"const": "CN"}}}, "then": {"properties": {"asset_type": {"const": "board"}}}}
+      ]
+    },
+    "Bar": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "bar_state", "source_id"],
+      "properties": {
+        "date": {"$ref": "#/$defs/Date"}, "time": {"$ref": "#/$defs/MinuteTimestamp"},
+        "bar_state": {"enum": ["final", "preliminary", "unknown"]},
+        "source_id": {"type": "string", "minLength": 1},
+        "open": {"$ref": "#/$defs/Decimal"}, "high": {"$ref": "#/$defs/Decimal"},
+        "low": {"$ref": "#/$defs/Decimal"}, "close": {"$ref": "#/$defs/Decimal"},
+        "volume": {"$ref": "#/$defs/NullableCount"},
+        "amount": {"oneOf": [{"$ref": "#/$defs/NonnegativeDecimal"}, {"type": "null"}]}
+      }
+    },
+    "Source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "aggregator", "access_path", "reference", "retrieved_at", "source_updated_at", "published_at", "finality_evidence", "unknown_fields"],
+      "properties": {
+        "provider": {"$ref": "#/$defs/NullableString"}, "aggregator": {"$ref": "#/$defs/NullableString"},
+        "access_path": {"enum": ["http", "sdk", "warehouse", "cache"]},
+        "reference": {"$ref": "#/$defs/NullableString"}, "retrieved_at": {"$ref": "#/$defs/Timestamp"},
+        "source_updated_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "published_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "finality_evidence": {"$ref": "#/$defs/NullableString"},
+        "unknown_fields": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["provider", "reference", "source_updated_at", "published_at", "finality_evidence"]}
+        }
+      }
+    },
+    "SourceCatalog": {
+      "type": "object", "propertyNames": {"pattern": "^[A-Za-z0-9_.:-]+$"},
+      "additionalProperties": {"$ref": "#/$defs/Source"}
+    },
+    "Evidence": {
+      "type": "object", "additionalProperties": false, "required": ["source_id", "reference", "known_at"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1}, "reference": {"type": "string", "minLength": 1},
+        "known_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+      }
+    },
+    "Gap": {
+      "type": "object", "additionalProperties": false, "required": ["date", "time", "reason", "evidence"],
+      "properties": {
+        "date": {"$ref": "#/$defs/Date"},
+        "time": {"oneOf": [{"$ref": "#/$defs/MinuteTimestamp"}, {"type": "null"}]},
+        "reason": {"enum": ["PRE_LISTING", "POST_DELISTING", "SUSPENDED", "NOT_PUBLISHED", "OUT_OF_HISTORY", "SOURCE_ERROR", "UNKNOWN"]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/Evidence"}}
+      },
+      "allOf": [{
+        "if": {"properties": {"reason": {"enum": ["PRE_LISTING", "POST_DELISTING", "SUSPENDED"]}}},
+        "then": {"properties": {"evidence": {"minItems": 1}}}
+      }]
+    },
+    "Coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "expected_rows", "available_rows", "returned_rows", "gaps"],
+      "properties": {
+        "state": {"enum": ["complete", "incomplete", "unknown"]},
+        "expected_rows": {"$ref": "#/$defs/NullableCount"}, "available_rows": {"$ref": "#/$defs/NullableCount"},
+        "returned_rows": {"type": "integer", "minimum": 0},
+        "gaps": {"type": "array", "items": {"$ref": "#/$defs/Gap"}}
+      }
+    },
+    "Units": {
+      "type": "object", "additionalProperties": false,
+      "required": ["price", "volume", "amount", "price_decimals", "amount_decimals", "null_reason"],
+      "properties": {
+        "price": {"enum": ["CNY", "points"]},
+        "volume": {"enum": ["shares", "fund_units", "index_native", "unknown"]},
+        "amount": {"enum": ["CNY", "unknown"]},
+        "price_decimals": {"type": "integer", "minimum": 0, "maximum": 12},
+        "amount_decimals": {"type": ["integer", "null"], "minimum": 0, "maximum": 12},
+        "null_reason": {"$ref": "#/$defs/NullableString"}
+      }
+    },
+    "Adjustment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "anchor_date", "factor_snapshot_id", "algorithm"],
+      "properties": {
+        "mode": {"enum": ["none", "qfq", "hfq"]},
+        "anchor_date": {"oneOf": [{"$ref": "#/$defs/Date8"}, {"type": "null"}]},
+        "factor_snapshot_id": {"$ref": "#/$defs/NullableString"},
+        "algorithm": {"enum": ["affine-v1", null]}
+      },
+      "allOf": [{
+        "if": {"properties": {"mode": {"const": "none"}}},
+        "then": {"properties": {"anchor_date": {"type": "null"}, "factor_snapshot_id": {"type": "null"}, "algorithm": {"type": "null"}}},
+        "else": {"properties": {"anchor_date": {"$ref": "#/$defs/Date8"}, "factor_snapshot_id": {"type": "string", "minLength": 1}, "algorithm": {"const": "affine-v1"}}}
+      }]
+    },
+    "InstrumentMeta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument", "status", "units", "adjustment", "coverage", "truncated", "truncation_reason"],
+      "properties": {
+        "instrument": {"$ref": "#/$defs/Instrument"}, "status": {"enum": ["ok", "empty", "partial", "error"]},
+        "units": {"$ref": "#/$defs/Units"}, "adjustment": {"$ref": "#/$defs/Adjustment"},
+        "coverage": {"$ref": "#/$defs/Coverage"}, "truncated": {"type": "boolean"},
+        "truncation_reason": {"enum": ["caller_limit", "source_cap", "response_cap", null]}
+      },
+      "allOf": [{
+        "if": {"properties": {"truncated": {"const": false}}},
+        "then": {"properties": {"truncation_reason": {"type": "null"}}},
+        "else": {"properties": {"truncation_reason": {"enum": ["caller_limit", "source_cap", "response_cap"]}}}
+      }]
+    },
+    "Error": {
+      "type": "object", "additionalProperties": false,
+      "required": ["code", "message", "instrument_id", "retryable", "details"],
+      "properties": {
+        "code": {"enum": ["INVALID_ARGUMENT", "UNSUPPORTED_CONTRACT", "AMBIGUOUS_INSTRUMENT", "UNKNOWN_INSTRUMENT", "UNSUPPORTED_ASSET", "UNSUPPORTED_FREQUENCY", "UNSUPPORTED_ADJUSTMENT", "UNSUPPORTED_AS_OF", "OUT_OF_CALENDAR", "OUT_OF_HISTORY", "NOT_PUBLISHED", "INCOMPLETE_COVERAGE", "SOURCE_UNAVAILABLE", "SOURCE_TIMEOUT", "SOURCE_SCHEMA_ERROR", "RESULT_TOO_LARGE", "BUSY", "SNAPSHOT_NOT_FOUND", "SNAPSHOT_EXPIRED", "SNAPSHOT_SCOPE_MISMATCH", "INTERNAL_ERROR"]},
+        "message": {"type": "string", "minLength": 1},
+        "instrument_id": {"$ref": "#/$defs/NullableString"},
+        "retryable": {"type": "boolean"}, "details": {"type": "object"}
+      }
+    },
+    "ResponseHeader": {
+      "type": "object",
+      "required": ["contract_version", "contract_revision", "server_version", "server_build_id", "request_id", "served_at", "snapshot_id", "snapshot_expires_at", "status", "is_partial", "truncated", "errors", "source_catalog", "data_hash"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/ContractVersion"}, "contract_revision": {"const": "3.0.0"},
+        "server_version": {"type": "string", "minLength": 1}, "server_build_id": {"type": "string", "minLength": 1},
+        "request_id": {"type": "string", "minLength": 1}, "served_at": {"$ref": "#/$defs/Timestamp"},
+        "snapshot_id": {"$ref": "#/$defs/NullableString"},
+        "snapshot_expires_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]},
+        "status": {"enum": ["complete", "partial", "failed"]}, "is_partial": {"type": "boolean"},
+        "truncated": {"type": "boolean"}, "errors": {"type": "array", "items": {"$ref": "#/$defs/Error"}},
+        "source_catalog": {"$ref": "#/$defs/SourceCatalog"}, "data_hash": {"$ref": "#/$defs/Hash"},
+        "extensions": {"type": "object"}
+      },
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "complete"}}},
+        "then": {"properties": {"is_partial": {"const": false}, "truncated": {"const": false}, "errors": {"maxItems": 0}, "snapshot_id": {"type": "string", "minLength": 1}, "snapshot_expires_at": {"$ref": "#/$defs/Timestamp"}}},
+        "else": {"properties": {"is_partial": {"const": true}}}
+      }]
+    },
+    "KlineResponse": {
+      "type": "object", "unevaluatedProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/ResponseHeader"},
+        {
+          "required": ["query", "request_hash", "data", "meta"],
+          "properties": {
+            "query": {"oneOf": [{"$ref": "#/$defs/NormalizedQuery"}, {"type": "null"}]},
+            "request_hash": {"oneOf": [{"$ref": "#/$defs/Hash"}, {"type": "null"}]},
+            "data": {"type": "object", "propertyNames": {"$ref": "#/$defs/InstrumentId"}, "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/Bar"}}},
+            "meta": {"type": "object", "propertyNames": {"$ref": "#/$defs/InstrumentId"}, "additionalProperties": {"$ref": "#/$defs/InstrumentMeta"}}
+          }
+        },
+        {
+          "if": {"properties": {"query": {"type": "null"}}},
+          "then": {"properties": {
+            "status": {"const": "failed"}, "request_hash": {"type": "null"},
+            "snapshot_id": {"type": "null"}, "snapshot_expires_at": {"type": "null"},
+            "data": {"maxProperties": 0}, "meta": {"maxProperties": 0}, "source_catalog": {"maxProperties": 0},
+            "errors": {"minItems": 1}
+          }}
+        }
+      ]
+    },
+    "ToolFailureResponse": {
+      "allOf": [
+        {"$ref": "#/$defs/KlineResponse"},
+        {"properties": {
+          "status": {"const": "failed"}, "query": {"type": "null"}, "request_hash": {"type": "null"},
+          "snapshot_id": {"type": "null"}, "snapshot_expires_at": {"type": "null"},
+          "data": {"maxProperties": 0}, "meta": {"maxProperties": 0}, "source_catalog": {"maxProperties": 0},
+          "errors": {"minItems": 1}
+        }}
+      ]
+    },
+    "StockListRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "asset_types", "exchanges", "as_of"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/ContractVersion"},
+        "asset_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["equity", "etf", "index", "board"]}},
+        "exchanges": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["XSHG", "XSHE", "XBSE", "CN"]}},
+        "as_of": {"$ref": "#/$defs/Date8"}, "snapshot_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "StockListResponse": {
+      "type": "object", "unevaluatedProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/ResponseHeader"},
+        {
+          "required": ["scope", "as_of_type", "data", "total", "universe_complete"],
+          "properties": {
+            "scope": {
+              "oneOf": [
+                {"type": "null"},
+                {"type": "object", "additionalProperties": false, "required": ["asset_types", "exchanges", "as_of"], "properties": {
+                  "asset_types": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["equity", "etf", "index", "board"]}},
+                  "exchanges": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["XSHG", "XSHE", "XBSE", "CN"]}},
+                  "as_of": {"$ref": "#/$defs/Date8"}
+                }}
+              ]
+            },
+            "as_of_type": {"enum": ["observed_current", "historical_verified", null]},
+            "data": {"type": "array", "items": {"$ref": "#/$defs/Instrument"}},
+            "total": {"type": "integer", "minimum": 0}, "universe_complete": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "TradingDaysRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "exchange", "start", "end"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/ContractVersion"}, "exchange": {"enum": ["XSHG", "XSHE", "XBSE"]},
+        "start": {"$ref": "#/$defs/Date8"}, "end": {"$ref": "#/$defs/Date8"},
+        "snapshot_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "TradingDaysResponse": {
+      "type": "object", "unevaluatedProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/ResponseHeader"},
+        {
+          "required": ["exchange", "start", "end", "trading_days", "calendar_id", "calendar_version", "coverage_start", "coverage_end"],
+          "properties": {
+            "exchange": {"enum": ["XSHG", "XSHE", "XBSE", null]},
+            "start": {"oneOf": [{"$ref": "#/$defs/Date8"}, {"type": "null"}]},
+            "end": {"oneOf": [{"$ref": "#/$defs/Date8"}, {"type": "null"}]},
+            "trading_days": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Date"}},
+            "calendar_id": {"$ref": "#/$defs/NullableString"}, "calendar_version": {"$ref": "#/$defs/NullableString"},
+            "coverage_start": {"oneOf": [{"$ref": "#/$defs/Date"}, {"type": "null"}]},
+            "coverage_end": {"oneOf": [{"$ref": "#/$defs/Date"}, {"type": "null"}]}
+          }
+        }
+      ]
+    },
+    "StatusRequest": {
+      "type": "object", "additionalProperties": false, "required": ["contract_version"],
+      "properties": {"contract_version": {"$ref": "#/$defs/ContractVersion"}}
+    },
+    "Capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["asset_type", "exchange", "namespace", "frequencies", "fq_modes", "history_start", "history_end", "exceptions"],
+      "properties": {
+        "asset_type": {"enum": ["equity", "etf", "index", "board"]},
+        "exchange": {"enum": ["XSHG", "XSHE", "XBSE", "CN"]},
+        "namespace": {"type": "string", "minLength": 1},
+        "frequencies": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Frequency"}},
+        "fq_modes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["none", "qfq", "hfq"]}},
+        "history_start": {"oneOf": [{"$ref": "#/$defs/Date"}, {"type": "null"}]},
+        "history_end": {"oneOf": [{"$ref": "#/$defs/Date"}, {"type": "null"}]},
+        "exceptions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "StatusResponse": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contract_version", "contract_revision", "protocol_versions", "contract_versions", "server", "status", "checked_at", "profiles", "issues", "limits", "legacy", "data_status"],
+      "properties": {
+        "contract_version": {"$ref": "#/$defs/ContractVersion"}, "contract_revision": {"const": "3.0.0"},
+        "protocol_versions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}, "contains": {"const": "2025-06-18"}},
+        "contract_versions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}, "contains": {"const": "stockdb-market-v3"}},
+        "server": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "version", "build_id", "source_commit", "image_digest", "started_at"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1},
+            "build_id": {"type": "string", "minLength": 1}, "source_commit": {"$ref": "#/$defs/NullableString"},
+            "image_digest": {"$ref": "#/$defs/NullableString"}, "started_at": {"$ref": "#/$defs/Timestamp"}
+          }
+        },
+        "status": {"enum": ["ready", "degraded", "unavailable"]}, "checked_at": {"$ref": "#/$defs/Timestamp"},
+        "issues": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["profile_id", "code", "message", "retryable"],
+            "properties": {
+              "profile_id": {"enum": ["core_daily_v1", "fullmarket_daily_v1", "index_board_daily_v1", "minute_v1", "adjusted_history_v1", "historical_identity_v1"]},
+              "code": {"$ref": "#/$defs/Error/properties/code"},
+              "message": {"type": "string", "minLength": 1}, "retryable": {"type": "boolean"}
+            }
+          }
+        },
+        "profiles": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "supported", "reason", "capabilities"],
+            "properties": {
+              "id": {"enum": ["core_daily_v1", "fullmarket_daily_v1", "index_board_daily_v1", "minute_v1", "adjusted_history_v1", "historical_identity_v1"]},
+              "supported": {"type": "boolean"}, "reason": {"$ref": "#/$defs/NullableString"},
+              "capabilities": {"type": "array", "items": {"$ref": "#/$defs/Capability"}}
+            }
+          }
+        },
+        "limits": {
+          "type": "object", "additionalProperties": false,
+          "required": ["max_codes", "max_concurrency", "request_timeout_ms", "max_response_rows", "snapshot_retention_seconds"],
+          "properties": {
+            "max_codes": {"type": "integer", "minimum": 1, "maximum": 50},
+            "max_concurrency": {"type": "integer", "minimum": 1},
+            "request_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 30000},
+            "max_response_rows": {"type": "integer", "minimum": 1},
+            "snapshot_retention_seconds": {"type": "integer", "minimum": 604800}
+          }
+        },
+        "legacy": {
+          "type": "object", "additionalProperties": false, "required": ["default_contract", "sunset_at"],
+          "properties": {"default_contract": {"const": "v2"}, "sunset_at": {"type": "null"}}
+        },
+        "data_status": {
+          "type": "object", "additionalProperties": false, "required": ["latest_trade_date", "scope", "refreshed_at"],
+          "properties": {
+            "latest_trade_date": {"oneOf": [{"$ref": "#/$defs/Date"}, {"type": "null"}]},
+            "scope": {"const": "summary_only"},
+            "refreshed_at": {"oneOf": [{"$ref": "#/$defs/Timestamp"}, {"type": "null"}]}
+          }
+        },
+        "extensions": {"type": "object"}
+      },
+      "allOf": [{
+        "if": {"properties": {"status": {"const": "ready"}}},
+        "then": {"properties": {"issues": {"maxItems": 0}}},
+        "else": {"properties": {"issues": {"minItems": 1}}}
+      }]
+    }
+  }
+}

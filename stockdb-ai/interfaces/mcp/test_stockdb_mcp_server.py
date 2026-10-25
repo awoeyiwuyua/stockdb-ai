@@ -753,15 +753,16 @@ class StockdbMcpServerTests(unittest.TestCase):
 
     @mock.patch.object(pybao_tools, "get_sdk_client")
     def test_http_dispatch_get_kline_sdk_batch(self, get_sdk_client):
+        # 0.13.0（L01/L02 根因修复）：批量改为逐码单查后按码组装——SDK 单码
+        # 调用返回行列表（真身 stock_sdk.get_data(code)），返回形状与旧版批量
+        # 完全一致。此前 mock 一次性返回 {code: rows} 是旧「整批传 list」实现
+        # 的形状，已随 pipe 批量缺陷一并淘汰。
         fake_client = mock.Mock()
-        fake_client.get_data.return_value = {
-            "600633": [
-                {"date": 20260101 + i, "close": float(i)} for i in range(10)
-            ],
-            "000001": [
-                {"date": 20260101 + i, "close": float(i)} for i in range(10)
-            ],
-        }
+
+        def _fake_get_data(code, **kwargs):
+            return [{"date": 20260101 + i, "close": float(i)} for i in range(10)]
+
+        fake_client.get_data.side_effect = _fake_get_data
         get_sdk_client.return_value = fake_client
 
         response = server.dispatch({
@@ -791,9 +792,14 @@ class StockdbMcpServerTests(unittest.TestCase):
             [row["date"] for row in payload["data"]["600633"]],
             [20260108, 20260109, 20260110],
         )
-        # SDK 以列表批量调用（一次 get_data），而非逐只
-        self.assertEqual(fake_client.get_data.call_count, 1)
-        self.assertEqual(fake_client.get_data.call_args.args[0], ["600633", "000001"])
+        # 0.13.0：SDK 逐码调用（每次传 str code），不再整批传 list（pipe 缺陷）
+        self.assertEqual(fake_client.get_data.call_count, 2)
+        for call in fake_client.get_data.call_args_list:
+            self.assertIsInstance(call.args[0], str)
+        self.assertEqual(
+            sorted(call.args[0] for call in fake_client.get_data.call_args_list),
+            ["000001", "600633"],
+        )
 
 
     # === Phase 2：screen_stocks / get_mydb_data 工具 schema（Task D） ===

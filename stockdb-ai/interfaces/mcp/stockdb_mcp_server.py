@@ -122,7 +122,49 @@ except Exception:  # noqa: BLE001 - 裁剪部署无 storage 包时优雅降级
 try:  # noqa: E402
     from services.warehouse_tasks import warehouse_run_async as _wh_run_async
 except Exception:  # noqa: BLE001 - 同上
-    _wh_run_async = None  # type: ignore[assignment]
+    _wh_run_async = None
+
+# 0.13.0：公开行情合同 stockdb-market-v3（修订 3.0.0）分支。请求显式携带
+# contract_version=stockdb-market-v3 时由 market_v3 接管（四个首批工具）；
+# 不带该字段的请求走下方旧版路径，形状不变。market_v3 缺失/损坏只影响 v3
+# 分支（返回 INTERNAL_ERROR），不影响旧版 57 工具。
+# 注意：用包限定导入（与测试同实例）——裸 import 会因 sys.path 双路解析产生
+# 第二个模块实例，导致测试桩与运行实例分叉。
+try:  # noqa: E402
+    from interfaces.mcp import market_v3  # noqa: F401
+except Exception as _v3_import_exc:  # noqa: BLE001
+    market_v3 = None  # type: ignore[assignment]
+    print(f"stockdb_mcp_server: market_v3 加载失败（v3 分支不可用）: {_v3_import_exc}",
+          file=sys.stderr)
+
+# 0.13.1（C01 修补）：四个首批工具实际发布的 input/output schema。v3 分支 =
+# 冻结合同 Request/Response 定义**原文**（market_v3 从 contract/contract.schema.json
+# 程序化抽取 $defs 闭包嵌入）；旧版分支仅匹配未携带 contract_version 的请求/输出。
+# 消费方复核（FEEDBACK 2026-10-24 §4）实证 0.13.0 的宽泛旧分支会吞掉非法 v3
+# 对象、inputSchema 缺 required/互斥——本装配生成的 schema 由
+# test_market_v3.PublishedSchemaTest 以消费方反例原文锁定回归。
+_PUBLISHED_TOOL_SCHEMAS: dict = (market_v3.published_tool_schemas()
+                                 if market_v3 is not None else {})
+
+
+def _published_input_schema(tool: str, legacy_fallback: dict) -> dict:
+    """tools/list 的 inputSchema：优先 v3+旧版 anyOf；market_v3 缺失时退回
+    旧版-only schema（v3 分发本身不受影响）。"""
+    entry = _PUBLISHED_TOOL_SCHEMAS.get(tool) or {}
+    return entry.get("inputSchema", legacy_fallback)
+
+
+def _published_output_schema(tool: str) -> dict:
+    """tools/list 的 outputSchema；退化为仅旧版 envelope 校验的降级形态。"""
+    entry = _PUBLISHED_TOOL_SCHEMAS.get(tool) or {}
+    published = entry.get("outputSchema")
+    if published is not None:
+        return published
+    if market_v3 is not None:  # 降级：仅旧版 envelope 校验
+        return {"$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$defs": {"LegacyToolResult": market_v3._LEGACY_RESULT_DEF},
+                "$ref": "#/$defs/LegacyToolResult"}
+    return {"type": "object"}  # type: ignore[assignment]
 
 _WAREHOUSE_HINT = (
     "仓库层（DuckDB+Parquet）不可用：本机需 uv sync 安装 duckdb；"
@@ -419,12 +461,13 @@ def _query_kline_via_sdk(
 ) -> dict:
     """pybao SDK 路径：复权(fq)/1m/1w/1M 周期/批量 codes。client 不可用抛中文 ValueError。
 
-    对接 stock_sdk 真实接口 StockDBClient.get_data(code|codes, start, end,
-    frequency, fields=None, fq, limit=None)：单码返回行列表，批量返回
-    {code: rows}；复权/周月K 聚合由 SDK 内存完成；8 位日期在分钟频率下
-    由 SDK 自动补全为 14 位时间戳区间。SDK 区间为开区间（start<end 不含 end），
-    本函数用 _bump_end 顺延 end 后查询，再客户端过滤 rows <= 原 end，
-    对外统一为闭区间 [start, end] 语义。
+    对接 stock_sdk 真实接口 StockDBClient.get_data(code, start, end, frequency,
+    fields=None, fq, limit=None)：单码返回行列表。批量 codes 由本函数逐码调用
+    组装为 {code: rows}（0.13.0 起不再把 codes 列表整批传给 SDK——其 pipe 批量
+    路径间歇性返回全空，见 L01/L02 根因）；复权/周月K 聚合由 SDK 内存完成；
+    8 位日期在分钟频率下由 SDK 自动补全为 14 位时间戳区间。SDK 区间为开区间
+    （start<end 不含 end），本函数用 _bump_end 顺延 end 后查询，再客户端过滤
+    rows <= 原 end，对外统一为闭区间 [start, end] 语义。
     返回 {"source", "code", "codes", "frequency", "fq", "price_unit",
     "volume_unit", "amount_unit", "mode", "start", "end", "data", "total",
     "truncated"}；limit>0 时每码保留最新 limit 行。
@@ -438,29 +481,30 @@ def _query_kline_via_sdk(
     target_codes = codes or ([code] if code else [])
     sdk_fq = None if fq in ("", "none") else fq
     sdk_end = _bump_end(end, frequency) if end else None
-    try:
-        raw = client.get_data(
-            target_codes[0] if len(target_codes) == 1 else target_codes,
-            start=start or None,
-            end=sdk_end,
-            frequency=frequency,
-            fields=None,
-            fq=sdk_fq,
-            limit=None,
-        )
-    except Exception as exc:  # noqa: BLE001 - 查询失败转为中文 ValueError
-        raise ValueError(f"get_kline: pybao 查询失败: {type(exc).__name__}: {exc}") from exc
-
-    # 归一化：批量 → {code: rows}，单码 → 行列表
-    if isinstance(raw, dict):
-        per_code = {item: _normalize_rows(rows) for item, rows in raw.items()}
-    else:
-        per_code = {target_codes[0]: _normalize_rows(raw)}
-    # 防御：单码查询时若 SDK 返回空 dict {}（而非空 list）导致 per_code 缺键，
-    # 补齐空行列表，避免下方 per_code[target_codes[0]]/total_by_code 抛 KeyError
-    # 落入 tools/call 的 INTERNAL_ERROR 兜底（真实 SDK 单码返回 list 不触发该分支）。
-    if len(target_codes) == 1 and target_codes[0] not in per_code:
-        per_code[target_codes[0]] = []
+    # 0.13.0（L01/L02 根因修复）：批量不再走 SDK 单路 pipe（rd.pipe()+mget
+    # 间歇性返回全空——容器内实测 10/20 次全空，且 SDK 把异常形状静默归一为
+    # {code: []} 不报错，造成「成功空批量」），改为逐码单查（实测 0/100 失败）
+    # 后按码组装，返回形状与旧版批量完全一致。
+    per_code: dict[str, list] = {}
+    for target in target_codes:
+        try:
+            raw = client.get_data(
+                target,
+                start=start or None,
+                end=sdk_end,
+                frequency=frequency,
+                fields=None,
+                fq=sdk_fq,
+                limit=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - 查询失败转为中文 ValueError
+            raise ValueError(
+                f"get_kline: pybao 查询失败: {type(exc).__name__}: {exc}") from exc
+        per_code[target] = _normalize_rows(raw)
+    # 防御：单码查询时若 SDK 返回空 dict {}（而非空 list）导致缺键，
+    # 补齐空行列表，避免 KeyError 落入 INTERNAL_ERROR 兜底。
+    for target in target_codes:
+        per_code.setdefault(target, [])
     # 闭区间语义：SDK 开区间已用 bumped end 查询，客户端按原 end 过滤（先于 fields
     # 投影，保证 fields 不含 date 时仍能过滤）。
     if end:
@@ -2320,68 +2364,86 @@ TOOLS: list[dict] = [
     {
         "name": "get_kline",
         "description": (
-            "获取A股K线。frequency: 1d日K、5m/15m/30m/60m分钟K(HTTP)、"
+            "获取A股K线。旧版（不带 contract_version）：frequency: 1d日K、5m/15m/30m/60m分钟K(HTTP)、"
             "1m/1w/1M(需pybao)。日K传8位start(可加end构成区间)；分钟K传8位日期或14位时间戳。"
             "fq复权(qfq/hfq)、批量codes需pybao(容器镜像自动携带)，不可用时返回明确降级错误。"
             "fields为逗号分隔投影字段。limit>0时只保留最新limit行并标记truncated。"
+            "v3（显式 contract_version=stockdb-market-v3）：code/codes 用规范证券键"
+            "（如 XSHG/equity/exchange/603516 或 XSHE/equity/exchange/002600），"
+            "start/end/frequency/fq 必填，fields 为数组，"
+            "limit 为每证券最新 N 行；返回统一信封（data/meta/coverage/来源/哈希/快照）。"
+            "首批能力：XSHG/XSHE × equity/etf × 1d × none（未复权日K）。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "6 位股票代码，如 600633（与 codes 二选一）"},
-                "codes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "批量股票代码列表，最多 50 个（与 code 二选一；需 pybao SDK）",
+        "inputSchema": _published_input_schema(
+            "get_kline",
+            {  # market_v3 缺失时的旧版-only 退路（与 0.12.x 发布形态一致）
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "6 位股票代码，如 600633（与 codes 二选一）"},
+                    "codes": {"type": "array", "items": {"type": "string"},
+                              "description": "批量股票代码列表，最多 50 个（与 code 二选一；需 pybao SDK）"},
+                    "frequency": {"type": "string",
+                                  "enum": ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"],
+                                  "description": "K 线周期；1d=日K，5m/15m/30m/60m=分钟K，1m/1w/1M 需 pybao SDK",
+                                  "default": "1d"},
+                    "fq": {"type": "string", "enum": ["none", "qfq", "hfq"],
+                           "description": "复权方式；none=不复权(默认)（需 pybao SDK）",
+                           "default": "none"},
+                    "limit": {"type": "integer", "minimum": 0,
+                              "description": "最多返回行数；0=不截断（默认）", "default": 0},
+                    "start": {"type": "string",
+                              "description": "日K：8位起始日期(如 20260620)；分钟K：14位时间戳(如 20260625145200)"},
+                    "end": {"type": "string",
+                            "description": "日K 结束日期(可选；与 start 构成闭区间 [start, end]，含端点)"},
+                    "fields": {"type": "string", "description": "投影字段，逗号分隔（可选）"},
                 },
-                "frequency": {
-                    "type": "string",
-                    "enum": ["1m", "5m", "15m", "30m", "60m", "1d", "1w", "1M"],
-                    "description": "K 线周期；1d=日K，5m/15m/30m/60m=分钟K，1m/1w/1M 需 pybao SDK",
-                    "default": "1d",
-                },
-                "fq": {
-                    "type": "string",
-                    "enum": ["none", "qfq", "hfq"],
-                    "description": "复权方式；none=不复权(默认)，qfq=前复权，hfq=后复权（需 pybao SDK）",
-                    "default": "none",
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "最多返回行数；0=不截断（默认）",
-                    "default": 0,
-                },
-                "start": {
-                    "type": "string",
-                    "description": "日K：8位起始日期(如 20260620)；分钟K：14位时间戳(如 20260625145200)",
-                },
-                "end": {"type": "string", "description": "日K 结束日期(可选；与 start 构成闭区间 [start, end]，含端点)"},
-                "fields": {"type": "string", "description": "投影字段，逗号分隔（可选）"},
+                "required": [],
             },
-            "required": [],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_kline"),
     },
     {
         "name": "get_stock_list",
-        "description": "获取全市场 A 股股票代码列表，返回 {total, codes}。",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": (
+            "获取全市场 A 股股票代码列表。旧版（不带 contract_version）：返回 {total, codes}"
+            "（目录实际含股票与 ETF）。v3（显式 contract_version=stockdb-market-v3）："
+            "必填 asset_types/exchanges/as_of，返回 instrument 对象数组（规范键、身份核验、"
+            "来源与快照）；as_of 必须是当前观察清单的有效交易日（历史清单未支持）。"
+        ),
+        "inputSchema": _published_input_schema(
+            "get_stock_list",
+            {"type": "object", "properties": {}},
+        ),
+        "outputSchema": _published_output_schema("get_stock_list"),
     },
     {
         "name": "get_adjust_factors",
-        "description": "获取股票复权因子。返回 [{date, div, give, trans, mult, cum}, ...]。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "6 位股票代码，如 600633"},
-                "date_pattern": {
-                    "type": "string",
-                    "description": "日期通配，如 2026* 或 *（默认 *）",
-                    "default": "*",
+        "description": (
+            "获取复权因子。旧版（不带 contract_version）：{code, date_pattern}"
+            "→ [{date, div, give, trans, mult, cum}, ...]。"
+            "v3（显式 contract_version=stockdb-market-v3）：FactorRequest"
+            "（code/codes、start/end、fq=qfq/hfq、adjustment_anchor 必填）→"
+            " FactorResponse（逐日 affine-v1 multiplier/offset、factor 快照、"
+            "derivation 与 series_catalog；extensions.research_v1）。"
+            "锚点必须是已完成交易日；qfq 锚请求末交易日、hfq 锚首交易日。"
+        ),
+        "inputSchema": _published_input_schema(
+            "get_adjust_factors",
+            {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string",
+                             "description": "6 位股票代码，如 600633"},
+                    "date_pattern": {
+                        "type": "string",
+                        "description": "日期通配，如 2026* 或 *（默认 *）",
+                        "default": "*",
+                    },
                 },
+                "required": ["code"],
             },
-            "required": ["code"],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_adjust_factors"),
     },
     {
         "name": "get_market_snapshot",
@@ -2664,32 +2726,43 @@ TOOLS: list[dict] = [
         "name": "get_trading_days",
         "description": (
             "A股交易日历（休市表覆盖 2024-2026，来源 exchange_calendars XSHG）。"
-            "返回区间内交易日列表；用于判断某日是否开盘、计算 N 个交易日区间。"
+            "旧版（不带 contract_version）：返回区间内交易日列表；用于判断某日是否开盘、"
+            "计算 N 个交易日区间。v3（显式 contract_version=stockdb-market-v3）："
+            "exchange/start/end 必填（闭区间），无调用方 limit（旧 400 日硬上限不截断 v3），"
+            "返回升序唯一 ISO 日期 + 日历身份/版本/已核实边界 + 快照；范围越界报 OUT_OF_CALENDAR。"
         ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "start": {"type": "string", "description": "8位起始日期（含）"},
-                "end": {
-                    "type": "string",
-                    "description": "8位结束日期（含）；缺省=start 后 90 个自然日",
+        "inputSchema": _published_input_schema(
+            "get_trading_days",
+            {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "string", "description": "8位起始日期（含）"},
+                    "end": {"type": "string",
+                            "description": "8位结束日期（含）；缺省=start 后 90 个自然日"},
+                    "limit": {"type": "integer", "default": 60,
+                              "description": "返回上限（硬上限400，超出截断）"},
                 },
-                "limit": {
-                    "type": "integer",
-                    "default": 60,
-                    "description": "返回上限（硬上限400，超出截断）",
-                },
+                "required": ["start"],
             },
-            "required": ["start"],
-        },
+        ),
+        "outputSchema": _published_output_schema("get_trading_days"),
     },
     {
         "name": "get_data_status",
         "description": (
-            "数据基座状态：全市场行情最新交易日与滞后天数、pybao 指标库可用性、"
-            "MCP 版本与工具数、交易日历覆盖范围。用于判断数据新鲜度与能力边界。"
+            "数据基座状态。旧版（不带 contract_version）：全市场行情最新交易日与滞后天数、"
+            "pybao 指标库可用性、MCP 版本与工具数、交易日历覆盖范围。"
+            "v3（显式 contract_version=stockdb-market-v3）：服务/构建身份、协议与合同版本、"
+            "ready/degraded、profiles 能力矩阵（core_daily_v1 及扩展逐项声明）、"
+            "限额（max_codes/max_concurrency/request_timeout_ms/max_response_rows/"
+            "snapshot_retention_seconds）、legacy（default_contract=v2, sunset_at=null）。"
+            "状态只读有界缓存，不现查上游。"
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": _published_input_schema(
+            "get_data_status",
+            {"type": "object", "properties": {}},
+        ),
+        "outputSchema": _published_output_schema("get_data_status"),
     },
     {
         "name": "get_point_snapshot",
@@ -3106,7 +3179,17 @@ def _call_tool(name: str, args: dict) -> dict:
     参数类与未知工具 INVALID_ARGUMENT；pybao 相关 DEPENDENCY_UNAVAILABLE（带 hint）；
     其余 INTERNAL_ERROR；pybao_tools outcome 的 code/hint 直接透传。
     成功分支统一经 _apply_contract 注入 8 键 envelope。
+
+    0.13.0：显式 contract_version=stockdb-market-v3 的请求先走 market_v3
+    分支（双载荷 structuredContent+文本；错误走 v3 信封）；不带该字段的
+    请求保持下方旧版路径与旧返回形状（互不影响）。
     """
+    if market_v3 is not None and "contract_version" in (args or {}):
+        v3_result = market_v3.maybe_dispatch(name, args)
+        if v3_result is not None:
+            return v3_result
+        # contract_version 字段存在但 maybe_dispatch 判定非 v3（不会发生——
+        # 带该字段必返回）；防御性继续走旧版，避免行为分叉。
     if name == "get_kline":
         try:
             result = query_kline(args)

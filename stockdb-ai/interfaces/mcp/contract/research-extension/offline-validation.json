@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "baseline_positive": 15,
+  "baseline_negative_rejected": 20,
+  "extension_examples": 15,
+  "extension_negative_rejected": 20,
+  "reconstruction_modes": [
+    "qfq",
+    "hfq"
+  ],
+  "acceptance_cases": 56,
+  "manifest_files_verified": 0,
+  "scope": "OFFLINE ONLY; no service, market truth or deployment acceptance"
+}
