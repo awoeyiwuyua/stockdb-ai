@@ -709,7 +709,7 @@ class AdjustedKlineTest(ResearchTestCase):
             self.assertEqual(meta["adjustment"]["anchor_date"], "20261023")
 
     def test_a_snapshot_reread_same_triple(self):
-        # §6 步骤 5：A 重读携带 F+同锚点；值与 hash 不变（A13）
+        # §6 步骤 5：A 重读携带 F+同锚点；data/meta/adjustment 全一致（A13+R3）
         fid = self._make_F()
         args = {"codes": [EQUITY_KEY], "fq": "qfq",
                 "adjustment_anchor": "20261023", "factor_snapshot_id": fid}
@@ -719,6 +719,110 @@ class AdjustedKlineTest(ResearchTestCase):
         self.assertEqual(a1["data_hash"], a2["data_hash"])
         self.assertEqual(a2["extensions"]["research_v1"]["raw_snapshot_id"],
                          a1["extensions"]["research_v1"]["raw_snapshot_id"])
+        # R3：重放 meta.adjustment 必须与首次一致（mode/anchor/F/algorithm）
+        for key in (EQUITY_KEY,):
+            self.assertEqual(a2["meta"][key]["adjustment"],
+                             a1["meta"][key]["adjustment"])
+            self.assertEqual(a2["meta"][key]["adjustment"]["mode"], "qfq")
+            self.assertEqual(a2["meta"][key]["adjustment"]["anchor_date"],
+                             "20261023")
+            self.assertEqual(
+                a2["meta"][key]["adjustment"]["factor_snapshot_id"], fid)
+            self.assertEqual(a2["meta"][key]["adjustment"]["algorithm"],
+                             "affine-v1")
+        # R3：重放响应过完整冻结合同校验（不只 data_hash）
+        self.validate(a2, "KlineResponse")
+        # R3：source_catalog/单位/来源时间与首次一致（不重新抓上游）
+        self.assertEqual(a2["source_catalog"], a1["source_catalog"])
+        self.assertEqual(a2["meta"][key]["units"], a1["meta"][key]["units"])
+
+    def test_replay_preserves_semantics_matrix(self):
+        # R3 必验矩阵：子日期/子证券/fields/limit partial/锚点在子区间外
+        fid = self._make_F()
+        anchor = "20261023"
+        base = {"codes": [EQUITY_KEY, ETF_KEY], "fq": "qfq",
+                "adjustment_anchor": anchor, "factor_snapshot_id": fid}
+        a1 = self.kline(**base)
+        aid = a1["snapshot_id"]
+        expected = {k: a1["meta"][k]["adjustment"] for k in base["codes"]}
+        # 子日期重放（锚点 20261023 在子区间 [20261021,20261022] 之外不重置；
+        # 重放必须携带相同 fq/anchor/F）
+        sub = self.kline(codes=base["codes"], snapshot_id=aid,
+                         start="20261021", end="20261022", fq="qfq",
+                         adjustment_anchor=anchor,
+                         factor_snapshot_id=fid)
+        self.assertEqual(sub["status"], "complete")
+        for key in base["codes"]:
+            self.assertEqual(sub["meta"][key]["adjustment"], expected[key])
+        self.validate(sub, "KlineResponse")
+        # 子证券重放
+        one = self.kline(snapshot_id=aid, codes=[ETF_KEY], fq="qfq",
+                         adjustment_anchor=anchor, factor_snapshot_id=fid)
+        self.assertEqual(one["meta"][ETF_KEY]["adjustment"],
+                         expected[ETF_KEY])
+        self.validate(one, "KlineResponse")
+        # fields 投影重放
+        proj = self.kline(snapshot_id=aid, codes=[EQUITY_KEY],
+                          fields=["close"], fq="qfq",
+                          adjustment_anchor=anchor, factor_snapshot_id=fid)
+        self.assertEqual(proj["meta"][EQUITY_KEY]["adjustment"],
+                         expected[EQUITY_KEY])
+        self.validate(proj, "KlineResponse")
+        # 正数 limit → partial，复权语义不退回 none
+        lim = self.kline(codes=[EQUITY_KEY], snapshot_id=aid, limit=2,
+                         fq="qfq", adjustment_anchor=anchor,
+                         factor_snapshot_id=fid)
+        self.assertEqual(lim["status"], "partial")
+        self.assertTrue(lim["truncated"])
+        self.assertEqual(lim["meta"][EQUITY_KEY]["adjustment"],
+                         expected[EQUITY_KEY])
+        self.assertEqual(len(lim["data"][EQUITY_KEY]), 2)
+        self.validate(lim, "KlineResponse")
+        # 混合批量重放（股票+ETF 双资产）
+        mixed = self.kline(codes=base["codes"], snapshot_id=aid, fq="qfq",
+                           adjustment_anchor=anchor, factor_snapshot_id=fid)
+        for key in base["codes"]:
+            self.assertEqual(mixed["meta"][key]["adjustment"], expected[key])
+        self.validate(mixed, "KlineResponse")
+
+    def test_hfq_replay_keeps_semantics(self):
+        # R3：hfq 模式重放同样保留语义（反馈反例的第二条路径）
+        fid = self._make_F(fq="hfq", anchor="20261020")
+        a1 = self.kline(codes=[EQUITY_KEY], fq="hfq",
+                        adjustment_anchor="20261020",
+                        factor_snapshot_id=fid)
+        a2 = self.kline(codes=[EQUITY_KEY], fq="hfq",
+                        adjustment_anchor="20261020",
+                        factor_snapshot_id=fid,
+                        snapshot_id=a1["snapshot_id"])
+        self.assertEqual(a2["meta"][EQUITY_KEY]["adjustment"]["mode"], "hfq")
+        self.assertEqual(a2["meta"][EQUITY_KEY]["adjustment"]["anchor_date"],
+                         "20261020")
+        self.assertEqual(a2["data"], a1["data"])
+        self.validate(a2, "KlineResponse")
+
+    def test_raw_and_none_snapshots_unaffected(self):
+        # R3：R 重读与普通 none 快照保持 none/null，核心分支不受污染
+        fid = self._make_F()
+        a1 = self.kline(codes=[EQUITY_KEY], fq="qfq",
+                        adjustment_anchor="20261023", factor_snapshot_id=fid)
+        raw_id = a1["extensions"]["research_v1"]["raw_snapshot_id"]
+        r_env = self.kline(codes=[EQUITY_KEY], fq="none",
+                           snapshot_id=raw_id)
+        self.assertEqual(
+            r_env["meta"][EQUITY_KEY]["adjustment"],
+            {"mode": "none", "anchor_date": None,
+             "factor_snapshot_id": None, "algorithm": None})
+        self.validate(r_env, "KlineResponse")
+        # 普通 core none 快照重读
+        core = self.kline(codes=[EQUITY_KEY])
+        core2 = self.kline(codes=[EQUITY_KEY],
+                           snapshot_id=core["snapshot_id"])
+        self.assertEqual(
+            core2["meta"][EQUITY_KEY]["adjustment"]["mode"], "none")
+        self.assertIsNone(
+            core2["meta"][EQUITY_KEY]["adjustment"]["factor_snapshot_id"])
+        self.validate(core2, "KlineResponse")
 
     def test_negative_cross_snapshot_uses(self):
         # A12：错 fq/锚点/范围/互传快照全拒绝

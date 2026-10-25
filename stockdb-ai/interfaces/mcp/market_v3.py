@@ -1531,10 +1531,17 @@ def _kline_from_snapshot(query, request_hash) -> dict:
                      "captured_end": captured_query["end"]}))
     if (query["frequency"] != captured_query["frequency"]
             or query["fq"] != captured_query["fq"]):
+        message = "快照重读必须使用相同周期/复权"
+        if payload.get("kind") == "kline-adjusted":
+            message = ("复权 A 快照须携带与捕获相同的 fq/adjustment_anchor/"
+                       "factor_snapshot_id 重放（收到 fq="
+                       f"{query['fq']!r}，快照捕获 fq="
+                       f"{captured_query['fq']!r}）")
         scope_errors.append(V3Error(
-            "SNAPSHOT_SCOPE_MISMATCH",
-            "快照重读必须使用相同周期/复权",
-            details={"snapshot_id": query["snapshot_id"]}))
+            "SNAPSHOT_SCOPE_MISMATCH", message,
+            details={"snapshot_id": query["snapshot_id"],
+                     "captured_fq": captured_query["fq"],
+                     "requested_fq": query["fq"]}))
     if scope_errors:
         return tool_failure(scope_errors)
 

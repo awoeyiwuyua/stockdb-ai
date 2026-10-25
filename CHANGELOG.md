@@ -5,6 +5,28 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.14.2] — 2026-10-25（**复权 A 快照重放 meta.adjustment 补修**——消费方反馈包 `2026-10-25-stockdb-adjusted-replay-feedback`）
+
+> 消费方隔离编排实测发现：A 快照重放（fq/anchor/F 相同 + snapshot_id=A）返回
+> status=complete 但 meta.adjustment 退回 none/null（data_hash 相同但元数据
+> 违约，客户端报 adjustment mismatch 拒绝整批）。反例在包内
+> reproduce_replay_defect.py 对 0.14.1/55c8e04 复现（exit 0）。
+
+- **修复**（market_v3_research.py::_adjusted_from_snapshot）：重放路径此前只
+  补回 research extensions，遗漏恢复 meta.adjustment——首次计算路径有覆盖
+  逻辑、重放路径没有。现在用**捕获时** payload 的 mode/anchor/F/algorithm
+  （affine-v1）恢复每个有复权行证券的 meta.adjustment；语义来自快照而非按
+  请求猜补；错误/空行证券与首次一致保持 none；R 与普通 none 快照不经该
+  路径，核心未复权分支不受污染。
+- **附带**：fq≠捕获值的 A 快照重放错误消息精确化（指明须携带相同
+  fq/adjustment_anchor/factor_snapshot_id，附 captured/requested fq）。
+- **必验矩阵单测**（test_market_v3_research 新增 3 例，总 148 全绿）：
+  重放与首次 meta/data/source_catalog/units/adjustment 全一致 + 冻结校验器
+  校验重放响应；子日期（锚点在子区间外不重置）/子证券/fields 投影/
+  limit-partial/股票+ETF 混合批量重放全部保留复权语义；hfq 重放；
+  R/none 快照保持 none/null 且核心重读不受污染。负例（错 fq/anchor/F、
+  互传快照、范围扩张）原有断言保持。
+
 ## [0.14.1] — 2026-10-25（**research-extension 消费方反馈修补：E01—E08**——反馈包 `2026-10-25-stockdb-research-extension-consumer-feedback`）
 
 > 消费方复验判定"部分交付，扩展整体验收未通过"（E01—E04 为 P1 阻塞）。

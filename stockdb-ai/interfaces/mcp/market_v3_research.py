@@ -1370,6 +1370,20 @@ def _adjusted_from_snapshot(query: dict, request_hash: str) -> dict:
     merged.update(research_extensions(raw_id, payload.get(
         "catalog") or {})["extensions"])
     envelope["extensions"] = merged
+    # R3 修补（消费方 adjusted-replay 反馈）：_kline_from_snapshot 对全部
+    # 证券填默认 adjustment=none；重放路径此前遗漏恢复复权语义（首次计算
+    # 路径有对应覆盖）。此处用**捕获时**的 mode/anchor/F/algorithm 恢复
+    # 每个有复权行的证券的 meta.adjustment——语义来自快照 payload，不按
+    # 请求"猜补"；R/普通 none 快照不经本函数，核心未复权分支不受污染。
+    # 错误/空行证券与首次响应一致保持 none（首次路径同样只在成功行上覆盖）。
+    replay_adjustment = {
+        "mode": payload["fq"],
+        "anchor_date": payload["adjustment_anchor"],
+        "factor_snapshot_id": payload["factor_snapshot_id"],
+        "algorithm": FACTOR_ALGORITHM}
+    for key, m in envelope.get("meta", {}).items():
+        if envelope.get("data", {}).get(key):
+            m["adjustment"] = dict(replay_adjustment)
     return envelope
 
 
