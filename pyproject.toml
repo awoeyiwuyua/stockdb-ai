@@ -5,6 +5,10 @@ description = "free-stockdb 本地量化数据引擎的 Docker 部署 + webui �
 requires-python = ">=3.14"
 dependencies = [
     "duckdb>=1.5.5",
+    "requests",
+    "pandas",
+    "lxml",
+    "py-mini-racer",
 ]
 
 [project.scripts]

@@ -1,0 +1,1694 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:stockdb:public-facts:v1:1.0.0",
+  "$ref": "#/$defs/RecordsResponse",
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "dataset_id": {
+          "enum": [
+            "announcements",
+            "news",
+            "investor_qa"
+          ]
+        },
+        "source_provider": {
+          "enum": [
+            "cninfo",
+            "eastmoney",
+            "cls",
+            "wallstreetcn",
+            "sse_e",
+            "cninfo_irm"
+          ]
+        },
+        "instrument_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "end_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "contract_version",
+        "dataset_id",
+        "source_provider",
+        "start_date",
+        "end_date"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "cursor"
+            ]
+          },
+          "then": {
+            "required": [
+              "snapshot_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "dataset_id": {
+                "enum": [
+                  "announcements",
+                  "investor_qa"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "instrument_id"
+            ],
+            "properties": {
+              "instrument_id": {
+                "type": "string",
+                "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "NormalizedQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "dataset_id": {
+          "enum": [
+            "announcements",
+            "news",
+            "investor_qa"
+          ]
+        },
+        "source_provider": {
+          "enum": [
+            "cninfo",
+            "eastmoney",
+            "cls",
+            "wallstreetcn",
+            "sse_e",
+            "cninfo_irm"
+          ]
+        },
+        "instrument_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "end_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "required": [
+        "contract_version",
+        "dataset_id",
+        "source_provider",
+        "instrument_id",
+        "start_date",
+        "end_date",
+        "limit",
+        "cursor",
+        "snapshot_id"
+      ]
+    },
+    "RecordsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "contract_revision": {
+          "const": "1.0.0"
+        },
+        "server_build_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "served_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+        },
+        "query": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "contract_version": {
+              "const": "stockdb-public-facts-v1"
+            },
+            "dataset_id": {
+              "enum": [
+                "announcements",
+                "news",
+                "investor_qa"
+              ]
+            },
+            "source_provider": {
+              "enum": [
+                "cninfo",
+                "eastmoney",
+                "cls",
+                "wallstreetcn",
+                "sse_e",
+                "cninfo_irm"
+              ]
+            },
+            "instrument_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "start_date": {
+              "type": "string",
+              "format": "date"
+            },
+            "end_date": {
+              "type": "string",
+              "format": "date"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            },
+            "cursor": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            },
+            "snapshot_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          },
+          "required": [
+            "contract_version",
+            "dataset_id",
+            "source_provider",
+            "instrument_id",
+            "start_date",
+            "end_date",
+            "limit",
+            "cursor",
+            "snapshot_id"
+          ]
+        },
+        "request_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "data_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "snapshot_data_hash": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "snapshot_expires_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "partial",
+            "failed"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requested_start": {
+              "type": "string",
+              "format": "date"
+            },
+            "requested_end": {
+              "type": "string",
+              "format": "date"
+            },
+            "available_start": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "available_end": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "completeness": {
+              "enum": [
+                "complete",
+                "partial",
+                "unknown"
+              ]
+            },
+            "basis": {
+              "enum": [
+                "enumerated_window",
+                "provider_recent_window",
+                "current_snapshot",
+                "unknown"
+              ]
+            },
+            "upstream_total": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "captured_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "capture_truncated": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "minLength": 1
+            }
+          },
+          "required": [
+            "requested_start",
+            "requested_end",
+            "available_start",
+            "available_end",
+            "completeness",
+            "basis",
+            "upstream_total",
+            "captured_total",
+            "capture_truncated",
+            "reason"
+          ]
+        },
+        "source_catalog": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "enum": [
+                  "cninfo",
+                  "eastmoney",
+                  "cls",
+                  "wallstreetcn",
+                  "sse_e",
+                  "cninfo_irm"
+                ]
+              },
+              "origin_reference": {
+                "type": "string",
+                "minLength": 1
+              },
+              "retrieved_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+              },
+              "adapter_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "adapter_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "upstream_commit": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "parser_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "raw_artifact_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+              },
+              "raw_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "provider",
+              "origin_reference",
+              "retrieved_at",
+              "adapter_id",
+              "adapter_version",
+              "upstream_commit",
+              "parser_version",
+              "raw_artifact_id",
+              "raw_sha256"
+            ]
+          }
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "record_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "record_version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "instrument_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "published_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "published_date": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "first_seen_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                  },
+                  "source_updated_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "time_precision": {
+                    "enum": [
+                      "timestamp",
+                      "date",
+                      "unknown"
+                    ]
+                  },
+                  "time_unknown_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "raw_artifact_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                  },
+                  "kind": {
+                    "const": "announcements"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "category": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "original_url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "document_artifact_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "record_id",
+                  "record_version",
+                  "instrument_id",
+                  "source_id",
+                  "published_at",
+                  "published_date",
+                  "first_seen_at",
+                  "source_updated_at",
+                  "time_precision",
+                  "time_unknown_reason",
+                  "raw_artifact_id",
+                  "kind",
+                  "title",
+                  "category",
+                  "original_url",
+                  "document_artifact_id"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "record_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "record_version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "instrument_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "published_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "published_date": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "first_seen_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                  },
+                  "source_updated_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "time_precision": {
+                    "enum": [
+                      "timestamp",
+                      "date",
+                      "unknown"
+                    ]
+                  },
+                  "time_unknown_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "raw_artifact_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                  },
+                  "kind": {
+                    "const": "news"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content_text": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "publisher": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "original_url": {
+                    "type": "string",
+                    "format": "uri"
+                  }
+                },
+                "required": [
+                  "record_id",
+                  "record_version",
+                  "instrument_id",
+                  "source_id",
+                  "published_at",
+                  "published_date",
+                  "first_seen_at",
+                  "source_updated_at",
+                  "time_precision",
+                  "time_unknown_reason",
+                  "raw_artifact_id",
+                  "kind",
+                  "title",
+                  "content_text",
+                  "publisher",
+                  "original_url"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "record_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "record_version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "instrument_id": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "published_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "published_date": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "first_seen_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                  },
+                  "source_updated_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "time_precision": {
+                    "enum": [
+                      "timestamp",
+                      "date",
+                      "unknown"
+                    ]
+                  },
+                  "time_unknown_reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "raw_artifact_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                  },
+                  "kind": {
+                    "const": "investor_qa"
+                  },
+                  "question_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "question_text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "question_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                  },
+                  "reply_text": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "reply_at": {
+                    "oneOf": [
+                      {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "original_url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "raw_question_time": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "raw_reply_time": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 1
+                  },
+                  "parser_reference_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                  },
+                  "parser_timezone": {
+                    "const": "Asia/Shanghai"
+                  }
+                },
+                "required": [
+                  "record_id",
+                  "record_version",
+                  "instrument_id",
+                  "source_id",
+                  "published_at",
+                  "published_date",
+                  "first_seen_at",
+                  "source_updated_at",
+                  "time_precision",
+                  "time_unknown_reason",
+                  "raw_artifact_id",
+                  "kind",
+                  "question_id",
+                  "question_text",
+                  "question_at",
+                  "reply_text",
+                  "reply_at",
+                  "original_url",
+                  "raw_question_time",
+                  "raw_reply_time",
+                  "parser_reference_at",
+                  "parser_timezone"
+                ]
+              }
+            ]
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "INVALID_ARGUMENT",
+                  "UNSUPPORTED_CONTRACT",
+                  "UNSUPPORTED_SCOPE",
+                  "AUTH_REQUIRED",
+                  "SOURCE_UNAVAILABLE",
+                  "SOURCE_TIMEOUT",
+                  "RATE_LIMITED",
+                  "PARSE_ERROR",
+                  "INCOMPLETE_SOURCE",
+                  "SNAPSHOT_NOT_FOUND",
+                  "SNAPSHOT_EXPIRED",
+                  "SNAPSHOT_SCOPE_MISMATCH",
+                  "ARTIFACT_NOT_FOUND",
+                  "ARTIFACT_LIMIT",
+                  "BUSY",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ]
+          }
+        }
+      },
+      "required": [
+        "contract_version",
+        "contract_revision",
+        "server_build_id",
+        "request_id",
+        "served_at",
+        "query",
+        "request_hash",
+        "data_hash",
+        "snapshot_data_hash",
+        "snapshot_id",
+        "snapshot_expires_at",
+        "status",
+        "truncated",
+        "has_more",
+        "next_cursor",
+        "coverage",
+        "source_catalog",
+        "data",
+        "errors"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "query": {
+                "properties": {
+                  "dataset_id": {
+                    "const": "announcements"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "record_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "record_version": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "instrument_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "published_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "published_date": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "first_seen_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                    },
+                    "source_updated_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "time_precision": {
+                      "enum": [
+                        "timestamp",
+                        "date",
+                        "unknown"
+                      ]
+                    },
+                    "time_unknown_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "raw_artifact_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                    },
+                    "kind": {
+                      "const": "announcements"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "category": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "original_url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "document_artifact_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "record_id",
+                    "record_version",
+                    "instrument_id",
+                    "source_id",
+                    "published_at",
+                    "published_date",
+                    "first_seen_at",
+                    "source_updated_at",
+                    "time_precision",
+                    "time_unknown_reason",
+                    "raw_artifact_id",
+                    "kind",
+                    "title",
+                    "category",
+                    "original_url",
+                    "document_artifact_id"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "query": {
+                "properties": {
+                  "dataset_id": {
+                    "const": "news"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "record_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "record_version": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "instrument_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "published_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "published_date": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "first_seen_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                    },
+                    "source_updated_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "time_precision": {
+                      "enum": [
+                        "timestamp",
+                        "date",
+                        "unknown"
+                      ]
+                    },
+                    "time_unknown_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "raw_artifact_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                    },
+                    "kind": {
+                      "const": "news"
+                    },
+                    "title": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "content_text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "publisher": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "original_url": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  },
+                  "required": [
+                    "record_id",
+                    "record_version",
+                    "instrument_id",
+                    "source_id",
+                    "published_at",
+                    "published_date",
+                    "first_seen_at",
+                    "source_updated_at",
+                    "time_precision",
+                    "time_unknown_reason",
+                    "raw_artifact_id",
+                    "kind",
+                    "title",
+                    "content_text",
+                    "publisher",
+                    "original_url"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "query": {
+                "properties": {
+                  "dataset_id": {
+                    "const": "investor_qa"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "record_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "record_version": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "instrument_id": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^(XSHG|XSHE|XBSE)/equity/exchange/\\d{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "source_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "published_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "published_date": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "first_seen_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                    },
+                    "source_updated_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "time_precision": {
+                      "enum": [
+                        "timestamp",
+                        "date",
+                        "unknown"
+                      ]
+                    },
+                    "time_unknown_reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "raw_artifact_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+                    },
+                    "kind": {
+                      "const": "investor_qa"
+                    },
+                    "question_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "question_text": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "question_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                    },
+                    "reply_text": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "reply_at": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "format": "date-time",
+                          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "original_url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "raw_question_time": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "raw_reply_time": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "minLength": 1
+                    },
+                    "parser_reference_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+                    },
+                    "parser_timezone": {
+                      "const": "Asia/Shanghai"
+                    }
+                  },
+                  "required": [
+                    "record_id",
+                    "record_version",
+                    "instrument_id",
+                    "source_id",
+                    "published_at",
+                    "published_date",
+                    "first_seen_at",
+                    "source_updated_at",
+                    "time_precision",
+                    "time_unknown_reason",
+                    "raw_artifact_id",
+                    "kind",
+                    "question_id",
+                    "question_text",
+                    "question_at",
+                    "reply_text",
+                    "reply_at",
+                    "original_url",
+                    "raw_question_time",
+                    "raw_reply_time",
+                    "parser_reference_at",
+                    "parser_timezone"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ToolFailureResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "contract_revision": {
+          "const": "1.0.0"
+        },
+        "server_build_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "served_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+        },
+        "status": {
+          "const": "failed"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "enum": [
+                  "INVALID_ARGUMENT",
+                  "UNSUPPORTED_CONTRACT",
+                  "UNSUPPORTED_SCOPE",
+                  "AUTH_REQUIRED",
+                  "SOURCE_UNAVAILABLE",
+                  "SOURCE_TIMEOUT",
+                  "RATE_LIMITED",
+                  "PARSE_ERROR",
+                  "INCOMPLETE_SOURCE",
+                  "SNAPSHOT_NOT_FOUND",
+                  "SNAPSHOT_EXPIRED",
+                  "SNAPSHOT_SCOPE_MISMATCH",
+                  "ARTIFACT_NOT_FOUND",
+                  "ARTIFACT_LIMIT",
+                  "BUSY",
+                  "INTERNAL_ERROR"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ]
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "contract_version",
+        "contract_revision",
+        "server_build_id",
+        "request_id",
+        "served_at",
+        "status",
+        "errors"
+      ]
+    },
+    "ArtifactRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "default": 262144
+        }
+      },
+      "required": [
+        "contract_version",
+        "artifact_id"
+      ]
+    },
+    "ArtifactResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "const": "stockdb-public-facts-v1"
+        },
+        "contract_revision": {
+          "const": "1.0.0"
+        },
+        "server_build_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "served_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "T\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?\\+08:00$"
+        },
+        "status": {
+          "const": "complete"
+        },
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20971520
+        },
+        "chunk_size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 262144
+        },
+        "mime": {
+          "enum": [
+            "application/pdf",
+            "text/plain",
+            "text/html",
+            "application/json"
+          ]
+        },
+        "charset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "data_b64": {
+          "type": "string",
+          "maxLength": 349528
+        },
+        "chunk_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "eof": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "contract_version",
+        "contract_revision",
+        "server_build_id",
+        "request_id",
+        "served_at",
+        "status",
+        "artifact_id",
+        "offset",
+        "total_size",
+        "chunk_size",
+        "mime",
+        "charset",
+        "data_b64",
+        "chunk_sha256",
+        "content_sha256",
+        "eof"
+      ]
+    }
+  }
+}

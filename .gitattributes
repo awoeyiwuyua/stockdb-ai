@@ -2,3 +2,5 @@
 stockdb-ai/interfaces/mcp/contract/** -text
 *.sh -text
 entrypoint.sh -text
+stockdb-ai/astock/vendor/** -text
+stockdb-ai/astock/generated/** -text

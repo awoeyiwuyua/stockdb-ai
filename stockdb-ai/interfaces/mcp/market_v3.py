@@ -1196,12 +1196,13 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
             continue
         identity = identities[key]
         if identity.asset_type in ("index", "board"):
-            # 0.14.0 A 批：指数（腾讯 ifzq 三主机→新浪 轮转）/板块（eastmoney）
-            kinds[key] = (identity.asset_type, None)  # 失败序列也进目录
+            # 0.14.0 A 批：指数（腾讯 ifzq 三主机→新浪 轮转）/板块（eastmoney，
+            # 0.16.0 起持久缓存+风控退避+缺口补采）
+            kinds[key] = (identity.asset_type, None, {})  # 失败序列也进目录
             try:
-                _kind, provider, rows = research.fetch_series_rows(
+                _kind, provider, rows, fetch_meta = research.fetch_series_rows(
                     key, query["start"], query["end"])
-                kinds[key] = (_kind, provider)
+                kinds[key] = (_kind, provider, fetch_meta)
                 rows_by_code[key] = rows
             except (research.ResearchError, V3Error) as exc:
                 code = getattr(exc, "code", "SOURCE_UNAVAILABLE")
@@ -1253,11 +1254,14 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
                 "kline tables over HTTP, unadjusted)"),
             finality=_bars_finality_evidence()),
     }
-    for key, (kind, provider) in kinds.items():
-        # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析
+    for key, (kind, provider, fetch_meta) in kinds.items():
+        # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析。
+        # 板块缓存服务时 retrieved_at 取窗口内最旧真实取得时间（不伪标实时抓取）
         sources[research.series_source_id(key)] = (
-            research.series_source_record(kind, key, _now_iso(),
-                                          provider=provider))
+            research.series_source_record(
+                kind, key, (fetch_meta or {}).get("retrieved_at")
+                or _now_iso(),
+                provider=provider, fetch_meta=fetch_meta or {}))
     snapshot_id = SNAPSHOTS.new_id("kline")
     # E01（消费方反馈）：所有 v3 行情响应（含 R/长历史/普通 core）都携带价格
     # 序列研究元数据——扩展校验器对一切带 query 的 KlineResponse 强制
@@ -1852,6 +1856,33 @@ _CORE_CAPS_EXCEPTIONS = [
 ]
 
 
+def _astock_lifecycle_status() -> dict:
+    """astock 上游升级状态（只读缓存；UPGRADE-RELEASE §1 拟新增扩展名）。"""
+    import json as _json
+    from pathlib import Path as _Path
+    out: dict = {"extension_contract": "stockdb-astock-provider-lifecycle",
+                 "extension_revision": "1.0.0"}
+    try:
+        obs_path = (_Path(__file__).resolve().parents[2] / "astock"
+                    / "observations.json")
+        if obs_path.exists():
+            history = _json.loads(obs_path.read_text(encoding="utf-8"))
+            last_ok = next((o for o in reversed(history)
+                            if o.get("status") != "query_failed"), None)
+            out["last_discovery"] = history[-1] if history else None
+            out["last_successful_observation"] = last_ok
+        store = (_Path(__file__).resolve().parents[2] / "astock"
+                 / "lifecycle-store.json")
+        if store.exists():
+            st = _json.loads(store.read_text(encoding="utf-8"))
+            out["active_candidate"] = st.get("active")
+            out["candidates"] = {k: v.get("state") for k, v in
+                                 (st.get("candidates") or {}).items()}
+    except Exception:  # noqa: BLE001 - 状态只读失败不影响核心
+        pass
+    return out
+
+
 def get_data_status_v3(args: dict | None = None) -> dict:
     if args:
         extra = set(args) - {"contract_version"}
@@ -1950,6 +1981,8 @@ def get_data_status_v3(args: dict | None = None) -> dict:
             "notice": "core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用",
             "snapshot_store_size": SNAPSHOTS.size(),
             **({"research_v1": research.research_status_metadata()}
+               if research is not None else {}),
+            **({"astock_lifecycle_v1": _astock_lifecycle_status()}
                if research is not None else {}),
         },
     }

@@ -2360,7 +2360,39 @@ def _warehouse_result_with_known_at(result: dict) -> dict:
 # === MCP 工具定义 ===
 
 
-TOOLS: list[dict] = [
+def _astock_tool_schemas() -> dict:
+    """M2 public-facts 两工具发布 schema（astock_wire 装配失败则旧版-only）。"""
+    try:
+        from interfaces.mcp import astock_wire
+        return astock_wire.published_tool_schemas()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+_ASTOCK_SCHEMAS = _astock_tool_schemas()
+
+
+def _astock_tools() -> list[dict]:
+    try:
+        from interfaces.mcp import astock_wire
+        descriptions = astock_wire.tool_descriptions()
+    except Exception:  # noqa: BLE001
+        descriptions = {}
+    tools = []
+    for name in ("get_public_records", "get_public_artifact"):
+        schema = _ASTOCK_SCHEMAS.get(name)
+        if not schema:
+            continue
+        tools.append({
+            "name": name,
+            "description": descriptions.get(name, name),
+            "inputSchema": schema["inputSchema"],
+            "outputSchema": schema["outputSchema"],
+        })
+    return tools
+
+
+TOOLS: list[dict] = _astock_tools() + [
     {
         "name": "get_kline",
         "description": (
@@ -3185,6 +3217,16 @@ def _call_tool(name: str, args: dict) -> dict:
     请求保持下方旧版路径与旧返回形状（互不影响）。
     """
     if market_v3 is not None and "contract_version" in (args or {}):
+        # M2（0.15.0）：public-facts 两工具先行于 market 分发
+        #（contract_version=stockdb-public-facts-v1 不被 market 分支接住）
+        try:
+            from interfaces.mcp.astock_wire import maybe_dispatch as _pf_dispatch
+        except Exception:  # noqa: BLE001 - 模块缺失仅降级新域，不影响旧路径
+            _pf_dispatch = None
+        if _pf_dispatch is not None:
+            pf_result = _pf_dispatch(name, args)
+            if pf_result is not None:
+                return pf_result
         v3_result = market_v3.maybe_dispatch(name, args)
         if v3_result is not None:
             return v3_result
