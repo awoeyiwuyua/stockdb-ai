@@ -1986,6 +1986,7 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
 
 def research_status_metadata() -> dict:
     """get_data_status.extensions.research_v1（§2.2；known_limitations 如实）。"""
+    _ensure_backfill_thread()  # 状态轮询路径也兜底启动巡检（无人请求板块也能补采）
     limitations: list[str] = []
     em = em_board_availability()
     if em["ok_at"] <= 0 and em["fail_at"] > 0:
