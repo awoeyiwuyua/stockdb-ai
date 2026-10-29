@@ -1294,9 +1294,12 @@ def run_A(runner: Runner, latest: str | None) -> None:
             hfq_rows and Decimal(hfq_rows[0]["multiplier"]) == 1,
             f"hfq first-row multiplier={hfq_rows and hfq_rows[0]['multiplier']}")
     sub = runner.factors(codes=[EQUITY_KEY], start=sessions[-5:][0],
-                         end=end8, snapshot_id=f_env.get("snapshot_id"))
-    sub_ok = (sub.get("query", {}).get("adjustment_anchor")
-              == f_env.get("query", {}).get("adjustment_anchor"))
+                         end=end8, snapshot_id=f_env.get("snapshot_id"),
+                         anchor=(f_env.get("query") or {}).get(
+                             "adjustment_anchor"))
+    # 失败信封 query=None：不得用 .get("query", {})（键存在值为 None）
+    sub_ok = ((sub.get("query") or {}).get("adjustment_anchor")
+              == (f_env.get("query") or {}).get("adjustment_anchor"))
     weekend_anchor = runner.factors(codes=[EQUITY_KEY], fq="qfq",
                                     start=sessions[-10:][0], end=end8,
                                     anchor="20261018")
@@ -1612,11 +1615,13 @@ def run_A(runner: Runner, latest: str | None) -> None:
     c = runner.case("A11")
     f_reread = runner.factors(codes=[EQUITY_KEY],
                               start=sessions[-10:][0], end=end8,
-                              snapshot_id=fid)
+                              snapshot_id=fid,
+                              anchor=(f_env.get("query") or {}).get(
+                                  "adjustment_anchor"))
     decimals = 2
     recompute_ok = True
     detail_rows = 0
-    f_by_date = {x["date"]: x for x in f_reread.get("data", {}).get(
+    f_by_date = {x["date"]: x for x in (f_reread.get("data") or {}).get(
         EQUITY_KEY, [])}
     for rbar, abar in zip(r_env.get("data", {}).get(EQUITY_KEY, []),
                           a_env.get("data", {}).get(EQUITY_KEY, [])):
