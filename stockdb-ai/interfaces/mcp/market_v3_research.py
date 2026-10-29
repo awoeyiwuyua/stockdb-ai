@@ -28,7 +28,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, getcontext
 from pathlib import Path
 from typing import Any
@@ -139,9 +139,12 @@ _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 
 
-def _http_json(url: str, *, referer: str, timeout: float) -> Any:
-    req = urllib.request.Request(url, headers={
-        "User-Agent": _UA, "Referer": referer, "Accept": "*/*"})
+def _http_json(url: str, *, referer: str, timeout: float,
+               headers: dict | None = None) -> Any:
+    merged = {"User-Agent": _UA, "Referer": referer, "Accept": "*/*"}
+    if headers:
+        merged.update(headers)
+    req = urllib.request.Request(url, headers=merged)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read()
     return json.loads(body)
@@ -278,26 +281,156 @@ def tencent_index_daily(symbol: str, start8: str, end8: str, *,
 
 # ---------------------------------------------------------------------------
 # eastmoney 板块日K（A 批板块数据路径；源不可达时如实失败）
+#
+# 2026-10-29 根因实测（见交付报告）：push2his 集群（92/21/40/默认域同一 IP 簇）
+# 上线了行为风控——对非浏览器客户端（urllib/curl 等无完整浏览器形态的请求）
+# 静默断连（TCP/TLS 握手正常、HTTP 请求后 0 字节关闭，RemoteDisconnected），
+# 并按客户端行为评分升级：连续自动化形态请求 → 滑块验证码 → IP 级全断（含
+# 真实浏览器）。原实现每次请求连发 4 主机 + 无退避 + 无缓存，持续触发并维持
+# 惩罚状态（消费端 10-27 缺日、10-29 SOURCE_UNAVAILABLE 的直接原因）。
+#
+# 应对（不绕风控、不造假）：
+#   1. polite 客户端——完整浏览器形态头（UA/Accept-Language/逐板块 Referer）、
+#      站点公开 ut 参数、持久 qgqp_b_id 设备 Cookie（首次生成随机 32hex）；
+#   2. 风控退避——RemoteDisconnected/BadStatusLine 等静默断连判定为 waf_drop，
+#      全局冷却（30min 起指数退避至 4h 封顶）；冷却期内 fail-fast 不触网，
+#      绝不把「连发重试」变成维持封禁的流量；仅超时/网络不可达类错误轮转主机；
+#   3. 持久缓存——每板块日K逐日落盘（真实取得才写），上游失败时如实以缓存
+#      服务（partial + gaps 由基线缺口机制如实上报），绝无数据的日子不制造；
+#   4. 缺口补采——请求路径合并补采 + 低频后台巡检（冷却许可时按缺口窗口拉取）。
 # ---------------------------------------------------------------------------
 
 _EM_HOSTS = ("92.push2his.eastmoney.com", "21.push2his.eastmoney.com",
              "40.push2his.eastmoney.com", "push2his.eastmoney.com")
-_EM_LAST_STATE: dict[str, Any] = {"ok_at": 0.0, "fail_at": 0.0, "fail_reason": None}
+_EM_REFERER = "https://quote.eastmoney.com/bk/{secid}.html"
+# 站点网页同款公开 token（quote.eastmoney.com 页面 JS 实测携带，非凭证）
+_EM_UT = "fa5fd1943c7b386f172d6893dbfba10b"
+_EM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+# waf_drop 全局冷却：30min 起、按连败指数退避、4h 封顶
+_EM_WAF_COOLDOWN_BASE = 1800.0
+_EM_WAF_COOLDOWN_MAX = 4 * 3600.0
+_EM_HOST_RETRY_SLEEP = 2.0  # 轮转下一主机前的最小间隔（同簇主机不连发）
+
 _EM_STATE_LOCK = threading.Lock()
+_EM_LAST_STATE: dict[str, Any] = {
+    "ok_at": 0.0, "fail_at": 0.0, "fail_reason": None,
+    "cooldown_until": 0.0, "backoff_streak": 0,
+    "last_drop_class": None, "requests_total": 0, "requests_ok": 0,
+}
+_EM_BACKFILL_STATE: dict[str, Any] = {"last_cycle_at": 0.0, "last_summary": None}
 
 
 def em_board_availability() -> dict[str, Any]:
     """最近一次东财访问结果（状态工具只读缓存，绝不同步现查上游）。"""
+    defaults: dict[str, Any] = {
+        "ok_at": 0.0, "fail_at": 0.0, "fail_reason": None,
+        "cooldown_until": 0.0, "backoff_streak": 0,
+        "last_drop_class": None, "requests_total": 0, "requests_ok": 0,
+    }
     with _EM_STATE_LOCK:
-        return dict(_EM_LAST_STATE)
+        state = {**defaults, **_EM_LAST_STATE}
+        state = {k: v for k, v in state.items() if not k.startswith("_")}
+        state["backfill"] = {
+            "last_cycle_at": _EM_BACKFILL_STATE.get("last_cycle_at", 0.0),
+            "last_summary": _EM_BACKFILL_STATE.get("last_summary"),
+        }
+        return state
 
 
-def _em_record(ok: bool, reason: str | None = None) -> None:
+def _em_record(ok: bool, reason: str | None = None, **extra: Any) -> None:
     with _EM_STATE_LOCK:
         if ok:
-            _EM_LAST_STATE.update(ok_at=time.time(), fail_reason=None)
+            _EM_LAST_STATE.update(ok_at=time.time(), fail_reason=None,
+                                  backoff_streak=0, cooldown_until=0.0,
+                                  last_drop_class=None)
         else:
             _EM_LAST_STATE.update(fail_at=time.time(), fail_reason=reason)
+        _EM_LAST_STATE.update(extra)
+
+
+def _em_client_state() -> dict:
+    """持久客户端状态：qgqp_b_id Cookie + 退避连败数/冷却截止。
+
+    落盘目录复用快照目录解析（config.DATA_DIR/env/回退）；状态跨重启保留，
+    避免每次重启都换新设备指纹（那才是可疑形态）。文件不可写时退化为进程内
+    状态（不阻塞响应）。
+    """
+    with _EM_STATE_LOCK:
+        cached = _EM_LAST_STATE.get("_client_state")
+    if cached is not None:
+        return cached
+    state: dict[str, Any] = {}
+    path = None
+    try:
+        path = _board_cache_dir() / "em_client_state.json"
+        if path.exists():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state = loaded
+    except Exception:  # noqa: BLE001 - 状态读不到就从零开始
+        state = {}
+    if not state.get("qgqp_b_id"):
+        import secrets
+        state["qgqp_b_id"] = secrets.token_hex(16)
+    state.setdefault("backoff_streak", 0)
+    state.setdefault("cooldown_until", 0.0)
+    if path is not None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False),
+                           encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            pass  # 磁盘不可写：进程内状态兜底
+    with _EM_STATE_LOCK:
+        _EM_LAST_STATE["_client_state"] = state
+    return state
+
+
+def _em_persist_state() -> None:
+    state = _em_client_state()
+    try:
+        path = _board_cache_dir() / "em_client_state.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001 - 状态持久化尽力而为
+        pass
+
+
+def _em_headers(secid: str) -> dict:
+    state = _em_client_state()
+    return {
+        "User-Agent": _EM_UA,
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": _EM_REFERER.format(secid=secid),
+        "Cookie": f"qgqp_b_id={state.get('qgqp_b_id', '')}",
+    }
+
+
+def _em_is_waf_drop(exc: Exception) -> bool:
+    """静默断连类错误（风控特征）：TCP/TLS 正常但 HTTP 前被掐断。"""
+    import http.client
+    return isinstance(exc, (http.client.RemoteDisconnected,
+                            http.client.BadStatusLine,
+                            http.client.IncompleteRead))
+
+
+def _em_enter_cooldown(reason: str, drop_class: str) -> float:
+    """进入全局风控冷却（指数退避）。返回冷却截止 epoch。"""
+    state = _em_client_state()
+    state["backoff_streak"] = int(state.get("backoff_streak", 0)) + 1
+    streak = state["backoff_streak"]
+    cooldown = min(_EM_WAF_COOLDOWN_BASE * (2 ** (streak - 1)),
+                   _EM_WAF_COOLDOWN_MAX)
+    state["cooldown_until"] = time.time() + cooldown
+    _em_persist_state()
+    _em_record(False, reason, cooldown_until=state["cooldown_until"],
+               backoff_streak=streak, last_drop_class=drop_class)
+    return state["cooldown_until"]
 
 
 def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
@@ -306,19 +439,55 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
 
     klines CSV：f51 日期, f52 open, f53 close, f54 high, f55 low, f56 volume,
     f57 amount（量额单位不可独立证明 → 不取，price-only）。
-    多主机轮转重试；全部失败抛 ResearchError(SOURCE_UNAVAILABLE)。
+    风控冷却期内 fail-fast（不触网，如实 SOURCE_UNAVAILABLE）；waf_drop 触发
+    全局退避且不再轮转同簇主机（连发只会加深惩罚）；仅超时/网络不可达轮转。
     """
+    state = _em_client_state()
+    now = time.time()
+    cooldown_until = float(state.get("cooldown_until") or 0.0)
+    if now < cooldown_until:
+        remaining = int(cooldown_until - now)
+        _em_record(False, f"风控冷却中（剩余 {remaining}s 不触网）",
+                   cooldown_until=cooldown_until)
+        raise ResearchError(
+            "SOURCE_UNAVAILABLE",
+            f"eastmoney 板块源处于风控退避期（上次静默断连后冷却，"
+            f"剩余 {remaining}s）；期间不触网重试，避免维持封禁状态；"
+            "已有缓存如实服务，缺口按合同上报",
+            details={"cooldown_remaining_s": remaining,
+                     "backoff_streak": state.get("backoff_streak"),
+                     "reason": "waf_backoff_cooldown"})
     errors: list[str] = []
-    for host in _EM_HOSTS:
+    for idx, host in enumerate(_EM_HOSTS):
         url = (f"https://{host}/api/qt/stock/kline/get?"
-               f"secid={urllib.parse.quote(secid)}&fields1=f1,f2,f3&"
+               f"secid={urllib.parse.quote(secid)}&"
+               f"ut={_EM_UT}&fields1=f1,f2,f3&"
                "fields2=f51,f52,f53,f54,f55,f56,f57"
                f"&klt=101&fqt=0&beg={start8}&end={end8}")
         try:
-            data = _http_json(url, referer="https://quote.eastmoney.com/",
-                              timeout=timeout)
-        except Exception as exc:  # noqa: BLE001 - 逐主机收集失败原因
-            errors.append(f"{host}: {type(exc).__name__}: {exc}"[:120])
+            with _EM_STATE_LOCK:
+                _EM_LAST_STATE["requests_total"] = (
+                    _EM_LAST_STATE.get("requests_total", 0) + 1)
+            data = _http_json(url, referer=_EM_REFERER.format(secid=secid),
+                              timeout=timeout, headers=_em_headers(secid))
+        except Exception as exc:  # noqa: BLE001 - 逐主机分类收集失败原因
+            desc = f"{host}: {type(exc).__name__}: {exc}"[:160]
+            errors.append(desc)
+            if _em_is_waf_drop(exc):
+                # 风控静默断连：不再轮转（同簇同策略），进入全局冷却
+                until = _em_enter_cooldown(
+                    "; ".join(errors)[-400:], "waf_drop")
+                raise ResearchError(
+                    "SOURCE_UNAVAILABLE",
+                    "eastmoney push2his 对本客户端静默断连（行为风控），"
+                    f"已进入全局退避至 {_iso_time(until)}；"
+                    "不轮转同簇主机连发重试，避免维持封禁；按合同如实失败",
+                    details={"hosts": list(_EM_HOSTS), "errors": errors[:4],
+                             "cooldown_until": until,
+                             "backoff_streak": _em_client_state().get(
+                                 "backoff_streak")}) from exc
+            if idx + 1 < len(_EM_HOSTS):
+                time.sleep(_EM_HOST_RETRY_SLEEP)
             continue
         klines = ((data.get("data") or {}).get("klines")) or []
         rows: dict[str, dict] = {}
@@ -331,14 +500,265 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
                 continue
             rows[d] = {"date8": d, "open": parts[1], "close": parts[2],
                        "high": parts[3], "low": parts[4]}
+        state["backoff_streak"] = 0
+        state["cooldown_until"] = 0.0
+        _em_persist_state()
+        with _EM_STATE_LOCK:
+            _EM_LAST_STATE["requests_ok"] = (
+                _EM_LAST_STATE.get("requests_ok", 0) + 1)
         _em_record(True)
         return [rows[k] for k in sorted(rows)]
+    # 全主机超时/网络不可达（非风控断连）：如实失败，不进风控退避
     _em_record(False, "; ".join(errors)[:400])
     raise ResearchError(
         "SOURCE_UNAVAILABLE",
         f"eastmoney 板块日K源当前不可达（已轮转 {_EM_HOSTS} 全部失败）；"
         "按合同如实失败，不用其他提供者序列冒充（I04）",
         details={"hosts": list(_EM_HOSTS), "errors": errors[:4]})
+
+
+def _iso_time(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch).astimezone().isoformat(
+        timespec="seconds")
+
+
+# ---------------------------------------------------------------------------
+# 板块日K持久缓存（真实取得才写；上游失败时如实以缓存服务 + 缺口上报）
+# ---------------------------------------------------------------------------
+
+
+def _board_cache_dir() -> Path:
+    return _snapshot_dir() / "board_daily_cache"
+
+
+def _board_cache_path(key: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
+    return _board_cache_dir() / f"{safe}.json"
+
+
+def _board_cache_load(key: str) -> dict:
+    path = _board_cache_path(key)
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(loaded, dict) and isinstance(loaded.get("bars"), dict)
+                and loaded.get("instrument_id") == key):
+            return loaded
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"instrument_id": key, "bars": {}, "updated_at": None,
+            "fetch_attempts": 0, "fetch_failures": 0}
+
+
+def _board_cache_save(key: str, store: dict) -> None:
+    try:
+        path = _board_cache_path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store["updated_at"] = _now_iso()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(store, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass  # 缓存写失败不阻塞响应（内存内本次合并仍有效）
+
+
+def board_daily_cached(key: str, secid: str, start8: str, end8: str, *,
+                       timeout: float = 8.0) -> tuple[list[dict], dict]:
+    """板块日K读取（缓存优先合并）：→ (行, cache_info)。
+
+    - 上游成功：逐日 upsert（源修订覆盖旧值 = 允许的历史修订；不删除源未返回
+      的既有日——源 200 降级响应不删真实历史）；服务窗口 = 源行 ∪ 缓存行
+      （按日合并）。
+    - 上游失败且缓存覆盖窗口内有真实已取日：如实以缓存服务（缺口由基线
+      expected-slots 机制上报 partial + INCOMPLETE_COVERAGE，绝无虚造）；
+      cache_info.cache_served=True、retrieved_at=窗口内最旧已取时间（来源
+      可追溯，不得把缓存读取伪标为实时抓取）。
+    - 上游失败且窗口内无任何缓存：原样抛出（与既有诚实失败行为一致）。
+    """
+    native = key.split("/")[-1]
+    store = _board_cache_load(key)
+    bars = store.setdefault("bars", {})
+    now_iso = _now_iso()
+    cache_info: dict[str, Any] = {"cache_served": False, "retrieved_at": None}
+    try:
+        rows = eastmoney_board_daily(secid, start8, end8, timeout=timeout)
+    except ResearchError as exc:
+        store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+        store["fetch_failures"] = int(store.get("fetch_failures", 0)) + 1
+        cached_rows = []
+        oldest = None
+        for d in sorted(bars):
+            if start8 <= d <= end8:
+                cached_rows.append({"date8": d, **{
+                    f: bars[d][f] for f in ("open", "high", "low", "close")}})
+                ts = bars[d].get("retrieved_at")
+                if ts and (oldest is None or ts < oldest):
+                    oldest = ts
+        if not cached_rows:
+            _board_cache_save(key, store)
+            raise
+        cache_info["cache_served"] = True
+        cache_info["retrieved_at"] = oldest
+        cache_info["source_error"] = exc.message[:200]
+        _board_cache_save(key, store)
+        return cached_rows, cache_info
+    store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+    fresh_dates: set[str] = set()
+    for row in rows:
+        d = row["date8"]
+        entry = {f: row[f] for f in ("open", "high", "low", "close")}
+        prior = bars.get(d)
+        if prior and any(str(prior.get(f)) != str(entry[f])
+                         for f in ("open", "high", "low", "close")):
+            revisions = store.setdefault("revisions", {})
+            revisions[d] = {"at": now_iso,
+                            "from": {f: prior.get(f)
+                                     for f in ("open", "high", "low", "close")}}
+        entry["retrieved_at"] = now_iso
+        bars[d] = entry
+        fresh_dates.add(d)
+    _board_cache_save(key, store)
+    # 服务窗口 = 源行 ∪ 缓存行（源 200 降级不丢既有真实日）
+    merged = [dict(row) for row in rows]
+    seen = set(fresh_dates)
+    extra_cached = 0
+    oldest = None
+    for d in sorted(bars):
+        if d in seen or not (start8 <= d <= end8):
+            continue
+        merged.append({"date8": d, **{
+            f: bars[d][f] for f in ("open", "high", "low", "close")}})
+        extra_cached += 1
+        ts = bars[d].get("retrieved_at")
+        if ts and (oldest is None or ts < oldest):
+            oldest = ts
+    merged.sort(key=lambda r: r["date8"])
+    if extra_cached:
+        cache_info["merged_cached_extras"] = extra_cached
+        cache_info["retrieved_at"] = oldest
+    return merged, cache_info
+
+
+def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
+    """各板块缓存缺口（对照 XSHG 日历；只统计 < latest_completed8 的交易日）。
+
+    latest_completed8 缺省取引擎最新交易日（只读 HEALTH，不触发引擎探测）；
+    不可用时用「今天」——今天当日收盘前的缺日不算缺口（final 语义另行处理）。
+    """
+    from interfaces.mcp import market_v3 as v3
+    if latest_completed8 is None:
+        latest_completed8 = (v3.HEALTH.get().get("latest") or
+                             datetime.now().strftime("%Y%m%d"))
+    report: dict[str, Any] = {}
+    window_start = max(
+        v3.CALENDAR_COVERAGE_START.replace("-", ""),
+        (datetime.now() - timedelta(days=820)).strftime("%Y%m%d"))
+    window_end = datetime.now().strftime("%Y%m%d")
+    for key, meta in BOARD_SERIES.items():
+        store = _board_cache_load(key)
+        cached = set((store.get("bars") or {}).keys())
+        try:
+            slots = v3._expected_slots("XSHG", window_start, window_end) or []
+        except Exception:  # noqa: BLE001 - 日历不可用按空处理
+            slots = []
+        dates8 = [d.replace("-", "") for d in slots]
+        gaps = [d for d in dates8
+                if d not in cached and d <= latest_completed8
+                and d >= (meta.get("board_start8") or "00000000")]
+        report[key] = {
+            "name": meta["name"], "secid": meta["secid"],
+            "cached_days": len(cached),
+            "cache_first": min(cached) if cached else None,
+            "cache_last": max(cached) if cached else None,
+            "gap_days": gaps,
+            "gap_count": len(gaps),
+        }
+    return report
+
+
+def board_backfill_cycle(*, force: bool = False) -> dict:
+    """缺口补采一轮：逐板块按缺口窗口拉取合并（冷却许可时）。
+
+    有界重试：一轮每板块至多 1 次源请求；板块间 1.5s 间隔；全局风控冷却
+    未到期时整体跳过（force 仅供运维/测试显式穿透）。
+    """
+    state = _em_client_state()
+    now = time.time()
+    cooldown_until = float(state.get("cooldown_until") or 0.0)
+    summary: dict[str, Any] = {"started_at": _now_iso(), "boards": {},
+                               "skipped": None}
+    if not force and now < cooldown_until:
+        summary["skipped"] = (f"风控冷却中（剩余 {int(cooldown_until - now)}s）"
+                              "——不触网，缺口等待下一轮")
+        with _EM_STATE_LOCK:
+            _EM_BACKFILL_STATE.update(last_cycle_at=time.time(),
+                                      last_summary=summary)
+        return summary
+    report = board_cache_gap_report()
+    touched = 0
+    for key, info in report.items():
+        if not info["gap_days"]:
+            summary["boards"][key] = {"action": "none",
+                                      "gap_count": 0}
+            continue
+        if touched >= 7:  # 一轮有界：至多覆盖全部 7 个已声明板块一次
+            summary["boards"][key] = {"action": "deferred"}
+            continue
+        meta = BOARD_SERIES[key]
+        beg = info["gap_days"][0]
+        end = max(info["gap_days"][-1],
+                  datetime.now().strftime("%Y%m%d"))
+        try:
+            _rows, _ci = board_daily_cached(key, meta["secid"], beg, end)
+            after = board_cache_gap_report(
+                datetime.now().strftime("%Y%m%d"))[key]
+            summary["boards"][key] = {
+                "action": "fetched", "window": [beg, end],
+                "gap_before": info["gap_count"],
+                "gap_after": after["gap_count"]}
+        except ResearchError as exc:
+            summary["boards"][key] = {"action": "failed",
+                                      "error": exc.code,
+                                      "detail": exc.message[:160]}
+        touched += 1
+        time.sleep(1.5)  # 板块间礼貌间隔
+    with _EM_STATE_LOCK:
+        _EM_BACKFILL_STATE.update(last_cycle_at=time.time(),
+                                  last_summary=summary)
+    return summary
+
+
+_backfill_thread_started = False
+_backfill_thread_lock = threading.Lock()
+
+
+def _ensure_backfill_thread() -> None:
+    """启动低频缺口巡检线程（进程级一次；kill-switch 立即退出）。
+
+    单测/验收 stub 通过 STOCKDB_V3_BOARD_BACKFILL=off 关闭；正式服务默认开。
+    首轮延迟 90s（避免短生命周期进程触网），之后每 20min±120s 一轮，且只在
+    存在缺口且冷却许可时真正出网。
+    """
+    global _backfill_thread_started
+    kill = os.environ.get("STOCKDB_V3_BOARD_BACKFILL", "").strip().lower()
+    if kill in ("0", "off", "false", "no"):
+        return
+    with _backfill_thread_lock:
+        if _backfill_thread_started:
+            return
+        _backfill_thread_started = True
+
+    def _loop() -> None:
+        time.sleep(90)
+        while True:
+            try:
+                board_backfill_cycle()
+            except Exception:  # noqa: BLE001 - 巡检线程绝不带崩服务
+                pass
+            time.sleep(1200 + (time.time() % 240) - 120)
+
+    threading.Thread(target=_loop, daemon=True,
+                     name="em-board-backfill").start()
 
 
 # ---------------------------------------------------------------------------
@@ -1444,13 +1864,19 @@ def resolve_research_identity(key: str) -> tuple[str, str, str, str]:
 
 
 def fetch_series_rows(key: str, start8: str, end8: str) -> tuple[
-        str, str, list[dict]]:
-    """已解析键 → (kind, provider, 日K行)。失败抛 ResearchError（合同错误码）。"""
+        str, str, list[dict], dict]:
+    """已解析键 → (kind, provider, 日K行, fetch_meta)。失败抛 ResearchError。
+
+    fetch_meta：板块路径附 {"cache_served", "retrieved_at"}（来源记录用）；
+    指数路径为空 dict。
+    """
     kind, native, _name, _cal = resolve_research_identity(key)
     if kind == "index":
         provider, rows = fetch_index_daily(native, start8, end8)
-        return "index", provider, rows
-    return "board", "eastmoney", eastmoney_board_daily(native, start8, end8)
+        return "index", provider, rows, {}
+    rows, cache_info = board_daily_cached(key, native, start8, end8)
+    _ensure_backfill_thread()
+    return "board", "eastmoney", rows, cache_info
 
 
 def series_units(kind: str) -> dict:
@@ -1509,8 +1935,10 @@ def series_source_id(key: str) -> str:
 
 
 def series_source_record(kind: str, key: str, retrieved_at: str,
-                          provider: str | None = None) -> dict:
+                          provider: str | None = None,
+                          fetch_meta: dict | None = None) -> dict:
     v3 = _v3()
+    fetch_meta = fetch_meta or {}
     if kind == "index":
         meta = INDEX_SERIES[key]
         access = provider or "tencent"
@@ -1532,11 +1960,21 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
             retrieved_at=retrieved_at, reference=reference,
             finality=finality)
     meta = BOARD_SERIES[key]
+    cache_served = bool(fetch_meta.get("cache_served"))
+    reference = (f"https://quote.eastmoney.com/bk/{meta['secid']}.html "
+                 f"(eastmoney board daily kline via push2his API)")
+    finality = "eastmoney publishes completed board bars after close"
+    if cache_served:
+        # 来源可追溯：缓存服务的数据必须如实标注原始取得时间，不得伪标实时抓取
+        reference += (f" [served from server-side persistent board cache; "
+                      f"bars originally retrieved "
+                      f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
+                      f"attempt failed upstream and is honestly reported via "
+                      f"gaps]")
     return v3._source_record(
         retrieved_at=retrieved_at,
-        reference=(f"https://quote.eastmoney.com/bk/{meta['secid']}.html "
-                   f"(eastmoney board daily kline via push2his API)"),
-        finality=("eastmoney publishes completed board bars after close"))
+        reference=reference,
+        finality=finality)
 
 
 # ---------------------------------------------------------------------------
@@ -1553,6 +1991,18 @@ def research_status_metadata() -> dict:
             "eastmoney board source currently unreachable (latest failure: "
             f"{em['fail_reason']}); BK series served as honest failures until "
             "the source recovers")
+    cooldown_left = int(float(em.get("cooldown_until") or 0) - time.time())
+    if cooldown_left > 0:
+        limitations.append(
+            "eastmoney risk-control backoff active: silent connection drops "
+            f"observed, next upstream attempt in ~{cooldown_left}s "
+            f"(streak={em.get('backoff_streak')}); cached bars are served "
+            "honestly with gaps reported, no fabrication")
+    bf = em.get("backfill") or {}
+    if bf.get("last_summary"):
+        limitations.append(
+            "board persistent cache & gap backfill active (last cycle: "
+            f"{bf.get('last_cycle_at') and datetime.fromtimestamp(bf['last_cycle_at']).astimezone().isoformat(timespec='seconds')})")
     limitations.append(
         "index/board volume/amount are null (unit not verifiable); "
         "price-only acceptance per DEVELOPMENT.md §3.3")

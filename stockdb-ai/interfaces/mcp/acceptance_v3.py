@@ -22,6 +22,9 @@ import time
 from pathlib import Path
 from unittest import mock
 
+# 验收进程不启动东财板块后台补采线程（补采行为在单测/服务进程覆盖）
+os.environ.setdefault("STOCKDB_V3_BOARD_BACKFILL", "off")
+
 _MCP_DIR = Path(__file__).resolve().parent
 _BASE_DIR = _MCP_DIR.parent.parent
 for _p in (str(_MCP_DIR), str(_BASE_DIR), str(_MCP_DIR / "contract")):
