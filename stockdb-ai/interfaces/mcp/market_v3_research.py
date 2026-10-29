@@ -448,7 +448,9 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
     if now < cooldown_until:
         remaining = int(cooldown_until - now)
         _em_record(False, f"风控冷却中（剩余 {remaining}s 不触网）",
-                   cooldown_until=cooldown_until)
+                   cooldown_until=cooldown_until,
+                   backoff_streak=int(state.get("backoff_streak") or 0),
+                   last_drop_class="waf_cooldown")
         raise ResearchError(
             "SOURCE_UNAVAILABLE",
             f"eastmoney 板块源处于风控退避期（上次静默断连后冷却，"
