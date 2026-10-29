@@ -465,7 +465,8 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
                f"secid={urllib.parse.quote(secid)}&"
                f"ut={_EM_UT}&fields1=f1,f2,f3&"
                "fields2=f51,f52,f53,f54,f55,f56,f57"
-               f"&klt=101&fqt=0&beg={start8}&end={end8}")
+               f"&klt=101&fqt=0&beg={start8}&end={end8}"
+               "&lmt=1000000")  # 站点同款：beg/end 模式显式解除条数上限
         try:
             with _EM_STATE_LOCK:
                 _EM_LAST_STATE["requests_total"] = (

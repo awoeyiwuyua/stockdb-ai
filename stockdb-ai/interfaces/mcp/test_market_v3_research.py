@@ -1235,6 +1235,7 @@ class BoardCacheAndBackoffTest(ResearchTestCase):
         self.assertIn("ut=fa5fd1943c7b386f172d6893dbfba10b", seen["url"])
         self.assertIn("secid=90.BK1160", seen["url"])
         self.assertIn("klt=101&fqt=0", seen["url"])
+        self.assertIn("lmt=1000000", seen["url"])  # 站点同款，防大窗口被默认截断
         self.assertEqual(seen["referer"],
                          "https://quote.eastmoney.com/bk/90.BK1160.html")
         self.assertIn("qgqp_b_id=", seen["headers"]["Cookie"])
