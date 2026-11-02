@@ -1705,6 +1705,7 @@ def _merge_auction_days(
     start_iso: str,
     end_iso: str,
     include_distribution: bool,
+    codes: list[str] | None = None,
 ) -> tuple[str | None, dict | None, dict]:
     """研究成果预计算 + 竞价快照双源合并主流程：就地改写 days。
 
@@ -1724,8 +1725,9 @@ def _merge_auction_days(
     merged_dates: list[str] = []
     precomputed_dates: list[str] = []
     known_at_by_date: dict[str, str] = {}
+    is_subset = codes is not None
     for date_iso in sorted(snapshots_by_date):
-        daily = _precomputed_row(rd, date_iso, store)
+        daily = None if is_subset else _precomputed_row(rd, date_iso, store)
         if daily is not None:  # 预计算完整日级行优先（写端同源，无需 T-1 日K 判定）
             row = _row_from_daily(daily, date_iso, include_distribution)
             known_at_by_date[date_iso] = _precomputed_known_at(daily, date_iso)
@@ -1736,7 +1738,8 @@ def _merge_auction_days(
                 continue  # T-1 无日K（区间首日等）：无法判定，跳过该快照日期
             if not include_distribution:
                 row.pop("distribution", None)
-            _attach_auction_metrics(row, rd, date_iso, store)
+            if not is_subset:
+                _attach_auction_metrics(row, rd, date_iso, store)
             known_at_by_date[date_iso] = _auction_known_at(snapshots_by_date, date_iso)
         _overlay_day(days, row)
         merged_dates.append(date_iso)
@@ -1915,7 +1918,7 @@ def _query_board_open_effect_history_slow(
         days.append(item)
     # 0.7.0：研究成果预计算 / 竞价快照双源合并（当日段用预计算或采集表，历史段仍日K）
     auction_known_at, auction_error, merge_stats = _merge_auction_days(
-        snapshot, days, start_iso, end_iso, include_distribution
+        snapshot, days, start_iso, end_iso, include_distribution, codes=None if full_a_share_request else codes,
     )
     precomputed_dates = merge_stats.get("precomputed_dates") or []
     result = {
@@ -1930,7 +1933,7 @@ def _query_board_open_effect_history_slow(
         "fallback_reason": (
             None
             if precomputed_dates
-            else "区间交易日无预计算结果，已全市场重算"
+            else ("指定证券子集调试，按输入范围重算" if not full_a_share_request else "区间交易日无预计算结果，已全市场重算")
         ),
         "methodology": {
             "sample": "T-1沪深非ST、非一字板收盘涨停股",
@@ -3266,7 +3269,7 @@ def _call_tool(name: str, args: dict) -> dict:
             result = query_board_open_effect_history(
                 str(args.get("start", "")),
                 str(args.get("end", "")),
-                codes=None if codes is None else [str(code) for code in codes],
+                codes=None if codes is None else [str(code).strip().split("/")[-1] for code in codes if str(code).strip()],
                 limit=int(args.get("limit", 0) or 0),
                 workers=int(args.get("workers", 16) or 16),
                 include_distribution=bool(args.get("include_distribution", False)),

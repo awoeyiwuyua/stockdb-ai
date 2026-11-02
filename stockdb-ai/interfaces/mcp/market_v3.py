@@ -700,11 +700,28 @@ def _server_identity() -> dict:
     srv = _srv()
     build_id = os.environ.get("STOCKDB_BUILD_ID") or ""
     commit = os.environ.get("STOCKDB_BUILD_COMMIT") or ""
+    image_digest = os.environ.get("STOCKDB_IMAGE_DIGEST") or None
+
+    # 若环境变量缺失任一发布身份字段，尝试从源码根目录下的 build_identity.json 兜底加载
+    if not commit or not build_id or not image_digest:
+        try:
+            for parent_depth in (2, 3):
+                id_path = Path(__file__).resolve().parents[parent_depth] / "build_identity.json"
+                if id_path.is_file():
+                    with open(id_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                        commit = commit or meta.get("source_commit") or meta.get("commit") or ""
+                        build_id = build_id or meta.get("build_id") or ""
+                        image_digest = image_digest or meta.get("image_digest") or meta.get("image_id") or None
+                    break
+        except Exception:
+            pass
+
     if not build_id:
         build_id = f"src+{srv.SERVER_VERSION}+{commit[:12] if commit else 'nogit'}"
     return {"name": srv.SERVER_NAME, "version": srv.SERVER_VERSION,
             "build_id": build_id, "source_commit": commit or None,
-            "image_digest": os.environ.get("STOCKDB_IMAGE_DIGEST") or None,
+            "image_digest": image_digest,
             "started_at": _process_started_at.isoformat()}
 
 
