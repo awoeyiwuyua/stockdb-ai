@@ -3329,7 +3329,13 @@ def _call_tool(name: str, args: dict) -> dict:
             result = _sdk_call_tool(name, args)
         except ValueError as exc:
             return _value_error_result(exc)
-        except RuntimeError as exc:
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code:
+                return _error_result(str(exc), code, hint=getattr(exc, "hint", None))
+            exc_str = str(exc)
+            if any(m in exc_str.lower() for m in ("tcp connect error", "connection timed out", "connection refused", "os error 110", "os error 111")):
+                return _error_result(exc_str, "SOURCE_UNAVAILABLE")
             return _error_result(str(exc), ERROR_INTERNAL_ERROR)
     elif name == "warehouse_run":
         # 0.10.15：仓库沉淀/回填触发（动作类工具）——单飞/守卫/幂等在 services 层，

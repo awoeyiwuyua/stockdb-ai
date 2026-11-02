@@ -1571,7 +1571,7 @@ def _kline_from_snapshot(query, request_hash) -> dict:
     # 读取同样返回 research 元数据（原始捕获不变）。
     if research is not None and payload.get("catalog"):
         envelope.update(research.research_extensions(
-            None, payload["catalog"]))
+            None, {k: v for k, v in payload["catalog"].items() if k in query["codes"]}))
     return envelope
 
 

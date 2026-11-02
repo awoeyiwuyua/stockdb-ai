@@ -1,13 +1,19 @@
-"""sdk_bridge — 上游 stockdb_full_mcp 41 工具契约外壳（0.9.0 M4）。
+"""sdk_bridge — 上游 stockdb_full_mcp 41 工具契约外壳（0.9.0 M4 / 0.16.1 慢请求隔离版）。
 
 设计见 docs/design/sdk-mcp-bridge.md（已评审合并）。
-原则：复用上游 stockdb_* 函数（参数归一化/安全校验在内部），外壳只做四件事：
+原则：复用上游 stockdb_* 函数（参数归一化/安全校验在内部），外壳做五件事：
   1. 参数 schema 生成（inspect.signature + docstring）→ 注册进 MCP TOOLS
   2. 调用封装：强制 df=False / panel=False（纯 JSON 契约），只传用户提供的参数
-  3. 错误码映射：上游错误字符串 / ValueError → 8 错误码（INVALID_ARGUMENT /
-     INTERNAL_ERROR / DEPENDENCY_UNAVAILABLE）
+  3. 错误码映射：上游错误字符串 / ValueError → 统一错误码（INVALID_ARGUMENT /
+     SOURCE_TIMEOUT / SOURCE_UNAVAILABLE / BUSY / INTERNAL_ERROR / DEPENDENCY_UNAVAILABLE）
   4. 结果契约化：上游 str(repr) 三级解析（json → ast.literal_eval → 原文），
      大结果截断 + truncated 标记
+  5. 进程隔离与慢请求保护（0.16.1）：
+     - Linux 环境 fork 子进程执行，彻底杜绝 C 扩展持 GIL 冻结主服务事件循环；
+     - 熔断降级：检测上游 tcp connect error 自动熔断 30s，快速返回 SOURCE_UNAVAILABLE；
+     - 客户端断开检测：客户端超时离线时及时 kill 子进程，防止队列无限堆积；
+     - 超时控制：严格遵循 STOCKDB_SDK_TIMEOUT（默认 10s），超时返回 SOURCE_TIMEOUT；
+     - 并发限流：有界信号量 STOCKDB_SDK_CONCURRENCY（默认 4），满员快速返回 BUSY。
 
 本模块自身不 import 上游（懒加载），任何环境下均可安全导入。
 """
@@ -16,6 +22,151 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import multiprocessing as mp
+import os
+import threading
+import time
+from typing import Callable
+
+# ---- 0.16.1：超时、并发与进程隔离配置 ----
+STOCKDB_SDK_TIMEOUT: float = float(os.getenv("STOCKDB_SDK_TIMEOUT", "10.0"))
+STOCKDB_SDK_CONCURRENCY: int = int(os.getenv("STOCKDB_SDK_CONCURRENCY", "4"))
+STOCKDB_SDK_CIRCUIT_COOLDOWN: float = float(os.getenv("STOCKDB_SDK_CIRCUIT_COOLDOWN", "30.0"))
+
+
+class SdkBridgeError(Exception):
+    """SDK Bridge 基础异常，携带 contract 错误码。"""
+
+    def __init__(self, message: str, code: str = "INTERNAL_ERROR", hint: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
+
+
+class SourceTimeoutError(SdkBridgeError):
+    """上游请求超时（>预算时间）。"""
+
+    def __init__(self, message: str, hint: str | None = None):
+        super().__init__(message, code="SOURCE_TIMEOUT", hint=hint)
+
+
+class SourceUnavailableError(SdkBridgeError):
+    """上游服务不可用（连接超时、拒绝或熔断冷却）。"""
+
+    def __init__(self, message: str, hint: str | None = None):
+        super().__init__(message, code="SOURCE_UNAVAILABLE", hint=hint)
+
+
+class ServerBusyError(SdkBridgeError):
+    """并发达到上限。"""
+
+    def __init__(self, message: str, hint: str | None = None):
+        super().__init__(message, code="BUSY", hint=hint)
+
+
+class ClientDisconnectedError(SdkBridgeError):
+    """客户端已主动断开连接。"""
+
+    def __init__(self, message: str = "客户端已断开"):
+        super().__init__(message, code="CLIENT_DISCONNECTED")
+
+
+# ---- 熔断器：上游连接故障快速失败 ----
+_CIRCUIT_LOCK = threading.Lock()
+_circuit_open_until: float = 0.0
+_circuit_last_error: str = ""
+
+_CONNECT_FAILURE_MARKERS = (
+    "connect error", "connection timed out", "connection refused",
+    "error trying to connect", "os error 110", "os error 111",
+    "network is unreachable", "host is unreachable", "tcp connect error"
+)
+
+
+def is_circuit_open() -> tuple[bool, str]:
+    """判断上游熔断器是否处于打开状态。"""
+    global _circuit_open_until, _circuit_last_error
+    now = time.monotonic()
+    with _CIRCUIT_LOCK:
+        if now < _circuit_open_until:
+            rem = max(1, int(_circuit_open_until - now))
+            return True, f"上游行情服务连接故障（{_circuit_last_error}），熔断保护中（{rem}s 后重试）"
+    return False, ""
+
+
+def record_circuit_failure(err: str, cooldown: float | None = None) -> None:
+    """记录上游故障并触发熔断。"""
+    global _circuit_open_until, _circuit_last_error
+    if cooldown is None:
+        cooldown = STOCKDB_SDK_CIRCUIT_COOLDOWN
+    with _CIRCUIT_LOCK:
+        _circuit_open_until = time.monotonic() + cooldown
+        _circuit_last_error = err[:160]
+
+
+def record_circuit_success() -> None:
+    """上游调用成功，关闭熔断。"""
+    global _circuit_open_until, _circuit_last_error
+    with _CIRCUIT_LOCK:
+        _circuit_open_until = 0.0
+        _circuit_last_error = ""
+
+
+def reset_circuit() -> None:
+    """重置熔断器（测试/恢复用）。"""
+    record_circuit_success()
+
+
+# ---- 进程级并发与取消检查 ----
+_SDK_SEMAPHORE = threading.Semaphore(STOCKDB_SDK_CONCURRENCY)
+_cancel_context = threading.local()
+
+
+def set_cancel_check(fn: Callable[[], bool] | None) -> None:
+    """在当前线程设置客户端存活探针。"""
+    _cancel_context.check = fn
+
+
+def get_cancel_check() -> Callable[[], bool] | None:
+    """获取当前线程设置的客户端存活探针。"""
+    return getattr(_cancel_context, "check", None)
+
+
+def _get_isolation_mode() -> str:
+    mode = os.getenv("STOCKDB_SDK_ISOLATION", "").strip().lower()
+    if mode in ("process", "thread", "direct"):
+        return mode
+    if "fork" in mp.get_all_start_methods():
+        return "process"
+    return "direct"
+
+
+_SDK_MP_CTX = mp.get_context("fork") if "fork" in mp.get_all_start_methods() else mp.get_context()
+
+
+def _sdk_worker_exec(fn_name: str, kwargs: dict, pipe):
+    """在隔离子进程中执行上游 SDK 工具（独立 GIL，超时由父进程强杀）。"""
+    try:
+        mod = _module()
+        if mod is None:
+            pipe.send(("err_import", f"{fn_name}: SDK 工具不可用（stockdb_full_mcp 加载失败: {import_error()}）"))
+            return
+        fn = getattr(mod, f"stockdb_{fn_name}", None)
+        if fn is None or not callable(fn):
+            pipe.send(("err_val", f"{fn_name}: 未知 SDK 工具"))
+            return
+        text = fn(**kwargs)
+        pipe.send(("ok", text))
+    except ValueError as exc:
+        pipe.send(("err_val", str(exc)))
+    except Exception as exc:  # noqa: BLE001
+        pipe.send(("err_run", f"{type(exc).__name__}: {exc}"))
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
 
 # ---- 懒加载上游（无 pybao / 缺文件 → 工具降级 DEPENDENCY_UNAVAILABLE）----
 _full_mcp = None
@@ -319,14 +470,21 @@ def _truncate(data, cap: int = RESULT_CAP):
     return data
 
 
-def call_tool(name: str, args: dict) -> dict:
+def call_tool(
+    name: str,
+    args: dict,
+    *,
+    timeout: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict:
     """执行一个 SDK 工具，返回契约化 result dict（供 _apply_contract 套信封）。
 
-    异常语义：
-      - 上游模块缺失 → 抛 ValueError（调用方映射 DEPENDENCY_UNAVAILABLE）
-      - 上游函数抛 ValueError（参数归一化失败）→ 抛 ValueError（→ INVALID_ARGUMENT）
-      - 上游返回 "调用X失败: ..." 错误字符串 → 抛 RuntimeError（→ INTERNAL_ERROR）
-      - 其他异常 → 抛 RuntimeError（→ INTERNAL_ERROR）
+    0.16.1 增强：
+      - 进程隔离：Linux 环境 fork 子进程执行，彻底杜绝 C 扩展持 GIL 冻结主服务事件循环；
+      - 熔断降级：检测上游 tcp connect error 自动熔断 30s，快速返回 SOURCE_UNAVAILABLE；
+      - 客户端断开检测：客户端超时离线时及时 kill 子进程，防止队列无限堆积；
+      - 超时控制：严格遵循 STOCKDB_SDK_TIMEOUT（默认 10s），超时返回 SOURCE_TIMEOUT；
+      - 并发限流：有界信号量 STOCKDB_SDK_CONCURRENCY（默认 4），满员快速返回 BUSY。
     """
     mod = _module()
     if mod is None:
@@ -359,15 +517,88 @@ def call_tool(name: str, args: dict) -> dict:
     if sig is not None and "panel" in sig.parameters:
         kwargs["panel"] = False
 
-    try:
-        text = fn(**kwargs)
-    except ValueError as exc:
-        raise ValueError(f"{name}: 参数校验失败：{exc}") from exc
-    except Exception as exc:  # noqa: BLE001 - 上游内部异常统一 INTERNAL_ERROR
-        raise RuntimeError(f"{name}: 调用失败：{type(exc).__name__}: {exc}") from exc
+    # 1. 熔断状态检查
+    is_open, open_msg = is_circuit_open()
+    if is_open:
+        raise SourceUnavailableError(open_msg)
 
-    if isinstance(text, str):
-        marker = "失败:"
-        if text.startswith(("调用", "调用失败")) or marker in text[:30]:
-            raise RuntimeError(f"{name}: {text}")
-    return _truncate(_parse_result(text))
+    # 2. 并发限流
+    if not _SDK_SEMAPHORE.acquire(blocking=True, timeout=1.0):
+        raise ServerBusyError(f"{name}: 上游并发已达上限（{STOCKDB_SDK_CONCURRENCY}），请稍后重试")
+
+    try:
+        mode = _get_isolation_mode()
+        effective_timeout = timeout if timeout is not None else STOCKDB_SDK_TIMEOUT
+        check_fn = cancel_check or get_cancel_check()
+
+        if mode == "process":
+            parent_conn, child_conn = _SDK_MP_CTX.Pipe(duplex=False)
+            p = _SDK_MP_CTX.Process(target=_sdk_worker_exec, args=(name, kwargs, child_conn))
+            p.start()
+            child_conn.close()
+
+            deadline = time.monotonic() + effective_timeout
+            got_data = False
+            while time.monotonic() < deadline:
+                rem = min(0.2, max(0.01, deadline - time.monotonic()))
+                if parent_conn.poll(rem):
+                    got_data = True
+                    break
+                if check_fn is not None:
+                    try:
+                        if not check_fn():
+                            p.kill()
+                            p.join(timeout=0.5)
+                            parent_conn.close()
+                            raise ClientDisconnectedError(f"{name}: 客户端已断开，终止执行")
+                    except ClientDisconnectedError:
+                        raise
+                    except Exception:
+                        pass
+
+            if not got_data:
+                p.kill()
+                p.join(timeout=0.5)
+                parent_conn.close()
+                record_circuit_failure(f"调用超时（>{effective_timeout:.1f}s）")
+                raise SourceTimeoutError(f"{name}: 上游调用超时（>{effective_timeout:.1f}s）")
+
+            try:
+                status, raw_res = parent_conn.recv()
+            except EOFError:
+                record_circuit_failure("子进程异常退出（无输出）")
+                raise RuntimeError(f"{name}: 子进程异常退出（无输出）")
+            finally:
+                parent_conn.close()
+                p.join(timeout=0.5)
+        else:
+            try:
+                status, raw_res = "ok", fn(**kwargs)
+            except ValueError as exc:
+                status, raw_res = "err_val", str(exc)
+            except Exception as exc:  # noqa: BLE001
+                status, raw_res = "err_run", f"{type(exc).__name__}: {exc}"
+
+        if status == "err_import":
+            raise ValueError(raw_res)
+        if status == "err_val":
+            raise ValueError(f"{name}: 参数校验失败：{raw_res}")
+        if status == "err_run":
+            if any(marker in raw_res.lower() for marker in _CONNECT_FAILURE_MARKERS):
+                record_circuit_failure(raw_res)
+                raise SourceUnavailableError(f"{name}: 上游行情服务连接失败: {raw_res}")
+            raise RuntimeError(f"{name}: 调用失败：{raw_res}")
+        if status == "ok":
+            text = raw_res
+            if isinstance(text, str):
+                lower_text = text.lower()
+                if any(marker in lower_text for marker in _CONNECT_FAILURE_MARKERS):
+                    record_circuit_failure(text)
+                    raise SourceUnavailableError(f"{name}: 上游行情服务连接失败: {text}")
+                marker = "失败:"
+                if text.startswith(("调用", "调用失败")) or marker in text[:30]:
+                    raise RuntimeError(f"{name}: {text}")
+            record_circuit_success()
+            return _truncate(_parse_result(text))
+    finally:
+        _SDK_SEMAPHORE.release()

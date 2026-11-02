@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import socket
 import sys
 import threading
 import time
@@ -290,9 +292,34 @@ class Handler(BaseHTTPRequestHandler):
                     "error": {"code": -32700, "message": f"Parse error: {exc}"},
                 }))
                 return
+            def _check_client_active() -> bool:
+                try:
+                    sock = getattr(self, "connection", None)
+                    if sock is not None:
+                        r, _, _ = select.select([sock], [], [], 0)
+                        if r:
+                            peek = sock.recv(1, socket.MSG_PEEK)
+                            if not peek:
+                                return False
+                except Exception:
+                    return False
+                return True
+
             start = time.time()
             try:
-                response = mcp_dispatch(msg, group=group)
+                try:
+                    from interfaces.mcp import sdk_bridge
+                    sdk_bridge.set_cancel_check(_check_client_active)
+                except Exception:
+                    pass
+                try:
+                    response = mcp_dispatch(msg, group=group)
+                finally:
+                    try:
+                        from interfaces.mcp import sdk_bridge
+                        sdk_bridge.set_cancel_check(None)
+                    except Exception:
+                        pass
             except Exception as exc:  # noqa: BLE001 - 分发异常转为 JSON-RPC internal error
                 body = json.dumps({
                     "jsonrpc": "2.0", "id": msg.get("id"),
@@ -380,9 +407,34 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 })
             )
+            def _check_client_active() -> bool:
+                try:
+                    sock = getattr(self, "connection", None)
+                    if sock is not None:
+                        r, _, _ = select.select([sock], [], [], 0)
+                        if r:
+                            peek = sock.recv(1, socket.MSG_PEEK)
+                            if not peek:
+                                return False
+                except Exception:
+                    return False
+                return True
+
             start = time.time()
             try:
-                response = mcp_dispatch(msg, group=group)
+                try:
+                    from interfaces.mcp import sdk_bridge
+                    sdk_bridge.set_cancel_check(_check_client_active)
+                except Exception:
+                    pass
+                try:
+                    response = mcp_dispatch(msg, group=group)
+                finally:
+                    try:
+                        from interfaces.mcp import sdk_bridge
+                        sdk_bridge.set_cancel_check(None)
+                    except Exception:
+                        pass
             except Exception as exc:  # noqa: BLE001 - 分发异常转为 JSON-RPC internal error
                 err = {
                     "jsonrpc": "2.0", "id": msg.get("id"),

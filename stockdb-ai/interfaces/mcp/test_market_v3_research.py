@@ -769,6 +769,9 @@ class AdjustedKlineTest(ResearchTestCase):
                          adjustment_anchor=anchor, factor_snapshot_id=fid)
         self.assertEqual(one["meta"][ETF_KEY]["adjustment"],
                          expected[ETF_KEY])
+        self.assertEqual(set(one["data"]), {ETF_KEY})
+        self.assertEqual(set(one["meta"]), {ETF_KEY})
+        self.assertEqual(set(one["extensions"]["research_v1"]["series_catalog"]), {ETF_KEY})
         self.validate(one, "KlineResponse")
         # fields 投影重放
         proj = self.kline(snapshot_id=aid, codes=[EQUITY_KEY],

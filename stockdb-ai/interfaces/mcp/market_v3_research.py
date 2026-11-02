@@ -1365,7 +1365,7 @@ def _factor_from_snapshot(query: dict, request_hash: str) -> dict:
         records[key] = {"rows": data[key], "slots": slots, "error": err}
     return _factor_build_response(query, request_hash, records,
                                   payload["sources"], query["snapshot_id"],
-                                  snap["expires_at"], payload.get("catalog", {}))
+                                  snap["expires_at"], {k: v for k, v in payload.get("catalog", {}).items() if k in query["codes"]})
 
 
 def _factor_fetch_and_build(query: dict, request_hash: str,
@@ -1790,8 +1790,8 @@ def _adjusted_from_snapshot(query: dict, request_hash: str) -> dict:
     raw_id = payload.get("raw_snapshot_id")
     # E01：A 重读沿用捕获时的价格序列目录（与 R 一致，不由当前行重造）
     merged = dict(envelope.get("extensions") or {})
-    merged.update(research_extensions(raw_id, payload.get(
-        "catalog") or {})["extensions"])
+    sliced_catalog = {k: v for k, v in (payload.get("catalog") or {}).items() if k in query["codes"]}
+    merged.update(research_extensions(raw_id, sliced_catalog)["extensions"])
     envelope["extensions"] = merged
     # R3 修补（消费方 adjusted-replay 反馈）：_kline_from_snapshot 对全部
     # 证券填默认 adjustment=none；重放路径此前遗漏恢复复权语义（首次计算
