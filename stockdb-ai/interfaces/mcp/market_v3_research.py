@@ -74,8 +74,7 @@ INDEX_SERIES: dict[str, dict[str, Any]] = {
     },
 }
 
-# 东财板块：规范键 → eastmoney secid。THS 参考序列仅为消费方既有映射背景，
-# 不是身份断言；本服务不提供 THS 序列（请求 THS 键 → UNSUPPORTED_ASSET）。
+# 东财板块：规范键 → eastmoney secid。
 BOARD_SERIES: dict[str, dict[str, Any]] = {
     "CN/board/eastmoney/BK1408": {"secid": "90.BK1408", "name": "机器人",
                                   "ths_reference": "886069 人形机器人"},
@@ -93,9 +92,27 @@ BOARD_SERIES: dict[str, dict[str, Any]] = {
                                   "ths_reference": "885809 柔性屏(折叠屏)"},
 }
 
+# 同花顺板块：规范键 → ths 代码。同花顺独立序列，与东财 BK 身份完全隔离。
+THS_BOARD_SERIES: dict[str, dict[str, Any]] = {
+    "CN/board/ths/885809": {"code": "885809", "name": "柔性屏",
+                            "reference_name": "柔性屏(折叠屏)", "calendar_exchange": "XSHG"},
+    "CN/board/ths/886069": {"code": "886069", "name": "人形机器人",
+                            "reference_name": "人形机器人", "calendar_exchange": "XSHG"},
+    "CN/board/ths/885957": {"code": "885957", "name": "东数西算",
+                            "reference_name": "东数西算(算力)", "calendar_exchange": "XSHG"},
+    "CN/board/ths/886044": {"code": "886044", "name": "液冷服务器",
+                            "reference_name": "液冷服务器", "calendar_exchange": "XSHG"},
+    "CN/board/ths/886009": {"code": "886009", "name": "先进封装",
+                            "reference_name": "先进封装", "calendar_exchange": "XSHG"},
+    "CN/board/ths/881124": {"code": "881124", "name": "消费电子",
+                            "reference_name": "消费电子", "calendar_exchange": "XSHG"},
+    "CN/board/ths/881181": {"code": "881181", "name": "环境治理",
+                            "reference_name": "环境治理", "calendar_exchange": "XSHG"},
+}
+
 INDEX_NAMESPACES = {"exchange", "csi"}
-BOARD_NAMESPACES = {"eastmoney"}
-# 板块日历依据：东财板块按 A 股交易日发布，本服务以 XSHG 日历为依据并在
+BOARD_NAMESPACES = {"eastmoney", "ths"}
+# 板块日历依据：板块按 A 股交易日发布，本服务以 XSHG 日历为依据并在
 # series_catalog 中声明（I05：CN 板块必须明确所依据交易所日历）。
 BOARD_CALENDAR_EXCHANGE = "XSHG"
 
@@ -107,6 +124,9 @@ _UNITS_NULL_REASON_BOARD = (
     "eastmoney board kline volume/amount units are not independently "
     "verifiable while the endpoint is unreachable; price-only acceptance per "
     "DEVELOPMENT.md §3.3")
+_UNITS_NULL_REASON_BOARD_THS = (
+    "10jqka board kline volume/amount units are not independently "
+    "verifiable from source; price-only acceptance per DEVELOPMENT.md §3.3")
 
 # ---------------------------------------------------------------------------
 # 通用小工具
@@ -526,6 +546,226 @@ def _iso_time(epoch: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 同花顺板块日K抓取与状态跟踪（独立序列，与东财 push2his 物理隔离）
+# ---------------------------------------------------------------------------
+
+_THS_STATE_LOCK = threading.Lock()
+_THS_LAST_STATE: dict[str, Any] = {
+    "ok_at": 0.0, "fail_at": 0.0, "fail_reason": None,
+    "requests_total": 0, "requests_ok": 0,
+}
+
+
+def ths_board_availability() -> dict[str, Any]:
+    """最近一次同花顺访问结果。"""
+    with _THS_STATE_LOCK:
+        return dict(_THS_LAST_STATE)
+
+
+def _ths_record(ok: bool, reason: str | None = None) -> None:
+    with _THS_STATE_LOCK:
+        if ok:
+            _THS_LAST_STATE.update(ok_at=time.time(), fail_reason=None)
+        else:
+            _THS_LAST_STATE.update(fail_at=time.time(), fail_reason=reason)
+
+
+def _parse_ths_jsonp(text: str) -> dict:
+    match = re.search(r"\((.*)\)", text, re.DOTALL)
+    if not match:
+        raise ValueError(f"THS response is not JSONP: {text[:100]!r}")
+    return json.loads(match.group(1))
+
+
+def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
+                          timeout: float = 8.0) -> list[dict]:
+    """同花顺板块日K抓取：按年份拉取 bk_{code}/01/{year}.js，并按需合并 today.js。
+
+    - 跨年循环：start8[:4] 至 end8[:4]
+    - 404 容错：建板前年份 404 视为空，若所有年份均 404 则报 UNKNOWN_INSTRUMENT
+    - today.js 合并：若 end8 >= 当天且 year.js 尚未包含当天，且 today.js 有有效数据，则合并
+    - 各行提取：date8, open, high, low, close（保留原始 3 位小数精度字符串）
+    """
+    start_year = int(start8[:4])
+    end_year = int(end8[:4])
+    today8 = datetime.now().strftime("%Y%m%d")
+
+    rows_by_date: dict[str, dict] = {}
+    years_fetched = 0
+    errors: list[str] = []
+
+    for year in range(start_year, end_year + 1):
+        url = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/{year}.js"
+        referer = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/"
+        headers = {"User-Agent": _UA, "Referer": referer}
+        with _THS_STATE_LOCK:
+            _THS_LAST_STATE["requests_total"] = (
+                _THS_LAST_STATE.get("requests_total", 0) + 1)
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+            obj = _parse_ths_jsonp(text)
+            data_str = obj.get("data", "")
+            for line in data_str.split(";"):
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) < 5:
+                    continue
+                d = parts[0]
+                if not (start8 <= d <= end8):
+                    continue
+                rows_by_date[d] = {
+                    "date8": d,
+                    "bar_state": "final",
+                    "open": parts[1],
+                    "high": parts[2],
+                    "low": parts[3],
+                    "close": parts[4],
+                }
+            years_fetched += 1
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                errors.append(f"{year}: 404 Not Found")
+                continue
+            errors.append(f"{year}: HTTPError {exc.code}")
+        except TimeoutError as exc:
+            errors.append(f"{year}: Timeout: {exc}")
+        except Exception as exc:
+            errors.append(f"{year}: {type(exc).__name__}: {exc}")
+
+    # 当天盘中或盘后尚未打入年度包时，尝试从 today.js 补齐当天
+    if end8 >= today8 and today8 not in rows_by_date and (start8 <= today8 <= end8):
+        url_today = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/today.js"
+        referer = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/"
+        headers = {"User-Agent": _UA, "Referer": referer}
+        try:
+            req = urllib.request.Request(url_today, headers=headers)
+            with urllib.request.urlopen(req, timeout=min(timeout, 4.0)) as resp:
+                text_today = resp.read().decode("utf-8", errors="replace")
+            obj_today = _parse_ths_jsonp(text_today)
+            val = obj_today.get(f"bk_{code}") or {}
+            d_today = str(val.get("1") or "")
+            if d_today == today8 and val.get("7") and val.get("11"):
+                is_open = int(val.get("open") or 0)
+                bar_state = "preliminary" if is_open == 1 else "final"
+                rows_by_date[d_today] = {
+                    "date8": d_today,
+                    "open": str(val["7"]),
+                    "high": str(val.get("8") or val["7"]),
+                    "low": str(val.get("9") or val["7"]),
+                    "close": str(val["11"]),
+                    "bar_state": bar_state,
+                }
+        except Exception:
+            pass  # today.js 失败不阻止已取得的历史日K返回
+
+    if not rows_by_date and years_fetched == 0:
+        if all("404" in e for e in errors):
+            _ths_record(False, "; ".join(errors))
+            raise ResearchError("UNKNOWN_INSTRUMENT",
+                                f"同花顺板块 {code} 上游未找到对应数据（404）",
+                                details={"code": code, "errors": errors})
+        _ths_record(False, "; ".join(errors))
+        if any("Timeout" in e for e in errors):
+            raise ResearchError("SOURCE_TIMEOUT",
+                                f"同花顺板块 {code} 上游请求超时",
+                                details={"code": code, "errors": errors})
+        raise ResearchError("SOURCE_UNAVAILABLE",
+                            f"同花顺板块 {code} 上游不可达",
+                            details={"code": code, "errors": errors})
+
+    with _THS_STATE_LOCK:
+        _THS_LAST_STATE["requests_ok"] = (
+            _THS_LAST_STATE.get("requests_ok", 0) + 1)
+    _ths_record(True)
+    return [rows_by_date[d] for d in sorted(rows_by_date)]
+
+
+def ths_board_daily_cached(key: str, code: str, start8: str, end8: str, *,
+                           timeout: float = 8.0) -> tuple[list[dict], dict]:
+    """同花顺板块日K读取（缓存优先合并）：→ (行, cache_info)。
+
+    - 上游成功：逐日 upsert 并写入独立缓存文件；服务窗口 = 源行 ∪ 缓存行（按日合并）。
+    - 上游失败且缓存覆盖窗口内有真实已取日：如实以缓存服务（缺口由基线
+      expected-slots 机制上报 partial + INCOMPLETE_COVERAGE，绝无虚造）；
+      cache_info.cache_served=True、retrieved_at=窗口内最旧已取时间。
+    - 上游失败且窗口内无任何缓存：原样抛出。
+    """
+    store = _board_cache_load(key)
+    bars = store.setdefault("bars", {})
+    now_iso = _now_iso()
+    cache_info: dict[str, Any] = {"cache_served": False, "retrieved_at": None}
+    try:
+        rows = fetch_ths_board_daily(code, start8, end8, timeout=timeout)
+    except ResearchError as exc:
+        store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+        store["fetch_failures"] = int(store.get("fetch_failures", 0)) + 1
+        cached_rows = []
+        oldest = None
+        for d in sorted(bars):
+            if start8 <= d <= end8:
+                row_dict = {"date8": d, **{
+                    f: bars[d][f] for f in ("open", "high", "low", "close")}}
+                if "bar_state" in bars[d]:
+                    row_dict["bar_state"] = bars[d]["bar_state"]
+                cached_rows.append(row_dict)
+                ts = bars[d].get("retrieved_at")
+                if ts and (oldest is None or ts < oldest):
+                    oldest = ts
+        if not cached_rows:
+            _board_cache_save(key, store)
+            raise
+        cache_info["cache_served"] = True
+        cache_info["retrieved_at"] = oldest
+        cache_info["source_error"] = exc.message[:200]
+        _board_cache_save(key, store)
+        return cached_rows, cache_info
+
+    store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+    fresh_dates: set[str] = set()
+    for row in rows:
+        d = row["date8"]
+        entry = {f: row[f] for f in ("open", "high", "low", "close")}
+        if "bar_state" in row:
+            entry["bar_state"] = row["bar_state"]
+        prior = bars.get(d)
+        if prior and any(str(prior.get(f)) != str(entry[f])
+                         for f in ("open", "high", "low", "close")):
+            revisions = store.setdefault("revisions", {})
+            revisions[d] = {"at": now_iso,
+                            "from": {f: prior.get(f)
+                                     for f in ("open", "high", "low", "close")}}
+        entry["retrieved_at"] = now_iso
+        bars[d] = entry
+        fresh_dates.add(d)
+    _board_cache_save(key, store)
+
+    merged = [dict(row) for row in rows]
+    seen = set(fresh_dates)
+    extra_cached = 0
+    oldest = None
+    for d in sorted(bars):
+        if d in seen or not (start8 <= d <= end8):
+            continue
+        row_dict = {"date8": d, **{
+            f: bars[d][f] for f in ("open", "high", "low", "close")}}
+        if "bar_state" in bars[d]:
+            row_dict["bar_state"] = bars[d]["bar_state"]
+        merged.append(row_dict)
+        extra_cached += 1
+        ts = bars[d].get("retrieved_at")
+        if ts and (oldest is None or ts < oldest):
+            oldest = ts
+    merged.sort(key=lambda r: r["date8"])
+    if extra_cached:
+        cache_info["merged_cached_extras"] = extra_cached
+        cache_info["retrieved_at"] = oldest
+    return merged, cache_info
+
+
+# ---------------------------------------------------------------------------
 # 板块日K持久缓存（真实取得才写；上游失败时如实以缓存服务 + 缺口上报）
 # ---------------------------------------------------------------------------
 
@@ -643,7 +883,7 @@ def board_daily_cached(key: str, secid: str, start8: str, end8: str, *,
 
 
 def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
-    """各板块缓存缺口（对照 XSHG 日历；只统计 < latest_completed8 的交易日）。
+    """各板块缓存缺口（对照 XSHG 日历；只统计 <= latest_completed8 的交易日）。
 
     latest_completed8 缺省取引擎最新交易日（只读 HEALTH，不触发引擎探测）；
     不可用时用「今天」——今天当日收盘前的缺日不算缺口（final 语义另行处理）。
@@ -657,7 +897,8 @@ def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
         v3.CALENDAR_COVERAGE_START.replace("-", ""),
         (datetime.now() - timedelta(days=820)).strftime("%Y%m%d"))
     window_end = datetime.now().strftime("%Y%m%d")
-    for key, meta in BOARD_SERIES.items():
+    all_series = {**BOARD_SERIES, **THS_BOARD_SERIES}
+    for key, meta in all_series.items():
         store = _board_cache_load(key)
         cached = set((store.get("bars") or {}).keys())
         try:
@@ -669,7 +910,9 @@ def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
                 if d not in cached and d <= latest_completed8
                 and d >= (meta.get("board_start8") or "00000000")]
         report[key] = {
-            "name": meta["name"], "secid": meta["secid"],
+            "name": meta["name"],
+            "code": meta.get("code") or meta.get("secid"),
+            "provider": "ths" if "/ths/" in key else "eastmoney",
             "cached_days": len(cached),
             "cache_first": min(cached) if cached else None,
             "cache_last": max(cached) if cached else None,
@@ -682,8 +925,8 @@ def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
 def board_backfill_cycle(*, force: bool = False) -> dict:
     """缺口补采一轮：逐板块按缺口窗口拉取合并（冷却许可时）。
 
-    有界重试：一轮每板块至多 1 次源请求；板块间 1.5s 间隔；全局风控冷却
-    未到期时整体跳过（force 仅供运维/测试显式穿透）。
+    有界重试：一轮每板块至多 1 次源请求；板块间 1.5s 间隔；东财风控冷却
+    未到期时跳过东财板块（THS 不受东财风控冷却限制）。
     """
     state = _em_client_state()
     now = time.time()
@@ -699,20 +942,30 @@ def board_backfill_cycle(*, force: bool = False) -> dict:
         return summary
     report = board_cache_gap_report()
     touched = 0
+    max_touched = len(report)
     for key, info in report.items():
         if not info["gap_days"]:
             summary["boards"][key] = {"action": "none",
                                       "gap_count": 0}
             continue
-        if touched >= 7:  # 一轮有界：至多覆盖全部 7 个已声明板块一次
+        if touched >= max_touched:
             summary["boards"][key] = {"action": "deferred"}
             continue
-        meta = BOARD_SERIES[key]
+        is_ths = key in THS_BOARD_SERIES
+        if not is_ths and not force and now < cooldown_until:
+            summary["boards"][key] = {"action": "skipped_cooldown",
+                                      "cooldown_remaining_s": int(cooldown_until - now)}
+            continue
         beg = info["gap_days"][0]
         end = max(info["gap_days"][-1],
                   datetime.now().strftime("%Y%m%d"))
         try:
-            _rows, _ci = board_daily_cached(key, meta["secid"], beg, end)
+            if is_ths:
+                meta = THS_BOARD_SERIES[key]
+                _rows, _ci = ths_board_daily_cached(key, meta["code"], beg, end)
+            else:
+                meta = BOARD_SERIES[key]
+                _rows, _ci = board_daily_cached(key, meta["secid"], beg, end)
             after = board_cache_gap_report(
                 datetime.now().strftime("%Y%m%d"))[key]
             summary["boards"][key] = {
@@ -724,7 +977,7 @@ def board_backfill_cycle(*, force: bool = False) -> dict:
                                       "error": exc.code,
                                       "detail": exc.message[:160]}
         touched += 1
-        time.sleep(1.5)  # 板块间礼貌间隔
+        time.sleep(1.0)  # 板块间礼貌间隔
     with _EM_STATE_LOCK:
         _EM_BACKFILL_STATE.update(last_cycle_at=time.time(),
                                   last_summary=summary)
@@ -1022,6 +1275,25 @@ def series_descriptor(key: str, *, kind: str, rows: list[dict] | None,
             ],
         }
     if kind == "board":
+        if "/ths/" in key or provider_used == "ths":
+            meta = THS_BOARD_SERIES[key]
+            return {
+                "instrument_id": key,
+                "series_id": f"ths-kline-board-daily:{meta['code']}",
+                "provider": "ths",
+                "methodology_id": f"ths-board-{native}",
+                "methodology_version": None,  # 板块编制规则版本不可取得
+                "history_start": _iso(min(dates)), "history_end": _iso(max(dates)),
+                "calendar_exchange": meta.get("calendar_exchange", BOARD_CALENDAR_EXCHANGE),
+                "calendar_id": calendar_id, "calendar_version": calendar_version,
+                "native_volume_unit": None,
+                "volume_multiplier_to_wire": None,
+                "origin_reference": f"https://d.10jqka.com.cn/v6/line/bk_{meta['code']}/01/",
+                "limitations": [
+                    "volume/amount null: source unit not verifiable (price-only)",
+                    "board rename/recompile history not separately versioned by provider",
+                ],
+            }
         meta = BOARD_SERIES[key]
         return {
             "instrument_id": key,
@@ -1850,17 +2122,27 @@ def resolve_research_identity(key: str) -> tuple[str, str, str, str]:
             raise v3.V3Error(
                 "UNSUPPORTED_ASSET",
                 f"板块命名空间 {namespace!r} 不在已声明能力内（本批："
-                f"{sorted(BOARD_NAMESPACES)}；THS 同主题序列不冒充东财 BK，I04）",
+                f"{sorted(BOARD_NAMESPACES)}；THS 与东财序列独立声明，不相互冒充）",
                 instrument_id=key, details={"namespace": namespace})
-        if key not in BOARD_SERIES:
-            raise v3.V3Error(
-                "UNKNOWN_INSTRUMENT",
-                f"东财板块 {native} 不在已验收的指定板块目录内（7 个 BK 之外"
-                "未声明支持）",
-                instrument_id=key,
-                details={"reason": "not_in_verified_board_directory"})
-        meta = BOARD_SERIES[key]
-        return "board", meta["secid"], meta["name"], BOARD_CALENDAR_EXCHANGE
+        if namespace == "ths":
+            if key not in THS_BOARD_SERIES:
+                raise v3.V3Error(
+                    "UNKNOWN_INSTRUMENT",
+                    f"同花顺板块 {native} 不在已验收的指定板块目录内（7 个 THS 板块之外未声明支持）",
+                    instrument_id=key,
+                    details={"reason": "not_in_verified_board_directory", "provider": "ths"})
+            meta = THS_BOARD_SERIES[key]
+            return "board", meta["code"], meta["name"], meta.get("calendar_exchange", BOARD_CALENDAR_EXCHANGE)
+        if namespace == "eastmoney":
+            if key not in BOARD_SERIES:
+                raise v3.V3Error(
+                    "UNKNOWN_INSTRUMENT",
+                    f"东财板块 {native} 不在已验收的指定板块目录内（7 个 BK 之外"
+                    "未声明支持）",
+                    instrument_id=key,
+                    details={"reason": "not_in_verified_board_directory", "provider": "eastmoney"})
+            meta = BOARD_SERIES[key]
+            return "board", meta["secid"], meta["name"], BOARD_CALENDAR_EXCHANGE
     raise v3.V3Error("UNSUPPORTED_ASSET",
                      f"research 路由只处理 index/board（收到 {asset_type}）",
                      instrument_id=key, details={"asset_type": asset_type})
@@ -1877,16 +2159,29 @@ def fetch_series_rows(key: str, start8: str, end8: str) -> tuple[
     if kind == "index":
         provider, rows = fetch_index_daily(native, start8, end8)
         return "index", provider, rows, {}
+    _exchange, _asset_type, namespace, _code = key.split("/")
+    if namespace == "ths":
+        rows, cache_info = ths_board_daily_cached(key, native, start8, end8)
+        _ensure_backfill_thread()
+        return "board", "ths", rows, cache_info
     rows, cache_info = board_daily_cached(key, native, start8, end8)
     _ensure_backfill_thread()
     return "board", "eastmoney", rows, cache_info
 
 
-def series_units(kind: str) -> dict:
+def series_units(kind: str, key_or_namespace: str | None = None) -> dict:
     """指数/板块 units（price-only：量额 null + 原因，I06）。"""
-    decimals = 3 if kind == "index" else 2
-    reason = (_UNITS_NULL_REASON_INDEX if kind == "index"
-              else _UNITS_NULL_REASON_BOARD)
+    is_ths = False
+    if key_or_namespace:
+        if key_or_namespace == "ths" or "/ths/" in key_or_namespace:
+            is_ths = True
+    decimals = 3 if (kind == "index" or is_ths) else 2
+    if kind == "index":
+        reason = _UNITS_NULL_REASON_INDEX
+    elif is_ths:
+        reason = _UNITS_NULL_REASON_BOARD_THS
+    else:
+        reason = _UNITS_NULL_REASON_BOARD
     return {"price": "points", "volume": "unknown", "amount": "unknown",
             "price_decimals": decimals, "amount_decimals": None,
             "null_reason": reason}
@@ -1896,11 +2191,12 @@ def research_series_bars(rows: list[dict], kind: str, key: str,
                          bar_state: str, source_id: str) -> list[dict]:
     """指数/板块原始行 → 合同 Bar 对象（OHLC points>0；量额 null）。"""
     from interfaces.mcp import market_v3 as v3
-    decimals = 3 if kind == "index" else 2
+    decimals = 3 if (kind == "index" or "/ths/" in key) else 2
     out = []
     for row in rows:
         iso_date = _iso(row["date8"])
-        bar = {"date": iso_date, "bar_state": bar_state,
+        row_state = row.get("bar_state") or bar_state
+        bar = {"date": iso_date, "bar_state": row_state,
                "source_id": source_id,
                "volume": None, "amount": None}
         for field in ("open", "high", "low", "close"):
@@ -1962,6 +2258,22 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
         return v3._source_record(
             retrieved_at=retrieved_at, reference=reference,
             finality=finality)
+    if "/ths/" in key or provider == "ths":
+        meta = THS_BOARD_SERIES[key]
+        cache_served = bool(fetch_meta.get("cache_served"))
+        reference = (f"https://d.10jqka.com.cn/v6/line/bk_{meta['code']}/01/ "
+                     f"(ths board daily kline via d.10jqka.com.cn API)")
+        finality = "10jqka publishes completed board bars after close"
+        if cache_served:
+            reference += (f" [served from server-side persistent board cache; "
+                          f"bars originally retrieved "
+                          f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
+                          f"attempt failed upstream and is honestly reported via "
+                          f"gaps]")
+        return v3._source_record(
+            retrieved_at=retrieved_at,
+            reference=reference,
+            finality=finality)
     meta = BOARD_SERIES[key]
     cache_served = bool(fetch_meta.get("cache_served"))
     reference = (f"https://quote.eastmoney.com/bk/{meta['secid']}.html "
@@ -2007,6 +2319,12 @@ def research_status_metadata() -> dict:
         limitations.append(
             "board persistent cache & gap backfill active (last cycle: "
             f"{bf.get('last_cycle_at') and datetime.fromtimestamp(bf['last_cycle_at']).astimezone().isoformat(timespec='seconds')})")
+    ths = ths_board_availability()
+    if ths["ok_at"] <= 0 and ths["fail_at"] > 0:
+        limitations.append(
+            "ths board source currently unreachable (latest failure: "
+            f"{ths['fail_reason']}); THS series served as honest failures until "
+            "the source recovers")
     limitations.append(
         "index/board volume/amount are null (unit not verifiable); "
         "price-only acceptance per DEVELOPMENT.md §3.3")
@@ -2025,7 +2343,7 @@ def research_status_metadata() -> dict:
 
 def index_board_capabilities(latest: str | None) -> list[dict]:
     """index_board_daily_v1 的 capability 声明（逐 namespace 逐资产）。"""
-    exceptions = [
+    exceptions_em = [
         "series directory is an explicit verified allowlist: 4 indices "
         "(exchange/csi namespaces) and 7 eastmoney BK boards; other series are "
         "refused UNKNOWN_INSTRUMENT rather than guessed from code prefixes",
@@ -2034,20 +2352,31 @@ def index_board_capabilities(latest: str | None) -> list[dict]:
         "board series depend on eastmoney reachability; failures are honest "
         "SOURCE_UNAVAILABLE, never substituted with THS series",
     ]
+    exceptions_ths = [
+        "series directory is an explicit verified allowlist: 7 ths board series "
+        "(885809, 886069, 885957, 886044, 886009, 881124, 881181); other codes "
+        "are refused UNKNOWN_INSTRUMENT rather than guessed",
+        "volume/amount null with units.null_reason (unit unverifiable from source); "
+        "price-only acceptance per DEVELOPMENT.md §3.3",
+        "ths board series are independent series and do not substitute for Eastmoney BK series",
+    ]
     end = _iso(latest) if latest else None
     return [
         {"asset_type": "index", "exchange": "XSHG", "namespace": "exchange",
          "frequencies": ["1d"], "fq_modes": ["none"],
-         "history_start": None, "history_end": end, "exceptions": exceptions},
+         "history_start": None, "history_end": end, "exceptions": exceptions_em},
         {"asset_type": "index", "exchange": "XSHE", "namespace": "exchange",
          "frequencies": ["1d"], "fq_modes": ["none"],
-         "history_start": None, "history_end": end, "exceptions": exceptions},
+         "history_start": None, "history_end": end, "exceptions": exceptions_em},
         {"asset_type": "index", "exchange": "XSHG", "namespace": "csi",
          "frequencies": ["1d"], "fq_modes": ["none"],
-         "history_start": None, "history_end": end, "exceptions": exceptions},
+         "history_start": None, "history_end": end, "exceptions": exceptions_em},
         {"asset_type": "board", "exchange": "CN", "namespace": "eastmoney",
          "frequencies": ["1d"], "fq_modes": ["none"],
-         "history_start": None, "history_end": end, "exceptions": exceptions},
+         "history_start": None, "history_end": end, "exceptions": exceptions_em},
+        {"asset_type": "board", "exchange": "CN", "namespace": "ths",
+         "frequencies": ["1d"], "fq_modes": ["none"],
+         "history_start": None, "history_end": end, "exceptions": exceptions_ths},
     ]
 
 

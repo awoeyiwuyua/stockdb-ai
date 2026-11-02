@@ -1123,7 +1123,7 @@ def _error_meta(identity: Identity, *, expected: int | None) -> dict:
                                          if identity.verified else None)),
         },
         "status": "error",
-        "units": (research.series_units(identity.asset_type)
+        "units": (research.series_units(identity.asset_type, identity.namespace)
                   if is_research_series else _units_block(identity)),
         "adjustment": {"mode": "none", "anchor_date": None,
                        "factor_snapshot_id": None, "algorithm": None},
@@ -1450,7 +1450,7 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
                                        else IDENTITY_SOURCE_ID),
             },
             "status": instrument_status,
-            "units": (research.series_units(identity.asset_type)
+            "units": (research.series_units(identity.asset_type, identity.namespace)
                       if is_research_series else _units_block(identity)),
             "adjustment": {"mode": "none", "anchor_date": None,
                            "factor_snapshot_id": None, "algorithm": None},

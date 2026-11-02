@@ -91,6 +91,19 @@ def _board_rows(dates=None, base=1000.0):
     return rows
 
 
+def _ths_board_rows(dates=None, base=2500.0):
+    dates = dates or _SYN_DATES
+    rows = []
+    value = base
+    for d in dates:
+        value += 3.125
+        rows.append({"date8": d, "bar_state": "final", "open": f"{value:.3f}",
+                     "close": f"{value + 8.123:.3f}",
+                     "high": f"{value + 9.456:.3f}",
+                     "low": f"{value - 2.789:.3f}"})
+    return rows
+
+
 # 合成因子事件（002600）：20261022 现金分红 div=0.5，cum 1.0 → 1.05
 _SYN_EVENTS = [("20261022", {"div": 0.5, "give": 0.0, "trans": 0.0,
                              "mult": 1.0469, "cum": 1.05})]
@@ -123,6 +136,8 @@ class ResearchTestCase(V3TestCase):
                               side_effect=self._tencent_stub),
             mock.patch.object(r, "eastmoney_board_daily",
                               side_effect=self._eastmoney_stub),
+            mock.patch.object(r, "fetch_ths_board_daily",
+                              side_effect=self._ths_stub),
             mock.patch.object(r, "engine_factor_events",
                               side_effect=_stub_factor_events),
         ]
@@ -147,6 +162,16 @@ class ResearchTestCase(V3TestCase):
     _index_store = None
     _board_store = None
     _board_fail = False
+    _ths_fail = False
+
+    @classmethod
+    def _ths_stub(cls, code, start8, end8, *, timeout=8.0):
+        if cls._ths_fail:
+            raise r.ResearchError(
+                "SOURCE_UNAVAILABLE", "ths unreachable (synthetic)")
+        from core import calendar_xshg
+        days = calendar_xshg.trading_days_between(start8, end8)
+        return _ths_board_rows(days)
 
     @classmethod
     def _tencent_stub(cls, symbol, start8, end8, *, timeout=12.0):
@@ -368,18 +393,123 @@ class BoardKlineTest(ResearchTestCase):
         self.assertIsNone(catalog[BOARD_KEY])
 
     def test_ths_never_serves_bk_request(self):
-        # I04：THS 命名空间拒绝；BK 请求绝不返回 THS 序列
-        env = self.kline(code="CN/board/ths/886044")
-        self._assert_refusal(env, "UNSUPPORTED_ASSET", "CN/board/ths/886044")
-        # 成员工具映射存在不代表日K——本服务无 THS 序列能力（负例）
-        env2 = self.kline(code="CN/board/eastmoney/BK9999")
-        self._assert_refusal(env2, "UNKNOWN_INSTRUMENT",
-                             "CN/board/eastmoney/BK9999")
+        # I04: unsupported namespace returns UNSUPPORTED_ASSET
+        env_unsupported = self.kline(code="CN/board/sw/801010")
+        self._assert_refusal(env_unsupported, "UNSUPPORTED_ASSET", "CN/board/sw/801010")
+        # Unknown instrument in ths or eastmoney returns UNKNOWN_INSTRUMENT
+        env_unknown_ths = self.kline(code="CN/board/ths/889999")
+        self._assert_refusal(env_unknown_ths, "UNKNOWN_INSTRUMENT", "CN/board/ths/889999")
+        env_unknown_em = self.kline(code="CN/board/eastmoney/BK9999")
+        self._assert_refusal(env_unknown_em, "UNKNOWN_INSTRUMENT", "CN/board/eastmoney/BK9999")
 
     def _assert_refusal(self, env, code, key):
         self.assertEqual(env["status"], "failed")
         self.assertEqual(env["errors"][0]["code"], code)
         self.assertIn(key, env["meta"])
+
+
+@unittest.skipIf(jsonschema is None, "jsonschema not available")
+class THSBoardKlineTest(ResearchTestCase):
+    """THS board series tests (CN/board/ths/*): identity, data, decimals, snapshot, isolation."""
+
+    THS_KEY_FORMAL = "CN/board/ths/885809"
+    THS_ALL_KEYS = [
+        "CN/board/ths/885809",
+        "CN/board/ths/886069",
+        "CN/board/ths/885957",
+        "CN/board/ths/886044",
+        "CN/board/ths/886009",
+        "CN/board/ths/881124",
+        "CN/board/ths/881181",
+    ]
+
+    def test_formal_ths_885809_500_days_window(self):
+        # Formal consumer object 885809 reaches full 500 bars in window 20241010 to 20261030
+        env = self.kline(code=self.THS_KEY_FORMAL, start="20241010", end="20261030")
+        self.assertEqual(env["status"], "complete")
+        bars = env["data"][self.THS_KEY_FORMAL]
+        self.assertEqual(len(bars), 500)
+        self.assertEqual(bars[0]["date"], "2024-10-10")
+        self.assertEqual(bars[-1]["date"], "2026-10-30")
+
+        # Decimal precision (3), unit (points), volume/amount null with explanation
+        meta = env["meta"][self.THS_KEY_FORMAL]
+        self.assertEqual(meta["instrument"]["identity_verified"], True)
+        self.assertEqual(meta["units"]["price"], "points")
+        self.assertEqual(meta["units"]["price_decimals"], 3)
+        self.assertIsNone(meta["units"]["amount_decimals"])
+        self.assertIn("10jqka", meta["units"]["null_reason"])
+        self.assertIsNone(bars[0]["volume"])
+        self.assertIsNone(bars[0]["amount"])
+        self.assertEqual(bars[0]["bar_state"], "final")
+
+        # series_catalog declaration
+        catalog = env["extensions"]["research_v1"]["series_catalog"][self.THS_KEY_FORMAL]
+        self.assertEqual(catalog["provider"], "ths")
+        self.assertEqual(catalog["calendar_exchange"], "XSHG")
+        self.assertEqual(catalog["methodology_id"], "ths-board-885809")
+        self.assertEqual(catalog["history_start"], "2024-10-10")
+        self.assertEqual(catalog["history_end"], "2026-10-30")
+
+    def test_all_seven_ths_board_codes(self):
+        # All 7 declared THS boards
+        for key in self.THS_ALL_KEYS:
+            env = self.kline(code=key, start="20261020", end="20261023")
+            self.assertEqual(env["status"], "complete", f"{key} status not complete: {env.get('errors')}")
+            bars = env["data"][key]
+            self.assertGreater(len(bars), 0)
+            self.assertEqual(env["meta"][key]["units"]["price_decimals"], 3)
+            self.assertEqual(env["meta"][key]["units"]["price"], "points")
+            desc = env["extensions"]["research_v1"]["series_catalog"][key]
+            self.assertEqual(desc["provider"], "ths")
+            self.assertEqual(desc["calendar_exchange"], "XSHG")
+
+    def test_single_vs_batch_consistency(self):
+        # Consistency between single, single-batch, multi-batch
+        start, end = "20261020", "20261023"
+        key_a = "CN/board/ths/885809"
+        key_b = "CN/board/ths/886069"
+
+        env_single = self.kline(code=key_a, start=start, end=end)
+        env_batch1 = self.kline(codes=[key_a], start=start, end=end)
+        env_multi = self.kline(codes=[key_a, key_b], start=start, end=end)
+
+        self.assertEqual(env_single["data"][key_a], env_batch1["data"][key_a])
+        self.assertEqual(env_single["data"][key_a], env_multi["data"][key_a])
+        self.assertEqual(env_single["meta"][key_a], env_batch1["meta"][key_a])
+        self.assertEqual(env_single["meta"][key_a], env_multi["meta"][key_a])
+
+    def test_ths_snapshot_replay_full_and_subset(self):
+        # Snapshot replay full and single-security subset
+        start, end = "20261020", "20261023"
+        key_a = "CN/board/ths/885809"
+        key_b = "CN/board/ths/886069"
+
+        env = self.kline(codes=[key_a, key_b], start=start, end=end)
+        snap_id = env["snapshot_id"]
+        self.assertIsNotNone(snap_id)
+
+        # Full replay
+        rep_full = self.kline(snapshot_id=snap_id, codes=[key_a, key_b])
+        self.assertEqual(rep_full["data"], env["data"])
+        self.assertEqual(rep_full["meta"], env["meta"])
+        self.assertEqual(rep_full["extensions"]["research_v1"]["series_catalog"],
+                         env["extensions"]["research_v1"]["series_catalog"])
+
+        # Subset replay
+        rep_sub = self.kline(snapshot_id=snap_id, code=key_a)
+        self.assertEqual(set(rep_sub["data"]), {key_a})
+        self.assertEqual(rep_sub["data"][key_a], env["data"][key_a])
+        self.assertEqual(rep_sub["meta"][key_a], env["meta"][key_a])
+        self.assertEqual(set(rep_sub["extensions"]["research_v1"]["series_catalog"]), {key_a})
+
+    def test_cache_and_provider_isolation(self):
+        # Cache isolation: THS cache file vs Eastmoney cache file
+        path_ths = r._board_cache_path(self.THS_KEY_FORMAL)
+        self.assertIn("CN_board_ths_885809", str(path_ths))
+        path_em = r._board_cache_path("CN/board/eastmoney/BK1160")
+        self.assertIn("CN_board_eastmoney_BK1160", str(path_em))
+        self.assertNotEqual(path_ths, path_em)
 
 
 # ---------------------------------------------------------------------------
