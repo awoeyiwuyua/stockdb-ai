@@ -3533,24 +3533,43 @@ def run_stdio() -> None:
         market_v3.HEALTH.start()
     except Exception:
         pass
-    for line in sys.stdin:
-        if not line.strip():
-            continue
+    import config as _config
+    if getattr(_config, "BOARD_BACKFILL_ENABLED", False):
         try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # 忽略非法帧，不崩溃
-        if not isinstance(msg, dict):
-            continue  # 畸形消息
+            import interfaces.mcp.board_reliability as br
+            br.WORKER.start()
+        except Exception:
+            pass
+    try:
+        for line in sys.stdin:
+            if not line.strip():
+                continue
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # 忽略非法帧，不崩溃
+            if not isinstance(msg, dict):
+                continue  # 畸形消息
+            try:
+                response = dispatch(msg)
+            except Exception as exc:  # noqa: BLE001 - 单条消息失败不影响 server 存活
+                response = {
+                    "jsonrpc": "2.0", "id": msg.get("id"),
+                    "error": {"code": -32603, "message": f"Internal error: {exc}"},
+                }
+            if response is not None:
+                _write_message(response)
+    finally:
         try:
-            response = dispatch(msg)
-        except Exception as exc:  # noqa: BLE001 - 单条消息失败不影响 server 存活
-            response = {
-                "jsonrpc": "2.0", "id": msg.get("id"),
-                "error": {"code": -32603, "message": f"Internal error: {exc}"},
-            }
-        if response is not None:
-            _write_message(response)
+            import interfaces.mcp.market_v3 as market_v3
+            market_v3.HEALTH.stop()
+        except Exception:
+            pass
+        try:
+            import interfaces.mcp.board_reliability as br
+            br.WORKER.stop()
+        except Exception:
+            pass
 
 
 # === HTTP 传输（NAS 容器部署主用） ===
@@ -3610,23 +3629,45 @@ class _MCPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def run_http(host: str, port: int) -> None:
     """启动 ThreadingHTTPServer（每请求一个线程，多 agent 并发安全）。"""
+    httpd = None
     try:
-        import interfaces.mcp.market_v3 as market_v3
-        market_v3.HEALTH.start()
-    except Exception:
-        pass
-    httpd = http.server.ThreadingHTTPServer((host, port), _MCPRequestHandler)
-    print(
-        f"{SERVER_NAME} HTTP server listening on http://{host}:{port} "
-        f"(POST /mcp, GET / 健康检查)",
-        flush=True,
-    )
-    try:
+        try:
+            import interfaces.mcp.market_v3 as market_v3
+            market_v3.HEALTH.start()
+        except Exception:
+            pass
+        import config as _config
+        if getattr(_config, "BOARD_BACKFILL_ENABLED", False):
+            try:
+                import interfaces.mcp.board_reliability as br
+                br.WORKER.start()
+            except Exception:
+                pass
+        httpd = http.server.ThreadingHTTPServer((host, port), _MCPRequestHandler)
+        print(
+            f"{SERVER_NAME} HTTP server listening on http://{host}:{port} "
+            f"(POST /mcp, GET / 健康检查)",
+            flush=True,
+        )
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        httpd.server_close()
+        if httpd is not None:
+            try:
+                httpd.server_close()
+            except Exception:
+                pass
+        try:
+            import interfaces.mcp.market_v3 as market_v3
+            market_v3.HEALTH.stop()
+        except Exception:
+            pass
+        try:
+            import interfaces.mcp.board_reliability as br
+            br.WORKER.stop()
+        except Exception:
+            pass
 
 
 def self_check() -> int:

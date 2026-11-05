@@ -26,6 +26,7 @@ for _p in (str(_MCP_DIR), str(_BASE_DIR), str(_MCP_DIR / "contract")):
 
 from interfaces.mcp import market_v3 as v3  # noqa: E402
 from interfaces.mcp import market_v3_research as r  # noqa: E402
+from interfaces.mcp import board_reliability as br  # noqa: E402
 from interfaces.mcp import stockdb_mcp_server as server  # noqa: E402
 from test_market_v3 import (  # noqa: E402
     BASE_ARGS, CATALOG, EQUITY_KEY, ETF_KEY, LATEST, SYNC_SUCCESSES,
@@ -1339,7 +1340,8 @@ class BoardCacheAndBackoffTest(ResearchTestCase):
                 self._real_eastmoney("90.BK1138", "20261020", "20261023")
         first = r.em_board_availability()["cooldown_until"] - time.time()
         # 手动过期 → 再败一次 → 冷却指数增长
-        r._em_client_state()["cooldown_until"] = 0.0
+        br.EM_GATE._state.cooldown_until = 0.0
+        dict.__setitem__(r._em_client_state(), "cooldown_until", 0.0)
         with mock.patch.object(r, "_http_json", side_effect=drop):
             with self.assertRaises(r.ResearchError):
                 self._real_eastmoney("90.BK1138", "20261020", "20261023")
@@ -1347,7 +1349,8 @@ class BoardCacheAndBackoffTest(ResearchTestCase):
         self.assertGreater(second, first)
         self.assertEqual(r.em_board_availability()["backoff_streak"], 2)
         # 成功 → 退避状态复位（先手动过期冷却以触达源）
-        r._em_client_state()["cooldown_until"] = 0.0
+        br.EM_GATE._state.cooldown_until = 0.0
+        dict.__setitem__(r._em_client_state(), "cooldown_until", 0.0)
         with mock.patch.object(r, "_http_json", side_effect=ok):
             rows = self._real_eastmoney("90.BK1138", "20261020", "20261023")
         self.assertEqual(len(rows), 1)
