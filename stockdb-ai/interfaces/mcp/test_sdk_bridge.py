@@ -203,6 +203,47 @@ class SdkBridgeServerIntegrationTest(unittest.TestCase):
         payload = json.loads(r["content"][0]["text"])
         self.assertEqual(payload["code"], "INVALID_ARGUMENT")
 
+    def test_timeout_maps_source_timeout(self):
+        """超时映射为 SOURCE_TIMEOUT。"""
+        self._activate()
+        sdk_bridge.reset_circuit()
+        with mock.patch.object(server, "_sdk_call_tool", side_effect=sdk_bridge.SourceTimeoutError("上游调用超时")):
+            r = server._call_tool("get_bars", {"security": ["000001"]})
+        self.assertTrue(r.get("isError"))
+        payload = json.loads(r["content"][0]["text"])
+        self.assertEqual(payload["code"], "SOURCE_TIMEOUT")
+
+    def test_connect_failure_maps_source_unavailable(self):
+        """上游连接故障映射为 SOURCE_UNAVAILABLE 并触发熔断。"""
+        self._activate()
+        sdk_bridge.reset_circuit()
+        err_msg = "tcp connect error: Connection timed out (os error 110)"
+        with mock.patch.object(_FakeMCPModule, "stockdb_get_bars",
+                               side_effect=RuntimeError(f"HTTP request failed: {err_msg}")):
+            r = server._call_tool("get_bars", {"security": ["000001"]})
+        self.assertTrue(r.get("isError"))
+        payload = json.loads(r["content"][0]["text"])
+        self.assertEqual(payload["code"], "SOURCE_UNAVAILABLE")
+        self.assertTrue(sdk_bridge.is_circuit_open()[0])
+
+        # 熔断中直接快速失败
+        r2 = server._call_tool("get_bars", {"security": ["000001"]})
+        self.assertTrue(r2.get("isError"))
+        p2 = json.loads(r2["content"][0]["text"])
+        self.assertEqual(p2["code"], "SOURCE_UNAVAILABLE")
+        self.assertIn("熔断保护中", p2["error"])
+        sdk_bridge.reset_circuit()
+
+    def test_concurrency_busy_maps_busy(self):
+        """并发超限映射为 BUSY。"""
+        self._activate()
+        sdk_bridge.reset_circuit()
+        with mock.patch.object(server, "_sdk_call_tool", side_effect=sdk_bridge.ServerBusyError("并发已满")):
+            r = server._call_tool("get_bars", {"security": ["000001"]})
+        self.assertTrue(r.get("isError"))
+        payload = json.loads(r["content"][0]["text"])
+        self.assertEqual(payload["code"], "BUSY")
+
 
 if __name__ == "__main__":
     unittest.main()

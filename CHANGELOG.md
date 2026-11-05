@@ -5,6 +5,47 @@
 > 排查时按 runbook §1 症状索引查；本文件在需要"某版本当时为什么改"时回查。
 > 条目中的坑位括注（如「坑」「教训」「实证」）已同步进 runbook。
 
+## [0.16.0] — 2026-10-29（**东财板块历史恢复：push2his 风控根因 + 持久缓存/缺口补采**）
+
+> 消费方实测：BK1160 缺 2026-10-27（10-28 已取到），500 日历史请求报
+> SOURCE_UNAVAILABLE；服务报告 92/21/40/默认 push2his 域全部失败。
+> 实测根因（双网络复现 + 真实浏览器对照 + 滑块验证码实证）：push2his 集群
+> （4 个轮转域同一 IP 簇）上线行为风控——对非浏览器客户端（urllib/curl）
+> TCP/TLS 握手正常但 HTTP 请求后 0 字节静默断连（RemoteDisconnected）；
+> 自动化形态请求累积触发滑块挑战直至 IP 级全断（真实浏览器也被断）。
+> 原实现每次请求 4 主机连发 + 无退避 + 无缓存，恰是维持封禁的流量形态。
+> 数据侧 10-28 有柱、10-27 缺失 → 间歇窗口型封禁，不是接口消亡（网页端
+> 同日仍在用 push2his kline/get，参数含 ut=fa5fd… 与逐板块 Referer）。
+
+- **polite 客户端**（market_v3_research.py::eastmoney_board_daily）：完整浏览器
+  形态头（Windows Chrome UA / Accept-Language / 逐板块 Referer）+ 站点公开
+  `ut` 参数 + 持久 `qgqp_b_id` 设备 Cookie（随机 32hex 首次生成落盘，重启
+  不换指纹）。静默断连判定为 waf_drop：**不轮转同簇主机连发**（单请求单次
+  触网实证，单测断言 calls==1），进入全局冷却 30min 起指数退避、4h 封顶；
+  冷却期内 fail-fast 不触网（诚实 SOURCE_UNAVAILABLE + 剩余秒数）；仅
+  超时/网络不可达类错误才轮转主机（间隔 2s）。
+- **板块日K持久缓存**（board_daily_cached + _board_cache_*）：逐板块逐日
+  落盘（快照目录 board_daily_cache/，真实取得才写；源修订覆盖旧值=允许的
+  历史修订并留 revisions 痕迹；源 200 降级响应不删既有真实日）。上游失败
+  且窗口内有真实已取日 → 如实以缓存服务；cache_info 带最旧 retrieved_at，
+  source_catalog 引用如实标注 "served from server-side persistent board
+  cache"（不把缓存读取伪标实时抓取）；窗口内无缓存才抛 SOURCE_UNAVAILABLE。
+  缺口由基线 expected-slots 机制如实 partial + INCOMPLETE_COVERAGE，绝不
+  制造缺失日；snapshot 重放内容不变（快照链零改动）。
+- **缺口补采**（board_cache_gap_report + board_backfill_cycle + 后台巡检线程）：
+  对照 XSHG 日历与引擎最新交易日逐板块报告缺口；请求路径窗口拉取天然补缺，
+  另有 20min±jitter 低频巡检（首轮延迟 90s；冷却许可才触网；每板块每轮
+  至多 1 次源请求；板块间 1.5s 礼貌间隔）。单测/验收进程 kill-switch：
+  `STOCKDB_V3_BOARD_BACKFILL=off`（服务进程默认开）。
+- **状态可见**（em_board_availability/research_status_metadata）：冷却截止/
+  连败数/waf_drop 类别/补采轮次与摘要进状态元数据；get_data_status 降级
+  语义不变（fail_at>ok_at 如实 degraded）。
+- **测试**：单测 54 全绿（新增 7：缓存服务+来源标注 / 缺口 partial+缺口如实 /
+  waf_drop 单次触网+冷却 fail-fast / 退避指数增长+成功复位 / polite 头与 ut /
+  补采回填 / 冷却期跳过）；acceptance stub 基线照常通过。
+- **量额边界不动**：板块仍 price-only（volume/amount null + null_reason）；
+  不接入任何同花顺/TI/腾讯序列冒充东财 BK（I04 原样）。
+
 ## [0.14.2] — 2026-10-25（**复权 A 快照重放 meta.adjustment 补修**——消费方反馈包 `2026-10-25-stockdb-adjusted-replay-feedback`）
 
 > 消费方隔离编排实测发现：A 快照重放（fq/anchor/F 相同 + snapshot_id=A）返回

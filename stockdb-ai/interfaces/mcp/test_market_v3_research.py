@@ -91,6 +91,19 @@ def _board_rows(dates=None, base=1000.0):
     return rows
 
 
+def _ths_board_rows(dates=None, base=2500.0):
+    dates = dates or _SYN_DATES
+    rows = []
+    value = base
+    for d in dates:
+        value += 3.125
+        rows.append({"date8": d, "bar_state": "final", "open": f"{value:.3f}",
+                     "close": f"{value + 8.123:.3f}",
+                     "high": f"{value + 9.456:.3f}",
+                     "low": f"{value - 2.789:.3f}"})
+    return rows
+
+
 # 合成因子事件（002600）：20261022 现金分红 div=0.5，cum 1.0 → 1.05
 _SYN_EVENTS = [("20261022", {"div": 0.5, "give": 0.0, "trans": 0.0,
                              "mult": 1.0469, "cum": 1.05})]
@@ -109,11 +122,22 @@ class ResearchTestCase(V3TestCase):
     def setUp(self) -> None:
         super().setUp()
         r._factor_cache.clear()
+        # 0.16.0：板块补采线程/东财客户端状态逐测试隔离（线程明确关闭；
+        # 风控冷却/连败计数不得跨测试泄漏）
+        os.environ["STOCKDB_V3_BOARD_BACKFILL"] = "off"
+        self.addCleanup(os.environ.pop, "STOCKDB_V3_BOARD_BACKFILL", None)
+        with r._EM_STATE_LOCK:
+            r._EM_LAST_STATE.clear()
+            r._EM_BACKFILL_STATE.clear()
+        self.addCleanup(r._EM_LAST_STATE.clear)
+        self._real_eastmoney = r.eastmoney_board_daily  # 真实客户端（风控测试用）
         self._rpatches = [
             mock.patch.object(r, "tencent_index_daily",
                               side_effect=self._tencent_stub),
             mock.patch.object(r, "eastmoney_board_daily",
                               side_effect=self._eastmoney_stub),
+            mock.patch.object(r, "fetch_ths_board_daily",
+                              side_effect=self._ths_stub),
             mock.patch.object(r, "engine_factor_events",
                               side_effect=_stub_factor_events),
         ]
@@ -138,6 +162,16 @@ class ResearchTestCase(V3TestCase):
     _index_store = None
     _board_store = None
     _board_fail = False
+    _ths_fail = False
+
+    @classmethod
+    def _ths_stub(cls, code, start8, end8, *, timeout=8.0):
+        if cls._ths_fail:
+            raise r.ResearchError(
+                "SOURCE_UNAVAILABLE", "ths unreachable (synthetic)")
+        from core import calendar_xshg
+        days = calendar_xshg.trading_days_between(start8, end8)
+        return _ths_board_rows(days)
 
     @classmethod
     def _tencent_stub(cls, symbol, start8, end8, *, timeout=12.0):
@@ -359,18 +393,123 @@ class BoardKlineTest(ResearchTestCase):
         self.assertIsNone(catalog[BOARD_KEY])
 
     def test_ths_never_serves_bk_request(self):
-        # I04：THS 命名空间拒绝；BK 请求绝不返回 THS 序列
-        env = self.kline(code="CN/board/ths/886044")
-        self._assert_refusal(env, "UNSUPPORTED_ASSET", "CN/board/ths/886044")
-        # 成员工具映射存在不代表日K——本服务无 THS 序列能力（负例）
-        env2 = self.kline(code="CN/board/eastmoney/BK9999")
-        self._assert_refusal(env2, "UNKNOWN_INSTRUMENT",
-                             "CN/board/eastmoney/BK9999")
+        # I04: unsupported namespace returns UNSUPPORTED_ASSET
+        env_unsupported = self.kline(code="CN/board/sw/801010")
+        self._assert_refusal(env_unsupported, "UNSUPPORTED_ASSET", "CN/board/sw/801010")
+        # Unknown instrument in ths or eastmoney returns UNKNOWN_INSTRUMENT
+        env_unknown_ths = self.kline(code="CN/board/ths/889999")
+        self._assert_refusal(env_unknown_ths, "UNKNOWN_INSTRUMENT", "CN/board/ths/889999")
+        env_unknown_em = self.kline(code="CN/board/eastmoney/BK9999")
+        self._assert_refusal(env_unknown_em, "UNKNOWN_INSTRUMENT", "CN/board/eastmoney/BK9999")
 
     def _assert_refusal(self, env, code, key):
         self.assertEqual(env["status"], "failed")
         self.assertEqual(env["errors"][0]["code"], code)
         self.assertIn(key, env["meta"])
+
+
+@unittest.skipIf(jsonschema is None, "jsonschema not available")
+class THSBoardKlineTest(ResearchTestCase):
+    """THS board series tests (CN/board/ths/*): identity, data, decimals, snapshot, isolation."""
+
+    THS_KEY_FORMAL = "CN/board/ths/885809"
+    THS_ALL_KEYS = [
+        "CN/board/ths/885809",
+        "CN/board/ths/886069",
+        "CN/board/ths/885957",
+        "CN/board/ths/886044",
+        "CN/board/ths/886009",
+        "CN/board/ths/881124",
+        "CN/board/ths/881181",
+    ]
+
+    def test_formal_ths_885809_500_days_window(self):
+        # Formal consumer object 885809 reaches full 500 bars in window 20241010 to 20261030
+        env = self.kline(code=self.THS_KEY_FORMAL, start="20241010", end="20261030")
+        self.assertEqual(env["status"], "complete")
+        bars = env["data"][self.THS_KEY_FORMAL]
+        self.assertEqual(len(bars), 500)
+        self.assertEqual(bars[0]["date"], "2024-10-10")
+        self.assertEqual(bars[-1]["date"], "2026-10-30")
+
+        # Decimal precision (3), unit (points), volume/amount null with explanation
+        meta = env["meta"][self.THS_KEY_FORMAL]
+        self.assertEqual(meta["instrument"]["identity_verified"], True)
+        self.assertEqual(meta["units"]["price"], "points")
+        self.assertEqual(meta["units"]["price_decimals"], 3)
+        self.assertIsNone(meta["units"]["amount_decimals"])
+        self.assertIn("10jqka", meta["units"]["null_reason"])
+        self.assertIsNone(bars[0]["volume"])
+        self.assertIsNone(bars[0]["amount"])
+        self.assertEqual(bars[0]["bar_state"], "final")
+
+        # series_catalog declaration
+        catalog = env["extensions"]["research_v1"]["series_catalog"][self.THS_KEY_FORMAL]
+        self.assertEqual(catalog["provider"], "ths")
+        self.assertEqual(catalog["calendar_exchange"], "XSHG")
+        self.assertEqual(catalog["methodology_id"], "ths-board-885809")
+        self.assertEqual(catalog["history_start"], "2024-10-10")
+        self.assertEqual(catalog["history_end"], "2026-10-30")
+
+    def test_all_seven_ths_board_codes(self):
+        # All 7 declared THS boards
+        for key in self.THS_ALL_KEYS:
+            env = self.kline(code=key, start="20261020", end="20261023")
+            self.assertEqual(env["status"], "complete", f"{key} status not complete: {env.get('errors')}")
+            bars = env["data"][key]
+            self.assertGreater(len(bars), 0)
+            self.assertEqual(env["meta"][key]["units"]["price_decimals"], 3)
+            self.assertEqual(env["meta"][key]["units"]["price"], "points")
+            desc = env["extensions"]["research_v1"]["series_catalog"][key]
+            self.assertEqual(desc["provider"], "ths")
+            self.assertEqual(desc["calendar_exchange"], "XSHG")
+
+    def test_single_vs_batch_consistency(self):
+        # Consistency between single, single-batch, multi-batch
+        start, end = "20261020", "20261023"
+        key_a = "CN/board/ths/885809"
+        key_b = "CN/board/ths/886069"
+
+        env_single = self.kline(code=key_a, start=start, end=end)
+        env_batch1 = self.kline(codes=[key_a], start=start, end=end)
+        env_multi = self.kline(codes=[key_a, key_b], start=start, end=end)
+
+        self.assertEqual(env_single["data"][key_a], env_batch1["data"][key_a])
+        self.assertEqual(env_single["data"][key_a], env_multi["data"][key_a])
+        self.assertEqual(env_single["meta"][key_a], env_batch1["meta"][key_a])
+        self.assertEqual(env_single["meta"][key_a], env_multi["meta"][key_a])
+
+    def test_ths_snapshot_replay_full_and_subset(self):
+        # Snapshot replay full and single-security subset
+        start, end = "20261020", "20261023"
+        key_a = "CN/board/ths/885809"
+        key_b = "CN/board/ths/886069"
+
+        env = self.kline(codes=[key_a, key_b], start=start, end=end)
+        snap_id = env["snapshot_id"]
+        self.assertIsNotNone(snap_id)
+
+        # Full replay
+        rep_full = self.kline(snapshot_id=snap_id, codes=[key_a, key_b])
+        self.assertEqual(rep_full["data"], env["data"])
+        self.assertEqual(rep_full["meta"], env["meta"])
+        self.assertEqual(rep_full["extensions"]["research_v1"]["series_catalog"],
+                         env["extensions"]["research_v1"]["series_catalog"])
+
+        # Subset replay
+        rep_sub = self.kline(snapshot_id=snap_id, code=key_a)
+        self.assertEqual(set(rep_sub["data"]), {key_a})
+        self.assertEqual(rep_sub["data"][key_a], env["data"][key_a])
+        self.assertEqual(rep_sub["meta"][key_a], env["meta"][key_a])
+        self.assertEqual(set(rep_sub["extensions"]["research_v1"]["series_catalog"]), {key_a})
+
+    def test_cache_and_provider_isolation(self):
+        # Cache isolation: THS cache file vs Eastmoney cache file
+        path_ths = r._board_cache_path(self.THS_KEY_FORMAL)
+        self.assertIn("CN_board_ths_885809", str(path_ths))
+        path_em = r._board_cache_path("CN/board/eastmoney/BK1160")
+        self.assertIn("CN_board_eastmoney_BK1160", str(path_em))
+        self.assertNotEqual(path_ths, path_em)
 
 
 # ---------------------------------------------------------------------------
@@ -760,6 +899,9 @@ class AdjustedKlineTest(ResearchTestCase):
                          adjustment_anchor=anchor, factor_snapshot_id=fid)
         self.assertEqual(one["meta"][ETF_KEY]["adjustment"],
                          expected[ETF_KEY])
+        self.assertEqual(set(one["data"]), {ETF_KEY})
+        self.assertEqual(set(one["meta"]), {ETF_KEY})
+        self.assertEqual(set(one["extensions"]["research_v1"]["series_catalog"]), {ETF_KEY})
         self.validate(one, "KlineResponse")
         # fields 投影重放
         proj = self.kline(snapshot_id=aid, codes=[EQUITY_KEY],
@@ -1105,6 +1247,170 @@ class SinaFallbackTest(ResearchTestCase):
         self.assertEqual(env["status"], "failed")
         self.assertEqual(env["errors"][0]["code"], "SOURCE_UNAVAILABLE")
         self.assertIn("sina", env["errors"][0]["message"])
+
+
+@unittest.skipIf(jsonschema is None, "jsonschema 不可用")
+class BoardCacheAndBackoffTest(ResearchTestCase):
+    """0.16.0 板块持久缓存 / 东财风控退避 / 缺口补采（push2his 根因修复回归）。
+
+    根因（2026-10-29 实测）：push2his 对非浏览器客户端静默断连并按行为评分
+    升级至滑块验证码/IP 级惩罚；原实现 4 主机连发+无退避+无缓存维持封禁。
+    """
+
+    def test_cache_serves_when_source_fails_and_annotates_source_record(self):
+        env = self.kline(code=BOARD_KEY)  # 首次：源成功（桩）→ 逐日落盘
+        self.assertEqual(env["status"], "complete")
+        first_rows = env["data"][BOARD_KEY]
+        type(self)._board_fail = True
+        try:
+            env2 = self.kline(code=BOARD_KEY)  # 源失败 → 缓存如实服务
+        finally:
+            type(self)._board_fail = False
+        self.assertEqual(env2["status"], "complete")
+        self.assertEqual(env2["data"][BOARD_KEY], first_rows)  # 内容不变
+        ref = env2["source_catalog"][r.series_source_id(BOARD_KEY)]
+        # 来源可追溯：缓存服务必须如实标注，不得伪标实时抓取
+        self.assertIn("persistent board cache", ref["reference"])
+        self.assertTrue(ref["retrieved_at"])
+        store = json.loads(r._board_cache_path(BOARD_KEY)
+                           .read_text(encoding="utf-8"))
+        self.assertGreaterEqual(store.get("fetch_failures", 0), 1)
+
+    def test_cache_gap_reports_partial_with_incomplete_coverage(self):
+        env = self.kline(code=BOARD_KEY)
+        self.assertEqual(env["status"], "complete")
+        # 摘除一天缓存（模拟历史缺口），源失败 → partial + 缺口如实上报
+        path = r._board_cache_path(BOARD_KEY)
+        store = json.loads(path.read_text(encoding="utf-8"))
+        removed = sorted(store["bars"])[1]
+        del store["bars"][removed]
+        path.write_text(json.dumps(store, ensure_ascii=False),
+                        encoding="utf-8")
+        type(self)._board_fail = True
+        try:
+            env2 = self.kline(code=BOARD_KEY)
+        finally:
+            type(self)._board_fail = False
+        self.assertEqual(env2["status"], "partial")
+        served = [b["date"] for b in env2["data"][BOARD_KEY]]
+        self.assertEqual(len(served), 3)
+        removed_iso = f"{removed[:4]}-{removed[4:6]}-{removed[6:]}"
+        self.assertNotIn(removed_iso, served)
+        self.assertIn("INCOMPLETE_COVERAGE",
+                      {e["code"] for e in env2["errors"]})
+        # 缓存里的真实日子绝不因上游失败被抹掉
+        self.assertEqual(served[0], "2026-10-20")
+
+    def test_waf_drop_single_attempt_then_cooldown_failfast(self):
+        import http.client
+        calls = {"n": 0}
+
+        def drop(url, *, referer, timeout, headers=None):
+            calls["n"] += 1
+            raise http.client.RemoteDisconnected("silent close")
+
+        with mock.patch.object(r, "_http_json", side_effect=drop):
+            with self.assertRaises(r.ResearchError) as ctx:
+                self._real_eastmoney("90.BK1138", "20261020", "20261023")
+        self.assertEqual(ctx.exception.code, "SOURCE_UNAVAILABLE")
+        self.assertEqual(calls["n"], 1)  # 风控断连绝不轮转同簇主机连发
+        em = r.em_board_availability()
+        self.assertEqual(em["last_drop_class"], "waf_drop")
+        self.assertGreater(em["cooldown_until"], time.time())
+        self.assertEqual(em["backoff_streak"], 1)
+        # 冷却期内 fail-fast：不触网（请求数不再增长）
+        with mock.patch.object(r, "_http_json", side_effect=drop):
+            with self.assertRaises(r.ResearchError) as ctx2:
+                self._real_eastmoney("90.BK1138", "20261020", "20261023")
+        self.assertIn("退避", ctx2.exception.message)
+        self.assertEqual(calls["n"], 1)
+
+    def test_backoff_doubles_then_success_resets(self):
+        import http.client
+
+        def drop(url, *, referer, timeout, headers=None):
+            raise http.client.RemoteDisconnected("silent close")
+
+        def ok(url, *, referer, timeout, headers=None):
+            return {"data": {"klines": ["2026-10-20,1.0,2.0,2.0,1.0,0,0"]}}
+
+        with mock.patch.object(r, "_http_json", side_effect=drop):
+            with self.assertRaises(r.ResearchError):
+                self._real_eastmoney("90.BK1138", "20261020", "20261023")
+        first = r.em_board_availability()["cooldown_until"] - time.time()
+        # 手动过期 → 再败一次 → 冷却指数增长
+        r._em_client_state()["cooldown_until"] = 0.0
+        with mock.patch.object(r, "_http_json", side_effect=drop):
+            with self.assertRaises(r.ResearchError):
+                self._real_eastmoney("90.BK1138", "20261020", "20261023")
+        second = r.em_board_availability()["cooldown_until"] - time.time()
+        self.assertGreater(second, first)
+        self.assertEqual(r.em_board_availability()["backoff_streak"], 2)
+        # 成功 → 退避状态复位（先手动过期冷却以触达源）
+        r._em_client_state()["cooldown_until"] = 0.0
+        with mock.patch.object(r, "_http_json", side_effect=ok):
+            rows = self._real_eastmoney("90.BK1138", "20261020", "20261023")
+        self.assertEqual(len(rows), 1)
+        em = r.em_board_availability()
+        self.assertEqual(em["backoff_streak"], 0)
+        self.assertEqual(em["cooldown_until"], 0.0)
+        self.assertEqual(em["last_drop_class"], None)
+
+    def test_polite_headers_and_ut_param(self):
+        seen = {}
+
+        def ok(url, *, referer, timeout, headers=None):
+            seen["url"], seen["referer"], seen["headers"] = url, referer, headers
+            return {"data": {"klines": []}}
+
+        with mock.patch.object(r, "_http_json", side_effect=ok):
+            self._real_eastmoney("90.BK1160", "20261020", "20261023")
+        self.assertIn("ut=fa5fd1943c7b386f172d6893dbfba10b", seen["url"])
+        self.assertIn("secid=90.BK1160", seen["url"])
+        self.assertIn("klt=101&fqt=0", seen["url"])
+        self.assertIn("lmt=1000000", seen["url"])  # 站点同款，防大窗口被默认截断
+        self.assertEqual(seen["referer"],
+                         "https://quote.eastmoney.com/bk/90.BK1160.html")
+        self.assertIn("qgqp_b_id=", seen["headers"]["Cookie"])
+        self.assertIn("Chrome", seen["headers"]["User-Agent"])
+        self.assertIn("zh-CN", seen["headers"]["Accept-Language"])
+
+    def test_backfill_cycle_fills_gap(self):
+        env = self.kline(code=BOARD_KEY)
+        self.assertEqual(env["status"], "complete")
+        path = r._board_cache_path(BOARD_KEY)
+        store = json.loads(path.read_text(encoding="utf-8"))
+        removed = sorted(store["bars"])[1]
+        del store["bars"][removed]
+        path.write_text(json.dumps(store, ensure_ascii=False),
+                        encoding="utf-8")
+        latest = v3.HEALTH.get().get("latest") or "20261023"
+        # 窗口/板块目录在测试中收窄到合成序列（stub 只提供 4 个合成日）
+        iso = [f"{d[:4]}-{d[4:6]}-{d[6:]}" for d in _SYN_DATES]
+        only_board = {BOARD_KEY: r.BOARD_SERIES[BOARD_KEY]}
+        with mock.patch.object(v3, "_expected_slots", return_value=iso),                 mock.patch.object(r, "BOARD_SERIES", only_board):
+            self.assertGreaterEqual(
+                r.board_cache_gap_report(latest)[BOARD_KEY]["gap_count"], 1)
+            summary = r.board_backfill_cycle()
+            self.assertEqual(summary["boards"][BOARD_KEY]["action"], "fetched")
+            self.assertEqual(
+                r.board_cache_gap_report(latest)[BOARD_KEY]["gap_count"], 0)
+
+    def test_backfill_cycle_skips_in_cooldown(self):
+        env = self.kline(code=BOARD_KEY)
+        self.assertEqual(env["status"], "complete")
+        path = r._board_cache_path(BOARD_KEY)
+        store = json.loads(path.read_text(encoding="utf-8"))
+        removed = sorted(store["bars"])[1]
+        del store["bars"][removed]
+        path.write_text(json.dumps(store, ensure_ascii=False),
+                        encoding="utf-8")
+        r._em_enter_cooldown("synthetic waf drop", "waf_drop")
+        summary = r.board_backfill_cycle()
+        self.assertIn("冷却", summary["skipped"])
+        # 缓存缺口保持原样（不触网、不虚造）
+        store2 = json.loads(path.read_text(encoding="utf-8"))
+        self.assertNotIn(removed, store2["bars"])
 
 
 if __name__ == "__main__":

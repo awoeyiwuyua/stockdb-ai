@@ -26,6 +26,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from unittest import mock
 
+# 验收进程不启动东财板块后台补采线程（补采行为在单测/服务进程覆盖；
+# nas 模式验收走显式 HTTP 请求路径，不受影响）
+os.environ.setdefault("STOCKDB_V3_BOARD_BACKFILL", "off")
+
 _MCP_DIR = Path(__file__).resolve().parent
 _BASE_DIR = _MCP_DIR.parent.parent
 for _p in (str(_MCP_DIR), str(_BASE_DIR), str(_MCP_DIR / "contract")):
@@ -1290,9 +1294,12 @@ def run_A(runner: Runner, latest: str | None) -> None:
             hfq_rows and Decimal(hfq_rows[0]["multiplier"]) == 1,
             f"hfq first-row multiplier={hfq_rows and hfq_rows[0]['multiplier']}")
     sub = runner.factors(codes=[EQUITY_KEY], start=sessions[-5:][0],
-                         end=end8, snapshot_id=f_env.get("snapshot_id"))
-    sub_ok = (sub.get("query", {}).get("adjustment_anchor")
-              == f_env.get("query", {}).get("adjustment_anchor"))
+                         end=end8, snapshot_id=f_env.get("snapshot_id"),
+                         anchor=(f_env.get("query") or {}).get(
+                             "adjustment_anchor"))
+    # 失败信封 query=None：不得用 .get("query", {})（键存在值为 None）
+    sub_ok = ((sub.get("query") or {}).get("adjustment_anchor")
+              == (f_env.get("query") or {}).get("adjustment_anchor"))
     weekend_anchor = runner.factors(codes=[EQUITY_KEY], fq="qfq",
                                     start=sessions[-10:][0], end=end8,
                                     anchor="20261018")
@@ -1608,11 +1615,13 @@ def run_A(runner: Runner, latest: str | None) -> None:
     c = runner.case("A11")
     f_reread = runner.factors(codes=[EQUITY_KEY],
                               start=sessions[-10:][0], end=end8,
-                              snapshot_id=fid)
+                              snapshot_id=fid,
+                              anchor=(f_env.get("query") or {}).get(
+                                  "adjustment_anchor"))
     decimals = 2
     recompute_ok = True
     detail_rows = 0
-    f_by_date = {x["date"]: x for x in f_reread.get("data", {}).get(
+    f_by_date = {x["date"]: x for x in (f_reread.get("data") or {}).get(
         EQUITY_KEY, [])}
     for rbar, abar in zip(r_env.get("data", {}).get(EQUITY_KEY, []),
                           a_env.get("data", {}).get(EQUITY_KEY, [])):

@@ -2953,6 +2953,18 @@ def main():
         threading.Thread(target=warehouse_scheduler_loop, daemon=True).start()
     if HK_SYNC_ENABLED:  # 0.12.0 H1：港股自动同步调度（5s 轮询；回滚演练 = HK_SYNC_ENABLED=0）
         threading.Thread(target=hk_scheduler_loop, daemon=True).start()
+    try:
+        import interfaces.mcp.market_v3 as market_v3
+        market_v3.HEALTH.start()
+    except Exception as exc:
+        print(f"webui: market_v3 引擎健康探测启动失败: {exc}", file=sys.stderr)
+    import config as _config
+    if getattr(_config, "BOARD_BACKFILL_ENABLED", False):
+        try:
+            import interfaces.mcp.board_reliability as br
+            br.WORKER.start()
+        except Exception as exc:
+            print(f"webui: 板块可靠性补采 worker 启动失败: {exc}", file=sys.stderr)
     # 0.9.11：Handler 延迟装配（app 模块已完整）——handlers.py 顶层 import app，
     # 脚本方式执行时必须在 app 完整后导入，否则循环重载 ImportError（0.9.10 实证）
     from interfaces.web.handlers import Handler  # noqa: E402 - 组合根装配（app 已完整）

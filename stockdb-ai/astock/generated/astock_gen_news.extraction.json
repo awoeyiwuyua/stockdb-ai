@@ -1,0 +1,182 @@
+{
+ "schema_version": 1,
+ "vendor_root": "astock\\vendor\\candidate-main-02aa8b4d",
+ "upstream_commit": "02aa8b4d1316629e819cdc17a14297ca1a70edcd",
+ "source_file": "SKILL.md",
+ "source_file_sha256": "a774151626a5389b1eaf45d5d38f83314e96826bdf20fd25057fe4ca5bb6ccb8",
+ "vendor_tree_sha256": "78718f1e2734c5764756b3289835171349f601af2fe3832c7f15645da8b39d2a",
+ "entry_symbols": [
+  "eastmoney_stock_news",
+  "eastmoney_global_news"
+ ],
+ "selected_blocks": [
+  {
+   "index": 3,
+   "sha256": "9a045253336eba72b08f6c85cc52d612958e41e7f8e4fcc391d197d289e23e5a",
+   "symbols": [
+    "em_get",
+    "eastmoney_datacenter"
+   ],
+   "imports": [
+    "time",
+    "random",
+    "requests",
+    "typing"
+   ]
+  },
+  {
+   "index": 39,
+   "sha256": "acfa8cacdc370ffc79d25c2b46baa53e9c0278be2915e1f79a847f98c0cfe774",
+   "symbols": [
+    "eastmoney_stock_news"
+   ],
+   "imports": [
+    "requests",
+    "re",
+    "json"
+   ]
+  },
+  {
+   "index": 41,
+   "sha256": "c2ab4d0dc099e83267e789e5fbe7cca61eb23b07e782f7e63743fdf0fe08180b",
+   "symbols": [
+    "eastmoney_global_news"
+   ],
+   "imports": [
+    "requests",
+    "uuid"
+   ]
+  }
+ ],
+ "initialization_allowlist": [
+  "Assign:EM_SESSION = requests.Session()",
+  "Expr:EM_SESSION.headers.update({'User-Agent': UA})",
+  "Try:",
+  "Assign:_em_last_call = [0.0]",
+  "Assign:V39_RETRY_SESSION = requests.Session()",
+  "FunctionDef+initializers:(10, 40); ()",
+  "FunctionDef+initializers:_v39_contract",
+  "Assign:_SSE_CN_TZ = _dt.timezone(_dt.timedelta(hours=8))"
+ ],
+ "initialization_nodes": [
+  {
+   "kind": "import",
+   "detail": "time",
+   "lineno": "10",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "random",
+   "lineno": "11",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "12",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'",
+   "lineno": "13",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "DATACENTER_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get'",
+   "lineno": "14",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_SESSION = requests.Session()",
+   "lineno": "15",
+   "safe": "false"
+  },
+  {
+   "kind": "Try",
+   "detail": "",
+   "lineno": "16",
+   "safe": "false"
+  },
+  {
+   "kind": "import",
+   "detail": "from typing",
+   "lineno": "24",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_MIN_INTERVAL = 1.0",
+   "lineno": "25",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_em_last_call = [0.0]",
+   "lineno": "26",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "28",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "39",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "48",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "re",
+   "lineno": "49",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "json",
+   "lineno": "50",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "52",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "72",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "uuid",
+   "lineno": "73",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "75",
+   "safe": "true"
+  }
+ ],
+ "generated_module": "astock_gen_news",
+ "generated_module_sha256": "e7bc87cac93a4d5e0cc1fd660dca3553e93a9ec0fa9cd494d9acd5387ba2ef83",
+ "third_party_imports": [
+  "requests"
+ ]
+}

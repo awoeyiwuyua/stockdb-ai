@@ -1,0 +1,556 @@
+{
+ "schema_version": 1,
+ "vendor_root": "astock\\vendor\\candidate-main-02aa8b4d",
+ "upstream_commit": "02aa8b4d1316629e819cdc17a14297ca1a70edcd",
+ "source_file": "SKILL.md",
+ "source_file_sha256": "a774151626a5389b1eaf45d5d38f83314e96826bdf20fd25057fe4ca5bb6ccb8",
+ "vendor_tree_sha256": "78718f1e2734c5764756b3289835171349f601af2fe3832c7f15645da8b39d2a",
+ "entry_symbols": [
+  "sse_e_interaction",
+  "_sse_time",
+  "_sse_required_time",
+  "_sse_parse_feed",
+  "_sse_text",
+  "_sse_company_uid",
+  "_sse_company_page",
+  "cninfo_irm"
+ ],
+ "selected_blocks": [
+  {
+   "index": 1,
+   "sha256": "43a05af128a6f10cd14c3c8c59093a32e68454b33d27f9af5e72afe49d11fd45",
+   "symbols": [
+    "get_prefix"
+   ],
+   "imports": []
+  },
+  {
+   "index": 2,
+   "sha256": "72a4d20b1fca118adb95b5eed48b4bf3bd440b8cc52960b5ae75bc6159da98a2",
+   "symbols": [
+    "_natural_market",
+    "norm_ticker",
+    "em_market_code",
+    "em_secid",
+    "to_joinquant"
+   ],
+   "imports": [
+    "re"
+   ]
+  },
+  {
+   "index": 3,
+   "sha256": "9a045253336eba72b08f6c85cc52d612958e41e7f8e4fcc391d197d289e23e5a",
+   "symbols": [
+    "em_get",
+    "eastmoney_datacenter"
+   ],
+   "imports": [
+    "time",
+    "random",
+    "requests",
+    "typing"
+   ]
+  },
+  {
+   "index": 4,
+   "sha256": "cf4508a5d60850cef12b388e7b3321d52b893730bdd2ec3cc817df7e7ea58fd8",
+   "symbols": [
+    "_v39_http",
+    "_v39_json",
+    "_v39_date",
+    "_v39_src_date",
+    "_v39_num",
+    "_v39_rows",
+    "_v39_labels",
+    "_v39_req_num",
+    "_v39_contract",
+    "_v39_count",
+    "_v39_frame",
+    "_em_datacenter_strict",
+    "_em_day"
+   ],
+   "imports": [
+    "functools",
+    "math",
+    "re",
+    "datetime",
+    "pandas",
+    "requests"
+   ]
+  },
+  {
+   "index": 62,
+   "sha256": "0002f46911b6183134e6f0126f3be41a4078d467186e1c13509de7f31d032a51",
+   "symbols": [
+    "cninfo_irm"
+   ],
+   "imports": [
+    "requests",
+    "datetime"
+   ]
+  },
+  {
+   "index": 64,
+   "sha256": "560b1cbecbdaf9d34a6ccba2bec86c5cb3f55adf55101e5963dae8f0257d1ce2",
+   "symbols": [
+    "_sse_company_page",
+    "_sse_company_uid",
+    "_sse_text",
+    "_sse_time",
+    "_sse_required_time",
+    "_sse_parse_feed",
+    "sse_e_interaction"
+   ],
+   "imports": [
+    "datetime",
+    "html",
+    "re"
+   ]
+  }
+ ],
+ "initialization_allowlist": [
+  "Assign:EM_SESSION = requests.Session()",
+  "Expr:EM_SESSION.headers.update({'User-Agent': UA})",
+  "Try:",
+  "Assign:_em_last_call = [0.0]",
+  "Assign:V39_RETRY_SESSION = requests.Session()",
+  "FunctionDef+initializers:(10, 40); ()",
+  "FunctionDef+initializers:_v39_contract",
+  "Assign:_SSE_CN_TZ = _dt.timezone(_dt.timedelta(hours=8))"
+ ],
+ "initialization_nodes": [
+  {
+   "kind": "Assign",
+   "detail": "SH_INDEX = {'000300', '000905', '000016', '000688', '000852', '000010'}",
+   "lineno": "11",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "13",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "re",
+   "lineno": "32",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_TICKER_RE = re.compile('^(?:(sh|sz|bj)(\\\\d{6})|(\\\\d{6})(?:\\\\.(sh|sz|bj|xshg|xshe))?)$', re.I",
+   "lineno": "33",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_JQ_SUFFIX = {'xshg': 'sh', 'xshe': 'sz'}",
+   "lineno": "34",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "36",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "45",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "73",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "83",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "87",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "time",
+   "lineno": "100",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "random",
+   "lineno": "101",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "102",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'",
+   "lineno": "103",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "DATACENTER_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get'",
+   "lineno": "104",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_SESSION = requests.Session()",
+   "lineno": "105",
+   "safe": "false"
+  },
+  {
+   "kind": "Try",
+   "detail": "",
+   "lineno": "106",
+   "safe": "false"
+  },
+  {
+   "kind": "import",
+   "detail": "from typing",
+   "lineno": "114",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "EM_MIN_INTERVAL = 1.0",
+   "lineno": "115",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_em_last_call = [0.0]",
+   "lineno": "116",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "118",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "129",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "functools",
+   "lineno": "138",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "math",
+   "lineno": "139",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "re",
+   "lineno": "140",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "from datetime",
+   "lineno": "141",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "pandas",
+   "lineno": "143",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "144",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "V39_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like",
+   "lineno": "146",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "V39_RETRY_SESSION = requests.Session()",
+   "lineno": "152",
+   "safe": "false"
+  },
+  {
+   "kind": "Try",
+   "detail": "",
+   "lineno": "153",
+   "safe": "false"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "166",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "183",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "192",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "203",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "211",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "233",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "243",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "253",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "261",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "274",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "283",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "293",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "366",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "requests",
+   "lineno": "371",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "from datetime",
+   "lineno": "372",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "374",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "datetime",
+   "lineno": "396",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "html",
+   "lineno": "397",
+   "safe": "true"
+  },
+  {
+   "kind": "import",
+   "detail": "re",
+   "lineno": "398",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "SSE_E_BASE = 'https://sns.sseinfo.com'",
+   "lineno": "400",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_CN_TZ = _dt.timezone(_dt.timedelta(hours=8))",
+   "lineno": "401",
+   "safe": "false"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_sse_uid_cache = {}",
+   "lineno": "402",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_sse_company_pages = {}",
+   "lineno": "403",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_COMPANY_END = '没有任何上市公司的信息'",
+   "lineno": "404",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_EMPTY_NOTE = re.compile('class=\"m_feed_note\"[^>]*>[^<]*(暂无|暂时没有)[^<]*<')",
+   "lineno": "406",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "409",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "430",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "453",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_ABS_TIME = re.compile('(\\\\d{4})\\\\s*[年\\\\-/]\\\\s*(\\\\d{1,2})\\\\s*[月\\\\-/]\\\\s*(\\\\d{1,2})\\\\s*日?\\\\s*",
+   "lineno": "459",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_DAY_WORD_TIME = re.compile('^(今天|昨天|前天)\\\\s*(\\\\d{1,2}):(\\\\d{2})$')",
+   "lineno": "460",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_MONTH_DAY_TIME = re.compile('^(\\\\d{1,2})-(\\\\d{1,2})\\\\s+(\\\\d{1,2}):(\\\\d{2})$')",
+   "lineno": "461",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_AGO_TIME = re.compile('^(\\\\d+)\\\\s*(秒|分钟|小时|天)前$')",
+   "lineno": "462",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_CLOCK_TIME = re.compile('^(\\\\d{1,2}):(\\\\d{2})$')",
+   "lineno": "463",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_DAY_WORD = {'今天': 0, '昨天': 1, '前天': 2}",
+   "lineno": "464",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_AGO_UNIT = {'秒': 'seconds', '分钟': 'minutes', '小时': 'hours', '天': 'days'}",
+   "lineno": "465",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "468",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "522",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef",
+   "detail": "",
+   "lineno": "530",
+   "safe": "true"
+  },
+  {
+   "kind": "Assign",
+   "detail": "_SSE_KIND = {'answered': 11, 'questions': 10}",
+   "lineno": "564",
+   "safe": "true"
+  },
+  {
+   "kind": "FunctionDef+initializers",
+   "detail": "_v39_contract",
+   "lineno": "568",
+   "safe": "false"
+  }
+ ],
+ "generated_module": "astock_gen_qa",
+ "generated_module_sha256": "1696ea9889e37adb527e23dc93a1a0c60e64879e8cff6fe2adc67cb5657b54cf",
+ "third_party_imports": [
+  "pandas",
+  "requests"
+ ]
+}

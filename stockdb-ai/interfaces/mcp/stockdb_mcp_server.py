@@ -1705,6 +1705,7 @@ def _merge_auction_days(
     start_iso: str,
     end_iso: str,
     include_distribution: bool,
+    codes: list[str] | None = None,
 ) -> tuple[str | None, dict | None, dict]:
     """研究成果预计算 + 竞价快照双源合并主流程：就地改写 days。
 
@@ -1724,8 +1725,9 @@ def _merge_auction_days(
     merged_dates: list[str] = []
     precomputed_dates: list[str] = []
     known_at_by_date: dict[str, str] = {}
+    is_subset = codes is not None
     for date_iso in sorted(snapshots_by_date):
-        daily = _precomputed_row(rd, date_iso, store)
+        daily = None if is_subset else _precomputed_row(rd, date_iso, store)
         if daily is not None:  # 预计算完整日级行优先（写端同源，无需 T-1 日K 判定）
             row = _row_from_daily(daily, date_iso, include_distribution)
             known_at_by_date[date_iso] = _precomputed_known_at(daily, date_iso)
@@ -1736,7 +1738,8 @@ def _merge_auction_days(
                 continue  # T-1 无日K（区间首日等）：无法判定，跳过该快照日期
             if not include_distribution:
                 row.pop("distribution", None)
-            _attach_auction_metrics(row, rd, date_iso, store)
+            if not is_subset:
+                _attach_auction_metrics(row, rd, date_iso, store)
             known_at_by_date[date_iso] = _auction_known_at(snapshots_by_date, date_iso)
         _overlay_day(days, row)
         merged_dates.append(date_iso)
@@ -1915,7 +1918,7 @@ def _query_board_open_effect_history_slow(
         days.append(item)
     # 0.7.0：研究成果预计算 / 竞价快照双源合并（当日段用预计算或采集表，历史段仍日K）
     auction_known_at, auction_error, merge_stats = _merge_auction_days(
-        snapshot, days, start_iso, end_iso, include_distribution
+        snapshot, days, start_iso, end_iso, include_distribution, codes=None if full_a_share_request else codes,
     )
     precomputed_dates = merge_stats.get("precomputed_dates") or []
     result = {
@@ -1930,7 +1933,7 @@ def _query_board_open_effect_history_slow(
         "fallback_reason": (
             None
             if precomputed_dates
-            else "区间交易日无预计算结果，已全市场重算"
+            else ("指定证券子集调试，按输入范围重算" if not full_a_share_request else "区间交易日无预计算结果，已全市场重算")
         ),
         "methodology": {
             "sample": "T-1沪深非ST、非一字板收盘涨停股",
@@ -2360,7 +2363,39 @@ def _warehouse_result_with_known_at(result: dict) -> dict:
 # === MCP 工具定义 ===
 
 
-TOOLS: list[dict] = [
+def _astock_tool_schemas() -> dict:
+    """M2 public-facts 两工具发布 schema（astock_wire 装配失败则旧版-only）。"""
+    try:
+        from interfaces.mcp import astock_wire
+        return astock_wire.published_tool_schemas()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+_ASTOCK_SCHEMAS = _astock_tool_schemas()
+
+
+def _astock_tools() -> list[dict]:
+    try:
+        from interfaces.mcp import astock_wire
+        descriptions = astock_wire.tool_descriptions()
+    except Exception:  # noqa: BLE001
+        descriptions = {}
+    tools = []
+    for name in ("get_public_records", "get_public_artifact"):
+        schema = _ASTOCK_SCHEMAS.get(name)
+        if not schema:
+            continue
+        tools.append({
+            "name": name,
+            "description": descriptions.get(name, name),
+            "inputSchema": schema["inputSchema"],
+            "outputSchema": schema["outputSchema"],
+        })
+    return tools
+
+
+TOOLS: list[dict] = _astock_tools() + [
     {
         "name": "get_kline",
         "description": (
@@ -3185,6 +3220,16 @@ def _call_tool(name: str, args: dict) -> dict:
     请求保持下方旧版路径与旧返回形状（互不影响）。
     """
     if market_v3 is not None and "contract_version" in (args or {}):
+        # M2（0.15.0）：public-facts 两工具先行于 market 分发
+        #（contract_version=stockdb-public-facts-v1 不被 market 分支接住）
+        try:
+            from interfaces.mcp.astock_wire import maybe_dispatch as _pf_dispatch
+        except Exception:  # noqa: BLE001 - 模块缺失仅降级新域，不影响旧路径
+            _pf_dispatch = None
+        if _pf_dispatch is not None:
+            pf_result = _pf_dispatch(name, args)
+            if pf_result is not None:
+                return pf_result
         v3_result = market_v3.maybe_dispatch(name, args)
         if v3_result is not None:
             return v3_result
@@ -3224,7 +3269,7 @@ def _call_tool(name: str, args: dict) -> dict:
             result = query_board_open_effect_history(
                 str(args.get("start", "")),
                 str(args.get("end", "")),
-                codes=None if codes is None else [str(code) for code in codes],
+                codes=None if codes is None else [str(code).strip().split("/")[-1] for code in codes if str(code).strip()],
                 limit=int(args.get("limit", 0) or 0),
                 workers=int(args.get("workers", 16) or 16),
                 include_distribution=bool(args.get("include_distribution", False)),
@@ -3287,7 +3332,13 @@ def _call_tool(name: str, args: dict) -> dict:
             result = _sdk_call_tool(name, args)
         except ValueError as exc:
             return _value_error_result(exc)
-        except RuntimeError as exc:
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code:
+                return _error_result(str(exc), code, hint=getattr(exc, "hint", None))
+            exc_str = str(exc)
+            if any(m in exc_str.lower() for m in ("tcp connect error", "connection timed out", "connection refused", "os error 110", "os error 111")):
+                return _error_result(exc_str, "SOURCE_UNAVAILABLE")
             return _error_result(str(exc), ERROR_INTERNAL_ERROR)
     elif name == "warehouse_run":
         # 0.10.15：仓库沉淀/回填触发（动作类工具）——单飞/守卫/幂等在 services 层，
@@ -3477,6 +3528,11 @@ def dispatch(msg: dict, group: str | None = None) -> dict | None:
 
 
 def run_stdio() -> None:
+    try:
+        import interfaces.mcp.market_v3 as market_v3
+        market_v3.HEALTH.start()
+    except Exception:
+        pass
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -3554,6 +3610,11 @@ class _MCPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def run_http(host: str, port: int) -> None:
     """启动 ThreadingHTTPServer（每请求一个线程，多 agent 并发安全）。"""
+    try:
+        import interfaces.mcp.market_v3 as market_v3
+        market_v3.HEALTH.start()
+    except Exception:
+        pass
     httpd = http.server.ThreadingHTTPServer((host, port), _MCPRequestHandler)
     print(
         f"{SERVER_NAME} HTTP server listening on http://{host}:{port} "

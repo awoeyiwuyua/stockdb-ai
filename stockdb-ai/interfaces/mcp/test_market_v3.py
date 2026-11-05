@@ -264,9 +264,14 @@ class RequestValidationTest(V3TestCase):
                              "XSHG/index/exchange/000300")
 
     def test_index_ths_namespace_refused(self):
-        env = self.kline(code="CN/board/ths/886044")
-        self._assert_refusal(env, "UNSUPPORTED_ASSET",
-                             "CN/board/ths/886044")
+        # Index ths namespace and unsupported board namespace (e.g. sw) refused UNSUPPORTED_ASSET
+        env_idx = self.kline(code="XSHG/index/ths/000001")
+        self._assert_refusal(env_idx, "UNSUPPORTED_ASSET", "XSHG/index/ths/000001")
+        env_sw = self.kline(code="CN/board/sw/801010")
+        self._assert_refusal(env_sw, "UNSUPPORTED_ASSET", "CN/board/sw/801010")
+        # Unregistered ths board code refused UNKNOWN_INSTRUMENT
+        env_unreg_ths = self.kline(code="CN/board/ths/889999")
+        self._assert_refusal(env_unreg_ths, "UNKNOWN_INSTRUMENT", "CN/board/ths/889999")
 
     def test_unregistered_board_refused(self):
         env = self.kline(code="CN/board/eastmoney/BK9999")
