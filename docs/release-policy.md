@@ -222,3 +222,12 @@ git push origin main   # 本仓库有规则集要求走 PR → 推分支 + PR �
   的合并需推分支走 PR（GitHub branch-protection API 对规则集不显示，以推送报错
   为准）
 - **复发即重跑**：上游后续再有提交，behind 会重新出现，重复本节操作
+
+### 6.5 特性分支合入 main 与多余分支清理流程（SOP）
+
+日常特性分支或修复分支（如 ix/*、eature/*）开发完毕后，遵循统一 SOP 合入 main 并彻底清理本地与远端多余分支：
+
+1. **自动脚本（推荐）**：运行 python scripts/merge_to_main_and_cleanup.py --branch <branch_name>；
+2. **流程收敛**：本地 --no-ff 合入 main -> 删除本地分支 -> 删除远端原分支 -> 推送临时发布分支走 PR 合入 -> 删除远端临时分支 -> git pull 与 git fetch --prune；
+3. **完整流程文档**：详见 [docs/ops/branch-cleanup-and-merge-workflow.md](./ops/branch-cleanup-and-merge-workflow.md)。
+
