@@ -162,6 +162,7 @@ try {
 # 8. 拉取最新 main 并修剪
 Write-Host "Step 6: Pulling remote merge commit to local main..."
 Run-GitCommand "git pull origin main"
+Run-GitCommand "git branch -u origin/main main"
 
 Write-Host "Step 7: Pruning remote tracking references..."
 Run-GitCommand "git fetch origin --prune"
