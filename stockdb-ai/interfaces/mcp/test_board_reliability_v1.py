@@ -74,10 +74,11 @@ class TestBoardReliabilityV1(unittest.TestCase):
         br.WORKER.stop()
         v3.HEALTH.stop()
         # 重置提供者闸门与研究状态
-        br.EM_GATE.record_success()
-        br.THS_GATE.record_success()
-        br.EM_GATE._state.cooldown_until = 0.0
-        br.THS_GATE._state.cooldown_until = 0.0
+        br.EM_GATE.reset()
+        br.THS_GATE.reset()
+        em_st = r._em_client_state()
+        dict.__setitem__(em_st, 'cooldown_until', 0.0)
+        dict.__setitem__(em_st, 'backoff_streak', 0)
         r._EM_LAST_STATE["fail_at"] = 0.0
         r._EM_LAST_STATE["ok_at"] = time.time()
         r._EM_LAST_STATE["fail_reason"] = ""

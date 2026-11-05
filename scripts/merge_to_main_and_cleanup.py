@@ -186,6 +186,7 @@ def main():
         # 7. Pull back to main
         print("Step 6: Pulling remote merge commit to local main...")
         run_git(['pull', 'origin', 'main'])
+        run_git(['branch', '-u', 'origin/main', 'main'])
 
     # 8. Prune tracking branches
     print("Step 7: Pruning obsolete remote tracking references...")

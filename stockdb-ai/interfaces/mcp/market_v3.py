@@ -503,16 +503,20 @@ def catalog_codes(*, max_age: float = _CATALOG_TTL) -> tuple[set[str] | None, st
 
 
 def engine_latest_trade_date(*, timeout: float = 5.0) -> str | None:
-    """引擎最新交易日（探 000001 近三个月前缀取最大 date）。"""
+    """引擎最新交易日（探 000001 近三个月前缀取最大 date，总耗时受 timeout 约束）。"""
     now = datetime.now()
     latest = None
+    deadline = time.time() + timeout
     for offset in (0, 1, 2):
+        rem = deadline - time.time()
+        if rem <= 0.05:
+            break
         idx = now.year * 12 + (now.month - 1) - offset
         y, m = divmod(idx, 12)
         y, m = y, m + 1
         try:
             data = engine_get(f"日k:000001:{y:04d}{m:02d}*", cmd="vals",
-                              timeout=timeout)
+                              timeout=rem)
         except EngineFailure:
             continue
         for row in _normalize_rows(data):
@@ -596,8 +600,11 @@ class _EngineHealth:
     def start(self) -> None:
         """显式启动后台健康探测线程。"""
         with self._lock:
-            if self._running and self._thread is not None and self._thread.is_alive():
-                return
+            if self._thread is not None and self._thread.is_alive():
+                if not self._stop_event.is_set():
+                    return
+                raise RuntimeError("health probe is currently stopping; previous thread still terminating")
+
             self._running = True
             self._stop_event.clear()
             self._state["probe_state"] = "probing"
@@ -610,18 +617,23 @@ class _EngineHealth:
     def stop(self, timeout: float = 2.0) -> None:
         """显式停止后台健康探测线程并释放资源。"""
         with self._lock:
-            if not self._running:
+            if not self._running and (self._thread is None or not self._thread.is_alive()):
                 return
             self._running = False
             self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
+            th = self._thread
+        if th and th.is_alive():
+            th.join(timeout=timeout)
         with self._lock:
-            self._state["probe_state"] = "unstarted" if self._state["latest"] is None else "stopped"
+            if th and th.is_alive():
+                self._state["probe_state"] = "stopping"
+            else:
+                self._state["probe_state"] = "unstarted" if self._state["latest"] is None else "stopped"
+                self._thread = None
 
     def is_running(self) -> bool:
         with self._lock:
-            return bool(self._running and self._thread and self._thread.is_alive())
+            return bool(self._thread is not None and self._thread.is_alive())
 
     def _refresh(self) -> None:
         try:
@@ -680,7 +692,19 @@ class _EngineHealth:
     def peek(self) -> dict[str, Any]:
         """纯只读查看当前状态，绝不启动线程、不触网、不阻塞。"""
         with self._lock:
-            return dict(self._state)
+            th_alive = bool(self._thread is not None and self._thread.is_alive())
+            is_stopping = bool(self._stop_event.is_set() and th_alive)
+            st = dict(self._state)
+            st["thread_alive"] = th_alive
+            st["stopping"] = is_stopping
+            if is_stopping:
+                st["probe_state"] = "stopping"
+                st["lifecycle_state"] = "stopping"
+            elif self._running and th_alive:
+                st["lifecycle_state"] = "running"
+            else:
+                st["lifecycle_state"] = "stopped"
+            return st
 
     def get(self) -> dict[str, Any]:
         """纯只读查看当前状态，不靠首个用户行情请求启动线程。"""

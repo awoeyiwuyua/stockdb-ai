@@ -62,3 +62,13 @@ stockdb-ai/test_research_*/
 stockdb-ai/test_trace_*/
 stockdb-ai/v3rs-*/
 stockdb-ai/acceptance-*/
+
+# Local ephemeral test artifacts and patches
+/.tmp-*/
+/evidence/
+/scratch/
+/stockdb-candidate-*/
+/*.patch
+/stockdb_v3_snapshots/
+stockdb-ai/evidence/consumer_observations/
+/stockdb-*.zip
