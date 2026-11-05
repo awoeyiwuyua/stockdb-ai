@@ -39,6 +39,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import interfaces.mcp.board_reliability as br
+
 # 0.14.0：补充合同 stockdb-market-v3-research-extension 1.0.0（A 指数/板块日K +
 # B 复权因子与 R/F/A 快照链）。research 缺失只影响扩展分支，core 不受影响。
 try:  # noqa: E402
@@ -572,50 +574,129 @@ def engine_version_label() -> str | None:
 
 
 class _EngineHealth:
-    """后台线程定期探测引擎（最新交易日），get() 只读缓存、恒快返回。"""
+    """后台线程定期探测引擎（最新交易日）。由服务明确生命周期管理，get()/peek() 只读缓存、恒快返回。"""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._state: dict[str, Any] = {"latest": None, "checked_at": None,
-                                       "ok": False, "error": None}
+        self._running = False
+        self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._state: dict[str, Any] = {
+            "probe_state": "unstarted",
+            "latest": None,
+            "checked_at": None,
+            "started_at": None,
+            "last_success_at": None,
+            "last_failure_at": None,
+            "ok": False,
+            "error": None,
+            "retry_count": 0,
+        }
+
+    def start(self) -> None:
+        """显式启动后台健康探测线程。"""
+        with self._lock:
+            if self._running and self._thread is not None and self._thread.is_alive():
+                return
+            self._running = True
+            self._stop_event.clear()
+            self._state["probe_state"] = "probing"
+            self._state["started_at"] = _now_iso()
+            self._thread = threading.Thread(
+                target=self._loop, name="market-v3-health", daemon=True
+            )
+            self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """显式停止后台健康探测线程并释放资源。"""
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+            self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        with self._lock:
+            self._state["probe_state"] = "unstarted" if self._state["latest"] is None else "stopped"
+
+    def is_running(self) -> bool:
+        with self._lock:
+            return bool(self._running and self._thread and self._thread.is_alive())
 
     def _refresh(self) -> None:
         try:
+            with self._lock:
+                self._state["probe_state"] = "probing"
             latest = engine_latest_trade_date(timeout=_HEALTH_PROBE_TIMEOUT)
+            now_str = _now_iso()
+            with self._lock:
+                if latest:
+                    self._state.update(
+                        probe_state="ready",
+                        latest=latest,
+                        ok=True,
+                        error=None,
+                        checked_at=now_str,
+                        last_success_at=now_str,
+                        retry_count=0,
+                    )
+                else:
+                    self._state.update(
+                        probe_state="failed",
+                        latest=None,
+                        ok=False,
+                        error="engine returned no data",
+                        checked_at=now_str,
+                        last_failure_at=now_str,
+                        retry_count=self._state.get("retry_count", 0) + 1,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            now_str = _now_iso()
+            is_timeout = isinstance(exc, (TimeoutError, urllib.error.URLError)) and (
+                isinstance(exc, TimeoutError) or "timed out" in str(exc).lower()
+            )
             with self._lock:
                 self._state.update(
-                    latest=latest, ok=latest is not None,
-                    error=None if latest else "engine returned no data",
-                    checked_at=_now_iso())
-        except Exception as exc:  # noqa: BLE001
-            with self._lock:
-                self._state.update(ok=False, error=str(exc)[:200],
-                                   checked_at=_now_iso())
+                    probe_state="timeout" if is_timeout else "failed",
+                    ok=False,
+                    error=f"engine probe {'timeout' if is_timeout else 'error'}: {str(exc)[:160]}",
+                    checked_at=now_str,
+                    last_failure_at=now_str,
+                    retry_count=self._state.get("retry_count", 0) + 1,
+                )
 
     def _loop(self) -> None:
-        while True:
+        # 服务启动后立即进行初次探测
+        self._refresh()
+        while not self._stop_event.is_set():
+            if self._stop_event.wait(timeout=_HEALTH_REFRESH_SECONDS):
+                break
             self._refresh()
-            time.sleep(_HEALTH_REFRESH_SECONDS)
 
     def ensure_started(self) -> None:
-        with self._lock:
-            if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(
-                    target=self._loop, name="market-v3-health", daemon=True)
-                self._thread.start()
+        """兼容保留：显式生命周期推荐使用 start()。"""
+        self.start()
 
-    def get(self) -> dict[str, Any]:
-        self.ensure_started()
+    def peek(self) -> dict[str, Any]:
+        """纯只读查看当前状态，绝不启动线程、不触网、不阻塞。"""
         with self._lock:
             return dict(self._state)
 
-    def inject(self, latest: str | None) -> None:
+    def get(self) -> dict[str, Any]:
+        """纯只读查看当前状态，不靠首个用户行情请求启动线程。"""
+        return self.peek()
+
+    def inject(self, latest: str | None, *, probe_state: str | None = None, error: str | None = None) -> None:
         """测试注入：直接设置缓存状态。"""
         with self._lock:
-            self._state.update(latest=latest, ok=latest is not None,
-                               error=None if latest else "injected",
-                               checked_at=_now_iso())
+            p_state = probe_state or ("ready" if (latest and not error) else "failed")
+            self._state.update(
+                probe_state=p_state,
+                latest=latest,
+                ok=latest is not None and error is None,
+                error=error if error else (None if latest else "injected_failure"),
+                checked_at=_now_iso(),
+            )
 
 
 HEALTH = _EngineHealth()
@@ -700,11 +781,28 @@ def _server_identity() -> dict:
     srv = _srv()
     build_id = os.environ.get("STOCKDB_BUILD_ID") or ""
     commit = os.environ.get("STOCKDB_BUILD_COMMIT") or ""
+    image_digest = os.environ.get("STOCKDB_IMAGE_DIGEST") or None
+
+    # 若环境变量缺失任一发布身份字段，尝试从源码根目录下的 build_identity.json 兜底加载
+    if not commit or not build_id or not image_digest:
+        try:
+            for parent_depth in (2, 3):
+                id_path = Path(__file__).resolve().parents[parent_depth] / "build_identity.json"
+                if id_path.is_file():
+                    with open(id_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                        commit = commit or meta.get("source_commit") or meta.get("commit") or ""
+                        build_id = build_id or meta.get("build_id") or ""
+                        image_digest = image_digest or meta.get("image_digest") or meta.get("image_id") or None
+                    break
+        except Exception:
+            pass
+
     if not build_id:
         build_id = f"src+{srv.SERVER_VERSION}+{commit[:12] if commit else 'nogit'}"
     return {"name": srv.SERVER_NAME, "version": srv.SERVER_VERSION,
             "build_id": build_id, "source_commit": commit or None,
-            "image_digest": os.environ.get("STOCKDB_IMAGE_DIGEST") or None,
+            "image_digest": image_digest,
             "started_at": _process_started_at.isoformat()}
 
 
@@ -1106,7 +1204,7 @@ def _error_meta(identity: Identity, *, expected: int | None) -> dict:
                                          if identity.verified else None)),
         },
         "status": "error",
-        "units": (research.series_units(identity.asset_type)
+        "units": (research.series_units(identity.asset_type, identity.namespace)
                   if is_research_series else _units_block(identity)),
         "adjustment": {"mode": "none", "anchor_date": None,
                        "factor_snapshot_id": None, "algorithm": None},
@@ -1135,7 +1233,14 @@ def get_kline_v3(args: dict) -> dict:
         return _kline_from_snapshot(query, request_hash)
 
     # -- 身份核验（目录不可用 → 逐码 SOURCE_UNAVAILABLE）--
-    catalog, catalog_retrieved = catalog_codes()
+    all_research_series = all(
+        parse_instrument_id(key)[1] in ("index", "board")
+        for key in codes
+    )
+    if all_research_series:
+        catalog, catalog_retrieved = set(), _now_iso()
+    else:
+        catalog, catalog_retrieved = catalog_codes()
     identities: dict[str, Identity] = {}
     fetch_errors: dict[str, V3Error] = {}
     for key in codes:
@@ -1196,12 +1301,13 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
             continue
         identity = identities[key]
         if identity.asset_type in ("index", "board"):
-            # 0.14.0 A 批：指数（腾讯 ifzq 三主机→新浪 轮转）/板块（eastmoney）
-            kinds[key] = (identity.asset_type, None)  # 失败序列也进目录
+            # 0.14.0 A 批：指数（腾讯 ifzq 三主机→新浪 轮转）/板块（eastmoney，
+            # 0.16.0 起持久缓存+风控退避+缺口补采）
+            kinds[key] = (identity.asset_type, None, {})  # 失败序列也进目录
             try:
-                _kind, provider, rows = research.fetch_series_rows(
+                _kind, provider, rows, fetch_meta = research.fetch_series_rows(
                     key, query["start"], query["end"])
-                kinds[key] = (_kind, provider)
+                kinds[key] = (_kind, provider, fetch_meta)
                 rows_by_code[key] = rows
             except (research.ResearchError, V3Error) as exc:
                 code = getattr(exc, "code", "SOURCE_UNAVAILABLE")
@@ -1231,33 +1337,46 @@ def _kline_fetch_and_build(query, request_hash, codes, identities, fetch_errors,
     if total_rows > MAX_RESPONSE_ROWS:
         return _kline_result_too_large(query, request_hash, total_rows)
 
-    health = HEALTH.get()
-    latest = health.get("latest")
-    if latest is None:
-        latest = engine_latest_trade_date()
+    if all(identities[k].asset_type in ("index", "board") for k in codes if k in identities):
+        latest = br.compute_target_trade_date_shanghai()
+        bar_states: dict[str, str] = {}
+        for key, rows in rows_by_code.items():
+            if rows:
+                max_date = max((str(r.get("date8") or r.get("date"))[:8])
+                               for r in rows)
+                bar_states[key] = _bar_state_for(max_date, latest)
+        sources = {}
+    else:
+        health = HEALTH.peek()
+        latest = health.get("latest")
+        if latest is None and not HEALTH.is_running():
+            latest = engine_latest_trade_date()
 
-    # -- bar_state 冻结于捕获时刻（快照重读不再重算）--
-    bar_states: dict[str, str] = {}
-    for key, rows in rows_by_code.items():
-        if rows:
-            max_date = max((str(r.get("date8") or r.get("date"))[:8])
-                           for r in rows)
-            bar_states[key] = _bar_state_for(max_date, latest)
+        # -- bar_state 冻结于捕获时刻（快照重读不再重算）--
+        bar_states: dict[str, str] = {}
+        for key, rows in rows_by_code.items():
+            if rows:
+                max_date = max((str(r.get("date8") or r.get("date"))[:8])
+                               for r in rows)
+                bar_states[key] = _bar_state_for(max_date, latest)
 
-    sources = {
-        IDENTITY_SOURCE_ID: _identity_source(catalog_retrieved),
-        SEGMENT_SOURCE_ID: _segment_source(catalog_retrieved),
-        BARS_SOURCE_ID: _source_record(
-            retrieved_at=_now_iso(), reference=(
-                "urn:stockdb:engine:日k:<code>:<date-prefix> (engine daily "
-                "kline tables over HTTP, unadjusted)"),
-            finality=_bars_finality_evidence()),
-    }
-    for key, (kind, provider) in kinds.items():
-        # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析
+        sources = {
+            IDENTITY_SOURCE_ID: _identity_source(catalog_retrieved),
+            SEGMENT_SOURCE_ID: _segment_source(catalog_retrieved),
+            BARS_SOURCE_ID: _source_record(
+                retrieved_at=_now_iso(), reference=(
+                    "urn:stockdb:engine:日k:<code>:<date-prefix> (engine daily "
+                    "kline tables over HTTP, unadjusted)"),
+                finality=_bars_finality_evidence()),
+        }
+    for key, (kind, provider, fetch_meta) in kinds.items():
+        # 失败序列的来源也登记：错误 meta 的 identity_source_id 必须可解析。
+        # 板块缓存服务时 retrieved_at 取窗口内最旧真实取得时间（不伪标实时抓取）
         sources[research.series_source_id(key)] = (
-            research.series_source_record(kind, key, _now_iso(),
-                                          provider=provider))
+            research.series_source_record(
+                kind, key, (fetch_meta or {}).get("retrieved_at")
+                or _now_iso(),
+                provider=provider, fetch_meta=fetch_meta or {}))
     snapshot_id = SNAPSHOTS.new_id("kline")
     # E01（消费方反馈）：所有 v3 行情响应（含 R/长历史/普通 core）都携带价格
     # 序列研究元数据——扩展校验器对一切带 query 的 KlineResponse 强制
@@ -1410,7 +1529,8 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
         is_research_series = identity.asset_type in ("index", "board")
         if is_research_series:
             name = (research.INDEX_SERIES.get(key, {}).get("name")
-                    or research.BOARD_SERIES.get(key, {}).get("name"))
+                    or research.BOARD_SERIES.get(key, {}).get("name")
+                    or research.THS_BOARD_SERIES.get(key, {}).get("name"))
         else:
             name = rows[-1].get("name") if rows else None
         if coverage_state == "complete":
@@ -1429,7 +1549,7 @@ def _kline_build_response(query, request_hash, codes, identities, fetch_errors,
                                        else IDENTITY_SOURCE_ID),
             },
             "status": instrument_status,
-            "units": (research.series_units(identity.asset_type)
+            "units": (research.series_units(identity.asset_type, identity.namespace)
                       if is_research_series else _units_block(identity)),
             "adjustment": {"mode": "none", "anchor_date": None,
                            "factor_snapshot_id": None, "algorithm": None},
@@ -1482,8 +1602,17 @@ def _kline_result_too_large(query, request_hash, size) -> dict:
 
 
 def _snapshot_or_error(snapshot_id: str) -> tuple[dict | None, V3Error | None]:
-    """快照读取：不存在→SNAPSHOT_NOT_FOUND；过期→SNAPSHOT_EXPIRED（不重抓实时值）。"""
-    item = SNAPSHOTS.get(snapshot_id)
+    """快照读取：不存在→SNAPSHOT_NOT_FOUND；过期→SNAPSHOT_EXPIRED（不重抓实时值）；损坏→SNAPSHOT_CORRUPTED。"""
+    try:
+        item = SNAPSHOTS.get(snapshot_id)
+    except Exception as exc:
+        if type(exc).__name__ == "SnapshotCorruptedError" or isinstance(exc, br.SnapshotCorruptedError):
+            return None, V3Error(
+                "SNAPSHOT_CORRUPTED",
+                f"快照 {snapshot_id} 文件已损坏，无法解析: {exc}",
+                details={"snapshot_id": snapshot_id, "reason": str(exc)},
+            )
+        raise
     if item is None:
         return None, V3Error(
             "SNAPSHOT_NOT_FOUND",
@@ -1558,16 +1687,30 @@ def _kline_from_snapshot(query, request_hash) -> dict:
     expected_by_code = {key: _expected_slots(identities[key].exchange,
                                              query["start"], query["end"])
                         for key in query["codes"]}
+    # C11: 回放时 source_catalog 仅保留请求子集的源条目
+    requested_sources = {}
+    requested_code_set = set(query["codes"])
+    target_series_ids = {research.series_source_id(c) for c in requested_code_set} if research is not None else set()
+    for s_id, s_info in payload.get("sources", {}).items():
+        if s_id in target_series_ids or any(s_id == f"series-{code}" or s_id.startswith(f"series-{code}:") or s_info.get("instrument_id") == code for code in requested_code_set):
+            requested_sources[s_id] = s_info
+        elif not s_id.startswith("series-"):
+            has_core = any(identities[c].asset_type not in ("index", "board") for c in requested_code_set if c in identities)
+            if has_core:
+                requested_sources[s_id] = s_info
+    if not requested_sources:
+        requested_sources = payload.get("sources", {})
+
     envelope = _kline_build_response(
         query, request_hash, query["codes"], identities, {},
-        expected_by_code, payload["sources"], query["snapshot_id"],
+        expected_by_code, requested_sources, query["snapshot_id"],
         rows_by_code, payload["bar_states"],
         prebuilt_bars=payload.get("kind") == "kline-adjusted")
     # E01：捕获时已带价格序列目录的快照（R/长历史/普通 core），重读与子范围
     # 读取同样返回 research 元数据（原始捕获不变）。
     if research is not None and payload.get("catalog"):
         envelope.update(research.research_extensions(
-            None, payload["catalog"]))
+            None, {k: v for k, v in payload["catalog"].items() if k in query["codes"]}))
     return envelope
 
 
@@ -1852,6 +1995,33 @@ _CORE_CAPS_EXCEPTIONS = [
 ]
 
 
+def _astock_lifecycle_status() -> dict:
+    """astock 上游升级状态（只读缓存；UPGRADE-RELEASE §1 拟新增扩展名）。"""
+    import json as _json
+    from pathlib import Path as _Path
+    out: dict = {"extension_contract": "stockdb-astock-provider-lifecycle",
+                 "extension_revision": "1.0.0"}
+    try:
+        obs_path = (_Path(__file__).resolve().parents[2] / "astock"
+                    / "observations.json")
+        if obs_path.exists():
+            history = _json.loads(obs_path.read_text(encoding="utf-8"))
+            last_ok = next((o for o in reversed(history)
+                            if o.get("status") != "query_failed"), None)
+            out["last_discovery"] = history[-1] if history else None
+            out["last_successful_observation"] = last_ok
+        store = (_Path(__file__).resolve().parents[2] / "astock"
+                 / "lifecycle-store.json")
+        if store.exists():
+            st = _json.loads(store.read_text(encoding="utf-8"))
+            out["active_candidate"] = st.get("active")
+            out["candidates"] = {k: v.get("state") for k, v in
+                                 (st.get("candidates") or {}).items()}
+    except Exception:  # noqa: BLE001 - 状态只读失败不影响核心
+        pass
+    return out
+
+
 def get_data_status_v3(args: dict | None = None) -> dict:
     if args:
         extra = set(args) - {"contract_version"}
@@ -1860,7 +2030,7 @@ def get_data_status_v3(args: dict | None = None) -> dict:
                 "INVALID_ARGUMENT", f"未知参数: {sorted(extra)}",
                 details={"unknown_parameters": sorted(extra)})])
     srv = _srv()
-    health = HEALTH.get()
+    health = HEALTH.peek()
     latest = health.get("latest")
     caps = []
     for exchange in ("XSHG", "XSHE"):
@@ -1900,7 +2070,34 @@ def get_data_status_v3(args: dict | None = None) -> dict:
                 profile["reason"] = "未实现"
     issues = []
     status = "ready"
-    if latest is None:
+    probe_state = health.get("probe_state", "unstarted")
+    if probe_state == "ready" and latest:
+        pass
+    elif probe_state == "unstarted":
+        status = "degraded"
+        issues.append({
+            "profile_id": "core_daily_v1",
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "引擎健康探测尚未启动（待服务生命周期初始化）",
+            "retryable": True,
+        })
+    elif probe_state == "probing":
+        status = "degraded"
+        issues.append({
+            "profile_id": "core_daily_v1",
+            "code": "SOURCE_UNAVAILABLE",
+            "message": "引擎健康探测正在进行中: probing（后台启动探测中）",
+            "retryable": True,
+        })
+    elif probe_state == "timeout":
+        status = "degraded"
+        issues.append({
+            "profile_id": "core_daily_v1",
+            "code": "SOURCE_TIMEOUT",
+            "message": f"引擎健康探测超时: {health.get('error') or 'timeout'}",
+            "retryable": True,
+        })
+    else:
         status = "degraded"
         issues.append({
             "profile_id": "core_daily_v1",
@@ -1910,7 +2107,7 @@ def get_data_status_v3(args: dict | None = None) -> dict:
                         "（后台每 60s 重试；行情读取不受影响，按逐码错误返回）"),
             "retryable": True,
         })
-    elif research is not None:
+    if status == "ready" and research is not None:
         # §8.3：可选能力当前不可用 → 如实 degraded 并逐项说明（只读缓存，不现查上游）
         em = research.em_board_availability()
         if em["fail_at"] > em["ok_at"]:
@@ -1949,7 +2146,25 @@ def get_data_status_v3(args: dict | None = None) -> dict:
         "extensions": {
             "notice": "core_daily_v1 首批已声明能力当前就绪不代表扩展能力可用",
             "snapshot_store_size": SNAPSHOTS.size(),
+            "core_health_probe_v1": {
+                "probe_state": probe_state,
+                "ok": health.get("ok", False),
+                "latest_trade_date": latest,
+                "checked_at": health.get("checked_at"),
+                "started_at": health.get("started_at"),
+                "last_success_at": health.get("last_success_at"),
+                "last_failure_at": health.get("last_failure_at"),
+                "error": health.get("error"),
+                "retry_count": health.get("retry_count", 0),
+                "thread_alive": HEALTH.is_running(),
+                "probe_timeout_s": _HEALTH_PROBE_TIMEOUT,
+                "refresh_interval_s": _HEALTH_REFRESH_SECONDS,
+            },
             **({"research_v1": research.research_status_metadata()}
+               if research is not None else {}),
+            **({"astock_lifecycle_v1": _astock_lifecycle_status()}
+               if research is not None else {}),
+            **({"board_reliability_v1": br.build_board_reliability_extension()}
                if research is not None else {}),
         },
     }

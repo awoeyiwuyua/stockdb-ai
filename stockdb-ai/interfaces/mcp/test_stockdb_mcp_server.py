@@ -359,6 +359,77 @@ class StockdbMcpServerTests(unittest.TestCase):
         self.assertAlmostEqual(result["days"][0]["average_open_return_pct"], 5.0)
         self.assertEqual(result["days"][0]["distribution"]["open_return_pct"], [5.0])
 
+    @mock.patch.object(server, "query_stock_list")
+    @mock.patch.object(server, "query_daily_kline")
+    @mock.patch.object(server, "_precomputed_row")
+    @mock.patch.object(server, "_read_auction_snapshots")
+    def test_board_open_effect_disjoint_codes_and_empty_samples(
+        self, mock_snaps, mock_pre, mock_kline, mock_stock_list
+    ):
+        mock_stock_list.return_value = {"total": 3, "codes": ["600001", "600002", "600003"]}
+        # 预计算行返回全市场35只其他股票（模拟线上场景）
+        mock_pre.return_value = {
+            "matched_count": 35,
+            "distribution": {"sample_codes": ["000530", "000701"], "open_return_pct": [1.0, 2.0]},
+            "average_open_return_pct": 1.5,
+        }
+        mock_snaps.return_value = ({}, True)
+
+        # 构造3只测试股票：600001(+5%涨停), 600002(+3%涨停), 600003(未涨停)
+        rows = {
+            "600001": [
+                {"date": 20260102, "open": 10.0, "high": 11.0, "low": 10.0, "close": 11.0, "pre_close": 10.0, "amount": 1, "is_st": False},
+                {"date": 20260105, "open": 11.55, "high": 11.6, "low": 11.0, "close": 11.2, "pre_close": 11.0, "amount": 1, "is_st": False},
+            ],
+            "600002": [
+                {"date": 20260102, "open": 20.0, "high": 22.0, "low": 20.0, "close": 22.0, "pre_close": 20.0, "amount": 1, "is_st": False},
+                {"date": 20260105, "open": 22.66, "high": 23.0, "low": 22.0, "close": 22.5, "pre_close": 22.0, "amount": 1, "is_st": False},
+            ],
+            "600003": [
+                {"date": 20260102, "open": 10.0, "high": 10.5, "low": 9.8, "close": 10.2, "pre_close": 10.0, "amount": 1, "is_st": False},
+                {"date": 20260105, "open": 10.2, "high": 10.3, "low": 10.0, "close": 10.1, "pre_close": 10.2, "amount": 1, "is_st": False},
+            ],
+        }
+        mock_kline.side_effect = lambda code, start, end, fields: rows.get(code, [])
+
+        # 1. 集合 A: ["600001"]
+        res_a = server.query_board_open_effect_history("20260105", "20260105", codes=["600001"], workers=1, include_distribution=True)
+        day_a = res_a["days"][0]
+        self.assertEqual(res_a["load_path"], "kline")
+        self.assertTrue(res_a["scope_is_partial"])
+        self.assertEqual(day_a["matched_count"], 1)
+        self.assertEqual(day_a["distribution"]["sample_codes"], ["600001"])
+        self.assertAlmostEqual(day_a["average_open_return_pct"], 5.0)
+
+        # 2. 集合 B: ["600002"]（不相交集合）
+        res_b = server.query_board_open_effect_history("20260105", "20260105", codes=["600002"], workers=1, include_distribution=True)
+        day_b = res_b["days"][0]
+        self.assertEqual(day_b["matched_count"], 1)
+        self.assertEqual(day_b["distribution"]["sample_codes"], ["600002"])
+        self.assertAlmostEqual(day_b["average_open_return_pct"], 3.0)
+
+        # 3. 集合 C: ["600003"]（空合格样本合法结果，绝不能被全市场35只填充）
+        res_c = server.query_board_open_effect_history("20260105", "20260105", codes=["600003"], workers=1, include_distribution=True)
+        day_c = res_c["days"][0]
+        self.assertEqual(res_c["load_path"], "kline")
+        self.assertEqual(day_c["matched_count"], 0)
+        self.assertEqual(day_c["distribution"]["sample_codes"], [])
+        self.assertEqual(day_c["distribution"]["open_return_pct"], [])
+        self.assertIsNone(day_c["average_open_return_pct"])
+        self.assertEqual(day_c["positive_count"], 0)
+        self.assertEqual(day_c["negative_count"], 0)
+        self.assertEqual(day_c["flat_count"], 0)
+
+        # 4. 汇总与分布一致性校验：matched_count == len(sample_codes) == len(open_return_pct)
+        for res, exp_cnt in ((res_a, 1), (res_b, 1), (res_c, 0)):
+            d = res["days"][0]
+            dist = d["distribution"]
+            self.assertEqual(d["matched_count"], exp_cnt)
+            self.assertEqual(len(dist["sample_codes"]), exp_cnt)
+            self.assertEqual(len(dist["open_return_pct"]), exp_cnt)
+            if exp_cnt > 0:
+                self.assertAlmostEqual(d["average_open_return_pct"], sum(dist["open_return_pct"]) / exp_cnt)
+
     @mock.patch.object(server, "query_board_open_effect_history")
     def test_mcp_dispatch_returns_json(self, query_history):
         query_history.return_value = {"days": [], "is_partial": False}
@@ -381,7 +452,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self.assertEqual(response["jsonrpc"], "2.0")
         self.assertEqual(response["id"], 1)
         tool_names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertEqual(len(tool_names), 16)  # 0.10.15：12 原生 + 4 warehouse（D12 + run）
+        self.assertEqual(len(tool_names), 18)  # 0.15.0：+2 astock public-facts
         self.assertIn("get_stock_list", tool_names)
         self.assertIn("warehouse_run_sql", tool_names)
         self.assertIn("get_board_open_effect_history", tool_names)
@@ -1446,7 +1517,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         payload = json.loads(response["result"]["content"][0]["text"])
         self.assertEqual(payload["latest_trade_date"], "20260813")
         self.assertFalse(payload["pybao_available"])
-        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
+        self.assertEqual(payload["tool_count"], 18)  # 0.15.0：+2 astock public-facts
 
     def test_get_data_status_ttl_dedup_single_http_round(self):
         with mock.patch.object(server, "_TTL", server._TTLCache()):
@@ -1930,7 +2001,7 @@ class StockdbMcpServerTests(unittest.TestCase):
         self._assert_envelope(
             payload, source="http", contract="status-v1", known_at="20260813",
         )
-        self.assertEqual(payload["tool_count"], 16)  # 0.10.15：12 原生 + 4 warehouse
+        self.assertEqual(payload["tool_count"], 18)  # 0.15.0：+2 astock public-facts
         self.assertFalse(payload["pybao_available"])
 
     @mock.patch.object(server, "_latest_trade_date")

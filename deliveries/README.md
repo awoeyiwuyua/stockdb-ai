@@ -9,6 +9,7 @@
 | 2026-10-25 | stockdb-research-extension-return-20261025.zip | 9df7ebb4a55d096def11765610cdc8d01d2fa4bee3dcad471085746526caa523 | 第一轮回传（0.14.0/6fe4803）；gzip-tar 打包缺陷、E01—E08 未修——存档保留 |
 | 2026-10-25 | stockdb-research-extension-return-20261025-r2.zip | cc3c069d511a0e721d490f24e2be825f1ba9a7c50e092526fd3d2b5fc5b41c29 | 第二轮回传（0.14.1/55c8e04）：E01—E08 修补 + 真 ZIP + baseline 补齐 |
 | 2026-10-25 | stockdb-adjusted-replay-return-20261025-r3.zip | ea3198667b07c8fc3b07c9cce34e06fdacc213478c2ea9673e30090bba82011e | 第三轮回传（0.14.2/30a0bbb）：A 快照重放 meta.adjustment 补修 + 全量证据 |
+| 2026-11-04 | stockdb-candidate-0.17.0-r4-20261104.zip | 0c5a1dda813ba6be99c0926fd17884837e28ed5ddae05679a266bfb3168f2146 | 0.17.0 第四轮增量修复候选包：健康探测生命周期解耦 + 收盘终结确认重叠巡检 + 东财版本证据 |
 
 对应版本/tag：0.13.x（market-v3-core-daily→schema-completion 线，
 tag v0.13.0/v0.13.1/v0.13.2）、v0.14.1（55c8e04 线）、v0.14.2（tag 指向
