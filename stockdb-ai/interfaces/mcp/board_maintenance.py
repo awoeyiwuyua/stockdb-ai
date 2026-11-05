@@ -3,7 +3,7 @@
 
 支持命令：
   - status: 查看各提供者闸门、补采 worker、快照与持久化健康状态
-  - backfill: 手动触发一轮缺口增量补采（支持 --force 穿透冷却，支持指定 --series）
+  - backfill: 手动触发一轮缺口增量补采（支持 --force 强制重检未变动序列，严格遵守各源冷却；支持指定 --series）
   - migrate-v1-to-v2: v1 扁平缓存至 v2 审计链与校验格式迁移（默认 preview，带 --apply 执行）
   - rollback-v2-to-v1: 将 v2 缓存安全回滚至迁移前备份的 v1 格式
   - cleanup-stale-tmp: 清理因进程异常崩溃留存的过期 .tmp 临时文件
@@ -71,12 +71,23 @@ def cmd_backfill(args: argparse.Namespace) -> int:
     else:
         summary = br.WORKER.run_once(force=args.force)
 
+    has_failure = False
+    for b in summary.get("boards", {}).values():
+        if b.get("action") in ("failed", "partial_failure") or b.get("rejected_count", 0) > 0 or b.get("error"):
+            has_failure = True
+            break
+    if not has_failure:
+        for ov in summary.get("overlap_inspected", {}).values():
+            if ov.get("status") in ("failed", "partial_failure") or ov.get("rejected_count", 0) > 0 or ov.get("errors") or ov.get("error"):
+                has_failure = True
+                break
+
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:
         print("Backfill completed:")
         print(json.dumps(summary, ensure_ascii=False, indent=2))
-    return 0
+    return 1 if has_failure else 0
 
 
 def cmd_migrate_v1_to_v2(args: argparse.Namespace) -> int:
@@ -271,12 +282,18 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
         except Exception as exc:
             results.append({"key": key, "error": str(exc), "status": "FAIL"})
 
+    has_failure = any(
+        res.get("status") in ("failed", "partial_failure", "FAIL")
+        or res.get("rejected_count", 0) > 0
+        or res.get("error")
+        for res in results
+    )
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
         for res in results:
             print(f"{res.get('key')}: revisions={res.get('revisions_count', 0)}, revised_dates={res.get('revised_dates', [])}, error={res.get('error')}")
-    return 0
+    return 1 if has_failure else 0
 
 
 def main() -> None:
@@ -292,7 +309,7 @@ def main() -> None:
     # backfill
     sub = subparsers.add_parser("backfill", help="手动执行缺口补采")
     sub.add_argument("--json", action="store_true", help="输出 JSON 格式")
-    sub.add_argument("--force", action="store_true", help="强制穿透提供者冷却期")
+    sub.add_argument("--force", action="store_true", help="强制重检未变动序列（严格遵守提供者冷却期）")
     sub.add_argument("--series", type=str, default=None, help="指定单序列规范键（如 CN/board/eastmoney/BK1408）")
     sub.set_defaults(func=cmd_backfill)
 

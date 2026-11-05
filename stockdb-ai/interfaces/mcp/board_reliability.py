@@ -752,14 +752,19 @@ class ProviderGate:
         self.min_interval_s = min_interval_ms / 1000.0
         self.base_cooldown_s = base_cooldown_s
         self.max_cooldown_s = max_cooldown_s
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._state = ProviderGateState()
+        self._generation = 0
 
-    def check_and_throttle(self, *, force: bool = False) -> None:
-        """检查冷却并在必要时等待最小请求间隔。处于冷却期时 fail-fast。"""
+    def get_generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def check_and_throttle(self, *, force: bool = False) -> int:
+        """检查冷却并在必要时等待最小请求间隔。处于冷却期时 fail-fast。返回请求代际。"""
         with self._lock:
             now = time.time()
-            if not force and now < self._state.cooldown_until:
+            if now < self._state.cooldown_until:
                 remaining = int(self._state.cooldown_until - now)
                 raise BoardReliabilityError(
                     "SOURCE_UNAVAILABLE",
@@ -775,32 +780,77 @@ class ProviderGate:
 
             self._state.last_request_time = time.time()
             self._state.requests_total += 1
+            return self._generation
 
-    def record_success(self) -> None:
+    def commit_success(self, generation: int, client_state: dict | None = None) -> bool:
+        """单一受锁 API：原子地比对请求代际并提交成功状态。
+        若 generation == self._generation（在途期间未发生新的失败/冷却），
+        则原子地清除门控冷却与退避惩罚，并同步清零传入的持久状态字典；
+        若代际落后，则严格拒绝清除较新的冷却保护，并将当前生效冷却同步回写至 client_state。
+        """
         with self._lock:
+            self.get_generation()
             self._state.requests_ok += 1
+            if generation != self._generation:
+                if client_state is not None:
+                    dict.__setitem__(client_state, "cooldown_until", self._state.cooldown_until)
+                    dict.__setitem__(client_state, "backoff_streak", self._state.backoff_streak)
+                return False
+
             self._state.backoff_streak = 0
             self._state.consecutive_failures = 0
             self._state.cooldown_until = 0.0
             self._state.last_failure_reason = None
+            if client_state is not None:
+                dict.__setitem__(client_state, "cooldown_until", 0.0)
+                dict.__setitem__(client_state, "backoff_streak", 0)
+            return True
 
-    def record_failure(self, reason: str, *, enter_cooldown: bool = False) -> float:
+    def record_success(self, *, generation: int | None = None) -> bool:
+        if generation is not None:
+            return self.commit_success(generation)
+        with self._lock:
+            self._state.requests_ok += 1
+            now = time.time()
+            if self._state.cooldown_until > now:
+                return False
+            self._state.backoff_streak = 0
+            self._state.consecutive_failures = 0
+            self._state.cooldown_until = 0.0
+            self._state.last_failure_reason = None
+            return True
+
+    def record_failure(self, reason: str, *, enter_cooldown: bool = False, cooldown_until: float | None = None) -> float:
         with self._lock:
             now = time.time()
             self._state.consecutive_failures += 1
             self._state.last_failure_reason = redact_sensitive(reason)
-            if enter_cooldown:
+            if enter_cooldown or cooldown_until is not None:
                 self._state.backoff_streak += 1
-                cooldown_duration = min(
-                    self.base_cooldown_s * (2 ** (self._state.backoff_streak - 1)),
-                    self.max_cooldown_s,
-                )
-                self._state.cooldown_until = now + cooldown_duration
+                self._generation += 1
+                if cooldown_until is not None:
+                    self._state.cooldown_until = max(self._state.cooldown_until, cooldown_until)
+                else:
+                    cooldown_duration = min(
+                        self.base_cooldown_s * (2 ** (self._state.backoff_streak - 1)),
+                        self.max_cooldown_s,
+                    )
+                    self._state.cooldown_until = max(self._state.cooldown_until, now + cooldown_duration)
             return self._state.cooldown_until
+
+    def sync_cooldown(self, cooldown_until: float, backoff_streak: int = 0) -> None:
+        with self._lock:
+            now = time.time()
+            if cooldown_until > self._state.cooldown_until and cooldown_until > now:
+                self._state.cooldown_until = cooldown_until
+                self._generation += 1
+            if backoff_streak > self._state.backoff_streak:
+                self._state.backoff_streak = backoff_streak
 
     def reset(self) -> None:
         with self._lock:
             self._state = ProviderGateState()
+            self._generation += 1
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
@@ -1038,8 +1088,10 @@ def migrate_v1_to_v2_apply(cache_dir: Path | None = None) -> dict[str, Any]:
         v1_bak_path = file_path.with_suffix(".v1.bak.json")
         try:
             raw_bytes = file_path.read_bytes()
-            # 1. 严格保留旧格式原件备份
-            atomic_write_json(v1_bak_path, json.loads(raw_bytes.decode("utf-8")), backup=False)
+            # 1. 严格保留旧格式原件备份（字节级精确复制）
+            tmp_bak = v1_bak_path.with_suffix(".tmp")
+            tmp_bak.write_bytes(raw_bytes)
+            tmp_bak.replace(v1_bak_path)
 
             # 2. 升级为 v2 结构
             store = json.loads(raw_bytes.decode("utf-8"))
@@ -1086,12 +1138,14 @@ def rollback_v2_to_v1(cache_dir: Path | None = None) -> dict[str, Any]:
         try:
             # 1. 先保留当前新缓存副本，绝不清空数据
             if primary_path.exists():
-                v2_data = json.loads(primary_path.read_text(encoding="utf-8"))
-                atomic_write_json(v2_preserve_path, v2_data, backup=False)
+                tmp_v2 = v2_preserve_path.with_suffix(".tmp")
+                tmp_v2.write_bytes(primary_path.read_bytes())
+                tmp_v2.replace(v2_preserve_path)
 
-            # 2. 恢复原 v1 内容
-            v1_data = json.loads(v1_bak.read_text(encoding="utf-8"))
-            atomic_write_json(primary_path, v1_data, backup=True)
+            # 2. 恢复原 v1 内容（字节级精确恢复）
+            tmp_pri = primary_path.with_suffix(".tmp")
+            tmp_pri.write_bytes(v1_bak.read_bytes())
+            tmp_pri.replace(primary_path)
             rolled_back += 1
         except Exception as exc:
             errors.append({"file": primary_name, "error": str(exc)})
@@ -1131,11 +1185,25 @@ def reconcile_series_cache(
         added_dates: list[str] = []
         any_changed_meta = False
 
+        errors: list[dict[str, Any]] = []
+        validated_count = 0
+        accepted_count = 0
+        rejected_count = 0
+
         for row in upstream_rows:
+            validated_count += 1
             try:
                 val_row = validate_ohlc_record(row, target_trade_date=target_t, instrument_id=key)
-            except Exception:
+            except Exception as exc:
+                rejected_count += 1
+                errors.append({
+                    "row": row,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                })
                 continue
+
+            accepted_count += 1
             d = val_row["date8"]
             entry = {
                 "open": val_row["open"],
@@ -1192,18 +1260,39 @@ def reconcile_series_cache(
                 bars[d] = entry
                 added_dates.append(d)
 
+        if rejected_count > 0 and accepted_count == 0:
+            return {
+                "key": key,
+                "status": "failed",
+                "validated_count": validated_count,
+                "accepted_count": 0,
+                "rejected_count": rejected_count,
+                "revised_dates": [],
+                "added_dates": [],
+                "revisions_count": 0,
+                "meta_updated": False,
+                "total_bars": len(bars),
+                "errors": errors,
+            }
+
         if revised_dates or added_dates or any_changed_meta:
             store["updated_at"] = now_iso
             store["version"] = int(store.get("version", 1)) + 1
             save_board_cache(key, store, cache_dir=cache_dir)
 
+        status = "success" if rejected_count == 0 else "partial_failure"
         return {
             "key": key,
+            "status": status,
+            "validated_count": validated_count,
+            "accepted_count": accepted_count,
+            "rejected_count": rejected_count,
             "revisions_count": len(revised_dates),
             "revised_dates": revised_dates,
             "added_count": len(added_dates),
             "meta_updated": any_changed_meta,
             "total_bars": len(bars),
+            "errors": errors,
         }
 
 
@@ -1268,28 +1357,36 @@ class BoardBackfillWorker:
         self._active_task: str | None = None
 
     def start(self) -> None:
-        if not config.BOARD_BACKFILL_ENABLED:
+        if not getattr(config, "BOARD_BACKFILL_ENABLED", False):
             return
         with self._lock:
-            if self._running:
-                return
+            if self._thread is not None and self._thread.is_alive():
+                if not self._stop_event.is_set():
+                    # 线程正常运行中，重复 start 幂等，不产生重复线程
+                    return
+                raise RuntimeError("worker is currently stopping; previous thread still terminating")
+
             self._running = True
             self._stop_event.clear()
             self._thread = threading.Thread(target=self._run_loop, name="board-backfill-worker", daemon=True)
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 2.0) -> None:
         with self._lock:
-            if not self._running:
+            if not self._running and (self._thread is None or not self._thread.is_alive()):
                 return
             self._running = False
             self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            th = self._thread
+        if th and th.is_alive():
+            th.join(timeout=timeout)
+        with self._lock:
+            if self._thread and not self._thread.is_alive():
+                self._thread = None
 
     def is_running(self) -> bool:
         with self._lock:
-            return self._running
+            return bool(self._thread is not None and self._thread.is_alive())
 
     def _run_loop(self) -> None:
         # 初始延迟
@@ -1320,11 +1417,20 @@ class BoardBackfillWorker:
             self._last_attempt_at = now_str
 
         summary: dict[str, Any] = {"started_at": now_str, "boards": {}, "skipped": None}
-        success = False
+        has_failure = False
         try:
             summary = r.board_backfill_cycle(force=force)
-            success = True
+            for b in summary.get("boards", {}).values():
+                if b.get("action") in ("failed", "partial_failure") or b.get("rejected_count", 0) > 0 or b.get("error"):
+                    has_failure = True
+                    break
+            if not has_failure:
+                for ov in summary.get("overlap_inspected", {}).values():
+                    if ov.get("status") in ("failed", "partial_failure") or ov.get("rejected_count", 0) > 0 or ov.get("errors") or ov.get("error"):
+                        has_failure = True
+                        break
         except Exception:
+            has_failure = True
             with self._lock:
                 self._last_failure_at = datetime.now(timezone.utc).astimezone(_SHANGHAI_TZ).isoformat(timespec="seconds")
             raise
@@ -1334,15 +1440,24 @@ class BoardBackfillWorker:
                 self._last_cycle_at = time.time()
                 self._last_summary = summary
                 self._active_task = None
-                if success:
+                if not has_failure:
                     self._last_success_at = finish_str
+                else:
+                    self._last_failure_at = finish_str
         return summary
 
     def get_state(self) -> dict[str, Any]:
         with self._lock:
+            th_alive = bool(self._thread is not None and self._thread.is_alive())
+            is_stopping = bool(self._stop_event.is_set() and th_alive)
+            is_running = bool(self._running and th_alive and not self._stop_event.is_set())
+            lifecycle_state = "stopping" if is_stopping else ("running" if is_running else "stopped")
             return {
                 "enabled": config.BOARD_BACKFILL_ENABLED,
-                "running": self._running,
+                "running": is_running,
+                "thread_alive": th_alive,
+                "stopping": is_stopping,
+                "lifecycle_state": lifecycle_state,
                 "active_task": self._active_task,
                 "task_budget_seconds": getattr(config, "BOARD_BACKFILL_TASK_BUDGET_SECONDS", 180),
                 "overlap_days": getattr(config, "BOARD_OVERLAP_DAYS", 5),

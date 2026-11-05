@@ -346,6 +346,94 @@ class _EmLastState(dict):
         except Exception:
             pass
 
+class _EmClientStateDict(dict):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+    def _get_gate(self) -> Any:
+        try:
+            import interfaces.mcp.board_reliability as br
+            return br.EM_GATE
+        except Exception:
+            return None
+
+    def __getitem__(self, key: Any) -> Any:
+        if key == "cooldown_until":
+            val = float(super().get("cooldown_until") or 0.0)
+            gate = self._get_gate()
+            if gate is not None:
+                with gate._lock:
+                    return max(val, float(gate._state.cooldown_until or 0.0))
+            return val
+        if key == "backoff_streak":
+            val = int(super().get("backoff_streak") or 0)
+            gate = self._get_gate()
+            if gate is not None:
+                with gate._lock:
+                    return max(val, int(gate._state.backoff_streak or 0))
+            return val
+        return super().__getitem__(key)
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        gate = self._get_gate()
+        now = time.time()
+        if key == "cooldown_until":
+            try:
+                v = float(value or 0.0)
+                if gate is not None:
+                    with gate._lock:
+                        now = time.time()
+                        if gate._state.cooldown_until > now:
+                            # 活跃保护期：严格单调，对所有输入（正数/0/负数/过时值）绝不降低生效保护
+                            effective = max(gate._state.cooldown_until, v)
+                            if effective > gate._state.cooldown_until:
+                                gate._state.cooldown_until = effective
+                                gate._generation += 1
+                            super().__setitem__(key, effective)
+                        else:
+                            # 门控未处于活跃冷却：允许设置新冷却或保持
+                            if v > now:
+                                gate._state.cooldown_until = v
+                                gate._generation += 1
+                                super().__setitem__(key, v)
+                            else:
+                                gate._state.cooldown_until = 0.0
+                                super().__setitem__(key, 0.0)
+                else:
+                    super().__setitem__(key, v)
+            except Exception:
+                super().__setitem__(key, value)
+            return
+
+        if key == "backoff_streak":
+            try:
+                st = int(value or 0)
+                if gate is not None:
+                    with gate._lock:
+                        now = time.time()
+                        if gate._state.cooldown_until > now:
+                            # 活跃保护期：退避阶数严格单调，普通写入绝不降低当前惩罚
+                            effective_st = max(gate._state.backoff_streak, st)
+                            gate._state.backoff_streak = effective_st
+                            super().__setitem__(key, effective_st)
+                        else:
+                            # 门控未处于活跃冷却：允许更新退避阶数
+                            gate._state.backoff_streak = max(0, st)
+                            super().__setitem__(key, max(0, st))
+                else:
+                    super().__setitem__(key, st)
+            except Exception:
+                super().__setitem__(key, value)
+            return
+
+        super().__setitem__(key, value)
+
 _EM_LAST_STATE: dict[str, Any] = _EmLastState({
     "ok_at": 0.0, "fail_at": 0.0, "fail_reason": None,
     "cooldown_until": 0.0, "backoff_streak": 0,
@@ -393,16 +481,16 @@ def _em_client_state() -> dict:
         cached = _EM_LAST_STATE.get("_client_state")
     if cached is not None:
         return cached
-    state: dict[str, Any] = {}
+    state: dict[str, Any] = _EmClientStateDict()
     path = None
     try:
         path = _board_cache_dir() / "em_client_state.json"
         if path.exists():
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                state = loaded
+                state = _EmClientStateDict(loaded)
     except Exception:  # noqa: BLE001 - 状态读不到就从零开始
-        state = {}
+        state = _EmClientStateDict()
     if not state.get("qgqp_b_id"):
         import secrets
         state["qgqp_b_id"] = secrets.token_hex(16)
@@ -455,20 +543,16 @@ def _em_is_waf_drop(exc: Exception) -> bool:
 def _em_enter_cooldown(reason: str, drop_class: str) -> float:
     """进入全局风控冷却（指数退避）。返回冷却截止 epoch。"""
     state = _em_client_state()
-    state["backoff_streak"] = int(state.get("backoff_streak", 0)) + 1
-    streak = state["backoff_streak"]
-    cooldown = min(_EM_WAF_COOLDOWN_BASE * (2 ** (streak - 1)),
-                   _EM_WAF_COOLDOWN_MAX)
-    state["cooldown_until"] = time.time() + cooldown
+    until = br.EM_GATE.record_failure(reason, enter_cooldown=True)
+    state["cooldown_until"] = until
+    with br.EM_GATE._lock:
+        effective_until = float(br.EM_GATE._state.cooldown_until or 0.0)
+        effective_streak = int(br.EM_GATE._state.backoff_streak or 0)
+    state["backoff_streak"] = effective_streak
     _em_persist_state()
-    try:
-        br.EM_GATE._state.cooldown_until = state["cooldown_until"]
-        br.EM_GATE._state.backoff_streak = streak
-    except Exception:
-        pass
-    _em_record(False, reason, cooldown_until=state["cooldown_until"],
-               backoff_streak=streak, last_drop_class=drop_class)
-    return state["cooldown_until"]
+    _em_record(False, reason, cooldown_until=effective_until,
+               backoff_streak=effective_streak, last_drop_class=drop_class)
+    return effective_until
 
 
 def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
@@ -480,22 +564,29 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
     风控冷却期内 fail-fast（不触网，如实 SOURCE_UNAVAILABLE）；waf_drop 触发
     全局退避且不再轮转同簇主机（连发只会加深惩罚）；仅超时/网络不可达轮转。
     """
+    gate_st = br.EM_GATE.get_status()
     state = _em_client_state()
     now = time.time()
-    cooldown_until = float(state.get("cooldown_until") or 0.0)
-    if now < cooldown_until:
-        remaining = int(cooldown_until - now)
+    st_cooldown = float(state.get("cooldown_until") or 0.0)
+    gate_cooldown = float(gate_st.get("cooldown_remaining_s", 0) + now if gate_st["in_cooldown"] else 0.0)
+    effective_cooldown = max(st_cooldown, gate_cooldown)
+    effective_streak = max(int(state.get("backoff_streak") or 0), gate_st.get("backoff_streak", 0))
+
+    # 向上合并状态，绝不降级清除既有冷却
+    br.EM_GATE.sync_cooldown(effective_cooldown, effective_streak)
+
+    if gate_st["in_cooldown"] or now < effective_cooldown:
+        remaining = max(gate_st.get("cooldown_remaining_s", 0), int(effective_cooldown - now))
         _em_record(False, f"风控冷却中（剩余 {remaining}s 不触网）",
-                   cooldown_until=cooldown_until,
-                   backoff_streak=int(state.get("backoff_streak") or 0),
+                   cooldown_until=effective_cooldown,
+                   backoff_streak=effective_streak,
                    last_drop_class="waf_cooldown")
         raise ResearchError(
             "SOURCE_UNAVAILABLE",
-            f"eastmoney 板块源处于风控退避期（上次静默断连后冷却，"
-            f"剩余 {remaining}s）；期间不触网重试，避免维持封禁状态；"
+            f"eastmoney 板块源处于风控退避期（剩余 {remaining}s 不触网）；"
             "已有缓存如实服务，缺口按合同上报",
             details={"cooldown_remaining_s": remaining,
-                     "backoff_streak": state.get("backoff_streak"),
+                     "backoff_streak": effective_streak,
                      "reason": "waf_backoff_cooldown"})
     errors: list[str] = []
     for idx, host in enumerate(_EM_HOSTS):
@@ -509,6 +600,7 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
             with _EM_STATE_LOCK:
                 _EM_LAST_STATE["requests_total"] = (
                     _EM_LAST_STATE.get("requests_total", 0) + 1)
+            req_gen = br.EM_GATE.check_and_throttle()
             data = _http_json(url, referer=_EM_REFERER.format(secid=secid),
                               timeout=timeout, headers=_em_headers(secid))
             try:
@@ -545,13 +637,14 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
                 continue
             rows[d] = {"date8": d, "open": parts[1], "close": parts[2],
                        "high": parts[3], "low": parts[4]}
-        state["backoff_streak"] = 0
-        state["cooldown_until"] = 0.0
-        _em_persist_state()
         with _EM_STATE_LOCK:
             _EM_LAST_STATE["requests_ok"] = (
                 _EM_LAST_STATE.get("requests_ok", 0) + 1)
         _em_record(True)
+        # 单一受锁 API：代际比较、决定是否清除、更新状态由 gate 原子完成
+        # 持久字典不得绕过该决定反向清除新冷却
+        if br.EM_GATE.commit_success(req_gen, client_state=state):
+            _em_persist_state()
         return [rows[k] for k in sorted(rows)]
     # 全主机超时/网络不可达（非风控断连）：如实失败，不进风控退避
     _em_record(False, "; ".join(errors)[:400])
@@ -608,6 +701,14 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
     - today.js 合并：若 end8 >= 当天且 year.js 尚未包含当天，且 today.js 有有效数据，则合并
     - 各行提取：date8, open, high, low, close（保留原始 3 位小数精度字符串）
     """
+    gate_st = br.THS_GATE.get_status()
+    if gate_st["in_cooldown"]:
+        rem = gate_st["cooldown_remaining_s"]
+        raise ResearchError(
+            "SOURCE_UNAVAILABLE",
+            f"ths 板块源处于风控退避期（剩余 {rem}s 不触网）；已有缓存如实服务，缺口按合同上报",
+            details={"cooldown_remaining_s": rem, "provider": "ths", "reason": "waf_backoff_cooldown"},
+        )
     start_year = int(start8[:4])
     end_year = int(end8[:4])
     today8 = datetime.now().strftime("%Y%m%d")
@@ -624,6 +725,7 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
             _THS_LAST_STATE["requests_total"] = (
                 _THS_LAST_STATE.get("requests_total", 0) + 1)
         try:
+            br.THS_GATE.check_and_throttle()
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
@@ -667,6 +769,15 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
 
     # 当天盘中或盘后尚未打入年度包时，尝试从 today.js 补齐当天
     if end8 >= today8 and today8 not in rows_by_date and (start8 <= today8 <= end8):
+        try:
+            br.THS_GATE.check_and_throttle()
+        except br.BoardReliabilityError as exc:
+            rem = br.THS_GATE.get_status().get("cooldown_remaining_s", 0)
+            raise ResearchError(
+                "SOURCE_UNAVAILABLE",
+                f"ths 板块源处于风控退避期: {exc}",
+                details={"code": code, "provider": "ths", "cooldown_remaining_s": rem},
+            ) from exc
         url_today = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/today.js"
         referer = f"https://d.10jqka.com.cn/v6/line/bk_{code}/01/"
         headers = {"User-Agent": _UA, "Referer": referer}
@@ -1108,7 +1219,7 @@ def board_backfill_cycle(*, force: bool = False) -> dict:
         is_ths = key in THS_BOARD_SERIES
         gate = br.THS_GATE if is_ths else br.EM_GATE
         gate_status = gate.get_status()
-        if not force and gate_status["in_cooldown"]:
+        if gate_status["in_cooldown"]:
             summary["boards"][key] = {
                 "action": "skipped_cooldown",
                 "provider": gate.name,
@@ -1142,21 +1253,15 @@ def board_backfill_cycle(*, force: bool = False) -> dict:
         else:
             summary["boards"][key] = {"action": "complete", "gap_count": 0}
 
-        # 2. 受控重叠巡检与终结再确认（检查最近 overlap_days 是否存在 pending_yearly_archive 或盘后修订）
+        # 2. 受控重叠巡检与终结再确认（检查最近 overlap_days 窗口内的数据是否有更新/终结再确认）
         store = br.load_board_cache(key)
         bars = store.get("bars", {})
         recent_dates = sorted(bars.keys())[-overlap_days:] if bars else []
-        needs_reconcile = False
-        for rd in recent_dates:
-            bar_entry = bars.get(rd, {})
-            if bar_entry.get("bar_state") == "preliminary" or bar_entry.get("archive_status") == "pending_yearly_archive":
-                needs_reconcile = True
-                break
 
-        if needs_reconcile and not (not force and gate.get_status()["in_cooldown"]):
+        if recent_dates and not gate.get_status()["in_cooldown"]:
             try:
                 rec_start = recent_dates[0]
-                rec_end = target_d8
+                rec_end = max(recent_dates[-1], target_d8)
                 if is_ths:
                     meta = THS_BOARD_SERIES[key]
                     new_rows = fetch_ths_board_daily(meta["code"], rec_start, rec_end)
@@ -1165,13 +1270,29 @@ def board_backfill_cycle(*, force: bool = False) -> dict:
                     meta = BOARD_SERIES[key]
                     new_rows = eastmoney_board_daily(meta["secid"], rec_start, rec_end)
                     rec_res = br.reconcile_series_cache(key, new_rows, provider="eastmoney", reason="closing_overlap_inspection")
-                summary["overlap_inspected"][key] = {
+                ov_status = rec_res.get("status", "success")
+                rej_count = rec_res.get("rejected_count", 0)
+                ov_entry = {
+                    "status": ov_status,
                     "revisions": rec_res.get("revisions_count", 0),
                     "revised_dates": rec_res.get("revised_dates", []),
                     "meta_updated": rec_res.get("meta_updated", False),
+                    "rejected_count": rej_count,
+                    "accepted_count": rec_res.get("accepted_count", 0),
                 }
+                if rec_res.get("errors"):
+                    ov_entry["errors"] = rec_res["errors"]
+                summary["overlap_inspected"][key] = ov_entry
+
+                if ov_status in ("failed", "partial_failure") or rej_count > 0:
+                    summary["boards"][key] = {
+                        "action": ov_status,
+                        "rejected_count": rej_count,
+                        "errors": rec_res.get("errors", []),
+                    }
             except Exception as exc:
-                summary["overlap_inspected"][key] = {"error": str(exc)[:120]}
+                summary["overlap_inspected"][key] = {"status": "failed", "error": str(exc)[:120]}
+                summary["boards"][key] = {"action": "failed", "error": str(exc)[:120]}
 
         time.sleep(0.05)
 
