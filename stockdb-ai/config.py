@@ -53,7 +53,7 @@ STOCKDB_LOG_FILE: Path = Path(os.environ.get("STOCKDB_LOG_FILE", "/data/log.txt"
 # 版本号（发布物标识，见 docs/release-policy.md）
 # 单源：webui（interfaces/web/handlers.py）与 MCP（interfaces/mcp/stockdb_mcp_server.py
 # 的 SERVER_VERSION，0.10.36 起）都读这里，禁止在他处硬编码版本串。
-WEBUI_VERSION: str = "0.16.0"
+WEBUI_VERSION: str = "0.17.0"
 
 # ---- 打板调度触发点（HH:MM，非法值回退默认） ----
 # 独立函数保留（0.9.2 随调度模块归位）；默认值与历史行为一致
@@ -111,3 +111,35 @@ HK_SYNC_YEARS: int = _env_int("HK_SYNC_YEARS", 2)
 
 # ---- 上游访问闸门（并发上限，0.6.4 熔断器配套） ----
 STOCKDB_MAX_CONCURRENCY: int = _env_int("STOCKDB_MAX_CONCURRENCY", 8)
+
+# ---- 板块日频可靠服务层（0.17.0 stockdb-board-reliability-v1） ----
+BOARD_BACKFILL_ENABLED: bool = os.environ.get(
+    "STOCKDB_V3_BOARD_BACKFILL", "1"
+).strip().lower() not in ("0", "off", "false", "no")
+BOARD_BACKFILL_INITIAL_DELAY_SECONDS: int = _env_int(
+    "STOCKDB_V3_BOARD_BACKFILL_INITIAL_DELAY_SECONDS", 90
+)
+BOARD_BACKFILL_INTERVAL_SECONDS: int = _env_int(
+    "STOCKDB_V3_BOARD_BACKFILL_INTERVAL_SECONDS", 1200
+)
+BOARD_BACKFILL_TASK_BUDGET_SECONDS: int = _env_int(
+    "STOCKDB_V3_BOARD_BACKFILL_TASK_BUDGET_SECONDS", 180
+)
+BOARD_OVERLAP_DAYS: int = _env_int("STOCKDB_V3_BOARD_OVERLAP_DAYS", 5)
+BOARD_EM_MIN_INTERVAL_MS: int = _env_int("STOCKDB_V3_BOARD_EM_MIN_INTERVAL_MS", 1500)
+BOARD_THS_MIN_INTERVAL_MS: int = _env_int("STOCKDB_V3_BOARD_THS_MIN_INTERVAL_MS", 800)
+BOARD_CACHE_ONLY: bool = os.environ.get(
+    "STOCKDB_V3_BOARD_CACHE_ONLY", "0"
+).strip().lower() in ("1", "true", "yes", "on")
+# 新增快照实际保留时长（>= 7 天合同下限；默认 14 天以覆盖真实七日后复验裕度，不回写旧快照）
+SNAPSHOT_EFFECTIVE_TTL_SECONDS: int = _env_int(
+    "STOCKDB_V3_SNAPSHOT_EFFECTIVE_TTL_SECONDS", 14 * 86400
+)
+# 已过期快照墓碑保留时长（重启后仍可明确区分 SNAPSHOT_EXPIRED 与 SNAPSHOT_NOT_FOUND）
+SNAPSHOT_EXPIRED_GRACE_SECONDS: int = _env_int(
+    "STOCKDB_V3_SNAPSHOT_EXPIRED_GRACE_SECONDS", 7 * 86400
+)
+BOARD_WARM_CACHE_MIN_DAYS: int = _env_int(
+    "STOCKDB_V3_BOARD_WARM_CACHE_MIN_DAYS", 100
+)
+

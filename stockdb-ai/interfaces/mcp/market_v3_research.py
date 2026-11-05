@@ -33,6 +33,9 @@ from decimal import Decimal, ROUND_HALF_UP, getcontext
 from pathlib import Path
 from typing import Any
 
+import config
+import interfaces.mcp.board_reliability as br
+
 getcontext().prec = 50  # Decimal 精度：12 位系数 × 8 位价格远小于 50 位
 
 EXTENSION_CONTRACT = "stockdb-market-v3-research-extension"
@@ -320,8 +323,8 @@ def tencent_index_daily(symbol: str, start8: str, end8: str, *,
 #   4. 缺口补采——请求路径合并补采 + 低频后台巡检（冷却许可时按缺口窗口拉取）。
 # ---------------------------------------------------------------------------
 
-_EM_HOSTS = ("92.push2his.eastmoney.com", "21.push2his.eastmoney.com",
-             "40.push2his.eastmoney.com", "push2his.eastmoney.com")
+_EM_HOSTS = ("push2his.eastmoney.com", "92.push2his.eastmoney.com",
+             "21.push2his.eastmoney.com", "40.push2his.eastmoney.com")
 _EM_REFERER = "https://quote.eastmoney.com/bk/{secid}.html"
 # 站点网页同款公开 token（quote.eastmoney.com 页面 JS 实测携带，非凭证）
 _EM_UT = "fa5fd1943c7b386f172d6893dbfba10b"
@@ -333,11 +336,21 @@ _EM_WAF_COOLDOWN_MAX = 4 * 3600.0
 _EM_HOST_RETRY_SLEEP = 2.0  # 轮转下一主机前的最小间隔（同簇主机不连发）
 
 _EM_STATE_LOCK = threading.Lock()
-_EM_LAST_STATE: dict[str, Any] = {
+
+class _EmLastState(dict):
+    def clear(self):
+        super().clear()
+        try:
+            import interfaces.mcp.board_reliability as br
+            br.EM_GATE.reset()
+        except Exception:
+            pass
+
+_EM_LAST_STATE: dict[str, Any] = _EmLastState({
     "ok_at": 0.0, "fail_at": 0.0, "fail_reason": None,
     "cooldown_until": 0.0, "backoff_streak": 0,
     "last_drop_class": None, "requests_total": 0, "requests_ok": 0,
-}
+})
 _EM_BACKFILL_STATE: dict[str, Any] = {"last_cycle_at": 0.0, "last_summary": None}
 
 
@@ -448,6 +461,11 @@ def _em_enter_cooldown(reason: str, drop_class: str) -> float:
                    _EM_WAF_COOLDOWN_MAX)
     state["cooldown_until"] = time.time() + cooldown
     _em_persist_state()
+    try:
+        br.EM_GATE._state.cooldown_until = state["cooldown_until"]
+        br.EM_GATE._state.backoff_streak = streak
+    except Exception:
+        pass
     _em_record(False, reason, cooldown_until=state["cooldown_until"],
                backoff_streak=streak, last_drop_class=drop_class)
     return state["cooldown_until"]
@@ -493,6 +511,10 @@ def eastmoney_board_daily(secid: str, start8: str, end8: str, *,
                     _EM_LAST_STATE.get("requests_total", 0) + 1)
             data = _http_json(url, referer=_EM_REFERER.format(secid=secid),
                               timeout=timeout, headers=_em_headers(secid))
+            try:
+                br.store_raw_provenance("eastmoney", secid, data, metadata={"url": url, "start8": start8, "end8": end8})
+            except Exception:
+                pass
         except Exception as exc:  # noqa: BLE001 - 逐主机分类收集失败原因
             desc = f"{host}: {type(exc).__name__}: {exc}"[:160]
             errors.append(desc)
@@ -605,6 +627,11 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 text = resp.read().decode("utf-8", errors="replace")
+            yearly_hash = None
+            try:
+                yearly_hash = br.store_raw_provenance("ths", f"bk_{code}_{year}", text, metadata={"url": url, "year": year})
+            except Exception:
+                pass
             obj = _parse_ths_jsonp(text)
             data_str = obj.get("data", "")
             for line in data_str.split(";"):
@@ -623,6 +650,9 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
                     "high": parts[2],
                     "low": parts[3],
                     "close": parts[4],
+                    "source_evidence": "yearly_archive",
+                    "archive_status": "archived",
+                    "raw_hash": yearly_hash,
                 }
             years_fetched += 1
         except urllib.error.HTTPError as exc:
@@ -644,12 +674,27 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
             req = urllib.request.Request(url_today, headers=headers)
             with urllib.request.urlopen(req, timeout=min(timeout, 4.0)) as resp:
                 text_today = resp.read().decode("utf-8", errors="replace")
+            today_hash = None
+            try:
+                today_hash = br.store_raw_provenance("ths", f"bk_{code}_today", text_today, metadata={"url": url_today})
+            except Exception:
+                pass
             obj_today = _parse_ths_jsonp(text_today)
             val = obj_today.get(f"bk_{code}") or {}
             d_today = str(val.get("1") or "")
             if d_today == today8 and val.get("7") and val.get("11"):
                 is_open = int(val.get("open") or 0)
-                bar_state = "preliminary" if is_open == 1 else "final"
+                sh_now = br.get_shanghai_time()
+                # 盘中（15:00之前）采集的值绝对不能标为 final（午休 11:30-13:00 open=0 仍为未终结盘中值）
+                if sh_now.strftime("%Y%m%d") == today8 and sh_now.hour < 15:
+                    bar_state = "preliminary"
+                    archive_status = "intraday_provisional"
+                elif sh_now.strftime("%Y%m%d") == today8 and sh_now.hour == 15 and sh_now.minute < 30:
+                    bar_state = "preliminary"
+                    archive_status = "post_close_provisional"
+                else:
+                    bar_state = "final" if is_open != 1 else "preliminary"
+                    archive_status = "pending_yearly_archive"
                 rows_by_date[d_today] = {
                     "date8": d_today,
                     "open": str(val["7"]),
@@ -657,6 +702,9 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
                     "low": str(val.get("9") or val["7"]),
                     "close": str(val["11"]),
                     "bar_state": bar_state,
+                    "source_evidence": "today_js",
+                    "archive_status": archive_status,
+                    "raw_hash": today_hash,
                 }
         except Exception:
             pass  # today.js 失败不阻止已取得的历史日K返回
@@ -683,232 +731,347 @@ def fetch_ths_board_daily(code: str, start8: str, end8: str, *,
     return [rows_by_date[d] for d in sorted(rows_by_date)]
 
 
-def ths_board_daily_cached(key: str, code: str, start8: str, end8: str, *,
-                           timeout: float = 8.0) -> tuple[list[dict], dict]:
-    """同花顺板块日K读取（缓存优先合并）：→ (行, cache_info)。
+def _board_cache_dir() -> Path:
+    return br.get_board_cache_dir()
 
-    - 上游成功：逐日 upsert 并写入独立缓存文件；服务窗口 = 源行 ∪ 缓存行（按日合并）。
-    - 上游失败且缓存覆盖窗口内有真实已取日：如实以缓存服务（缺口由基线
-      expected-slots 机制上报 partial + INCOMPLETE_COVERAGE，绝无虚造）；
-      cache_info.cache_served=True、retrieved_at=窗口内最旧已取时间。
-    - 上游失败且窗口内无任何缓存：原样抛出。
+
+def _board_cache_path(key: str) -> Path:
+    return br.get_board_cache_path(key)
+
+
+def _board_cache_load(key: str) -> dict:
+    return br.load_board_cache(key)
+
+
+def _board_cache_save(key: str, store: dict) -> None:
+    br.save_board_cache(key, store)
+
+
+def _query_series_cached(key: str, identifier: str, *, is_ths: bool,
+                         start8: str, end8: str,
+                         timeout: float = 8.0) -> tuple[list[dict], dict]:
+    """统一板块日K缓存读取与增量补采引擎。
+    
+    1. 计算 Asia/Shanghai 交易时钟目标交易日 target_t（>=15:00:00 冻结当日为最新已完成交易日 T，15:00 前为上一交易日）。
+    2. 若请求区间 [start8, min(end8, target_t)] 在本地已完整覆盖（预期交易日均存在且 bar_state 为 final），
+       直接内存/磁盘返回，绝不发出任何上游网络请求（upstream_calls == 0），retrieved_at 保留原始已取时间戳。
+    3. 若存在缺口且未开启 BOARD_CACHE_ONLY：
+       - 利用 single_flight_series 进行单系列去重；
+       - 通过 ProviderGate（EM_GATE 或 THS_GATE）独立限流与故障隔离，若在冷却期则 fail-fast 服务已有缓存；
+       - 针对缺失区间增量拉取上游（包含 BOARD_OVERLAP_DAYS 安全重叠）；
+       - 执行 validate_ohlc_record 行级几何与精度校验；
+       - 若出现历史修订，记录完整 append-only 修订链；
+       - atomic_write_json 配合 cross_process_file_lock 落盘，OSError 显式抛出不静默吞掉。
     """
-    store = _board_cache_load(key)
-    bars = store.setdefault("bars", {})
-    now_iso = _now_iso()
-    cache_info: dict[str, Any] = {"cache_served": False, "retrieved_at": None}
+    target_t = br.compute_target_trade_date_shanghai()
+    effective_end = min(end8, target_t)
+    store = br.load_board_cache(key)
+    bars: dict[str, dict[str, Any]] = store.setdefault("bars", {})
+    gate = br.THS_GATE if is_ths else br.EM_GATE
+
+    if start8 > effective_end:
+        return [], {
+            "cache_served": True,
+            "retrieved_at": store.get("updated_at"),
+            "upstream_calls": 0,
+            "coverage": "complete",
+        }
+
     try:
-        rows = fetch_ths_board_daily(code, start8, end8, timeout=timeout)
-    except ResearchError as exc:
-        store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
-        store["fetch_failures"] = int(store.get("fetch_failures", 0)) + 1
+        import core.calendar_xshg as calendar_xshg
+        expected_days: list[str] | None = calendar_xshg.trading_days_between(start8, effective_end)
+    except Exception:
+        expected_days = None
+
+    # 检查暖缓存全覆盖（长窗口/500日直接读暖缓存零上游调用）
+    if expected_days is not None and len(expected_days) >= getattr(config, "BOARD_WARM_CACHE_MIN_DAYS", 100):
+        missing = [d for d in expected_days if d not in bars or bars[d].get("bar_state") != "final"]
+        if not missing:
+            # 100% 暖缓存直接命中，零上游网络请求
+            cached_rows = []
+            for d in expected_days:
+                b = bars[d]
+                row_dict = {
+                    "date8": d,
+                    "open": str(b["open"]),
+                    "high": str(b["high"]),
+                    "low": str(b["low"]),
+                    "close": str(b["close"]),
+                    "bar_state": "final",
+                }
+                cached_rows.append(row_dict)
+            latest_ts = max((bars[d].get("retrieved_at") for d in expected_days if bars[d].get("retrieved_at")), default=None)
+            return cached_rows, {
+                "cache_served": True,
+                "retrieved_at": latest_ts or store.get("updated_at") or _now_iso(),
+                "upstream_calls": 0,
+                "coverage": "complete",
+            }
+
+    # 离线/只读缓存模式 (BOARD_CACHE_ONLY)
+    if getattr(config, "BOARD_CACHE_ONLY", 0):
         cached_rows = []
         oldest = None
         for d in sorted(bars):
             if start8 <= d <= end8:
-                row_dict = {"date8": d, **{
-                    f: bars[d][f] for f in ("open", "high", "low", "close")}}
-                if "bar_state" in bars[d]:
-                    row_dict["bar_state"] = bars[d]["bar_state"]
-                cached_rows.append(row_dict)
-                ts = bars[d].get("retrieved_at")
+                b = bars[d]
+                cached_rows.append({
+                    "date8": d,
+                    "open": str(b["open"]),
+                    "high": str(b["high"]),
+                    "low": str(b["low"]),
+                    "close": str(b["close"]),
+                    "bar_state": b.get("bar_state", "final"),
+                })
+                ts = b.get("retrieved_at")
                 if ts and (oldest is None or ts < oldest):
                     oldest = ts
         if not cached_rows:
-            _board_cache_save(key, store)
-            raise
-        cache_info["cache_served"] = True
-        cache_info["retrieved_at"] = oldest
-        cache_info["source_error"] = exc.message[:200]
-        _board_cache_save(key, store)
-        return cached_rows, cache_info
+            raise ResearchError("SOURCE_UNAVAILABLE", "BOARD_CACHE_ONLY active and no cache exists")
+        return cached_rows, {
+            "cache_served": True,
+            "retrieved_at": oldest,
+            "upstream_calls": 0,
+        }
 
-    store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
-    fresh_dates: set[str] = set()
-    for row in rows:
-        d = row["date8"]
-        entry = {f: row[f] for f in ("open", "high", "low", "close")}
-        if "bar_state" in row:
-            entry["bar_state"] = row["bar_state"]
-        prior = bars.get(d)
-        if prior and any(str(prior.get(f)) != str(entry[f])
-                         for f in ("open", "high", "low", "close")):
-            revisions = store.setdefault("revisions", {})
-            revisions[d] = {"at": now_iso,
-                            "from": {f: prior.get(f)
-                                     for f in ("open", "high", "low", "close")}}
-        entry["retrieved_at"] = now_iso
-        bars[d] = entry
-        fresh_dates.add(d)
-    _board_cache_save(key, store)
+    # 单系列单飞保护与增量补采
+    with br.single_flight_series(key) as is_leader:
+        if not is_leader:
+            store = br.load_board_cache(key)
+            bars = store.get("bars", {})
+            if expected_days is not None and all(d in bars and bars[d].get("bar_state") == "final" for d in expected_days):
+                cached_rows = [{
+                    "date8": d,
+                    "open": str(bars[d]["open"]),
+                    "high": str(bars[d]["high"]),
+                    "low": str(bars[d]["low"]),
+                    "close": str(bars[d]["close"]),
+                    "bar_state": "final",
+                } for d in expected_days]
+                latest_ts = max((bars[d].get("retrieved_at") for d in expected_days if bars[d].get("retrieved_at")), default=None)
+                return cached_rows, {
+                    "cache_served": True,
+                    "retrieved_at": latest_ts or store.get("updated_at") or _now_iso(),
+                    "upstream_calls": 0,
+                    "coverage": "complete",
+                }
 
-    merged = [dict(row) for row in rows]
-    seen = set(fresh_dates)
-    extra_cached = 0
-    oldest = None
-    for d in sorted(bars):
-        if d in seen or not (start8 <= d <= end8):
-            continue
-        row_dict = {"date8": d, **{
-            f: bars[d][f] for f in ("open", "high", "low", "close")}}
-        if "bar_state" in bars[d]:
-            row_dict["bar_state"] = bars[d]["bar_state"]
-        merged.append(row_dict)
-        extra_cached += 1
-        ts = bars[d].get("retrieved_at")
-        if ts and (oldest is None or ts < oldest):
-            oldest = ts
-    merged.sort(key=lambda r: r["date8"])
-    if extra_cached:
-        cache_info["merged_cached_extras"] = extra_cached
-        cache_info["retrieved_at"] = oldest
-    return merged, cache_info
+        gate_status = gate.get_status()
+        if gate_status["in_cooldown"]:
+            cached_rows = []
+            oldest = None
+            for d in sorted(bars):
+                if start8 <= d <= end8:
+                    b = bars[d]
+                    cached_rows.append({
+                        "date8": d,
+                        "open": str(b["open"]),
+                        "high": str(b["high"]),
+                        "low": str(b["low"]),
+                        "close": str(b["close"]),
+                        "bar_state": b.get("bar_state", "final"),
+                    })
+                    ts = b.get("retrieved_at")
+                    if ts and (oldest is None or ts < oldest):
+                        oldest = ts
+            if not cached_rows:
+                gate.check_and_throttle()
+            return cached_rows, {
+                "cache_served": True,
+                "retrieved_at": oldest,
+                "upstream_calls": 0,
+                "source_error": f"{gate.name} in cooldown",
+            }
+
+        gate.check_and_throttle()
+
+        missing_days = [d for d in expected_days if d not in bars] if expected_days else []
+        if missing_days:
+            fetch_start8 = min(missing_days)
+            if expected_days:
+                idx = expected_days.index(fetch_start8)
+                overlap = getattr(config, "BOARD_OVERLAP_DAYS", 5)
+                fetch_start8 = expected_days[max(0, idx - overlap)]
+            fetch_end8 = max(end8, target_t)
+        else:
+            fetch_start8 = start8
+            fetch_end8 = max(end8, target_t)
+
+        try:
+            if is_ths:
+                raw_rows = fetch_ths_board_daily(identifier, fetch_start8, fetch_end8, timeout=timeout)
+            else:
+                raw_rows = eastmoney_board_daily(identifier, fetch_start8, fetch_end8, timeout=timeout)
+            gate.record_success()
+        except ResearchError as exc:
+            store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+            store["fetch_failures"] = int(store.get("fetch_failures", 0)) + 1
+            is_waf = _em_is_waf_drop(exc) if not is_ths else False
+            gate.record_failure(exc.message, enter_cooldown=is_waf)
+            cached_rows = []
+            oldest = None
+            for d in sorted(bars):
+                if start8 <= d <= end8:
+                    b = bars[d]
+                    cached_rows.append({
+                        "date8": d,
+                        "open": str(b["open"]),
+                        "high": str(b["high"]),
+                        "low": str(b["low"]),
+                        "close": str(b["close"]),
+                        "bar_state": b.get("bar_state", "final"),
+                    })
+                    ts = b.get("retrieved_at")
+                    if ts and (oldest is None or ts < oldest):
+                        oldest = ts
+            if not cached_rows:
+                br.save_board_cache(key, store)
+                raise
+            br.save_board_cache(key, store)
+            return cached_rows, {
+                "cache_served": True,
+                "retrieved_at": oldest,
+                "upstream_calls": 0,
+                "source_error": exc.message[:200],
+            }
+
+        store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
+        now_iso = _now_iso()
+        fresh_dates = set()
+        for row in raw_rows:
+            try:
+                val_row = br.validate_ohlc_record(row, target_trade_date=target_t)
+            except Exception:
+                continue
+            d = val_row["date8"]
+            entry = {
+                "open": val_row["open"],
+                "high": val_row["high"],
+                "low": val_row["low"],
+                "close": val_row["close"],
+            }
+            if "bar_state" in row:
+                entry["bar_state"] = row["bar_state"]
+            elif "bar_state" in val_row:
+                entry["bar_state"] = val_row["bar_state"]
+            else:
+                entry["bar_state"] = "final"
+
+            prior = bars.get(d)
+            if prior and any(str(prior.get(f)) != str(entry[f]) for f in ("open", "high", "low", "close", "bar_state")):
+                revisions = store.setdefault("revisions", {})
+                rev_list = revisions.setdefault(d, [])
+                if isinstance(rev_list, dict):
+                    rev_list = [rev_list]
+                    revisions[d] = rev_list
+                rev_list.append({
+                    "at": now_iso,
+                    "from": {f: prior.get(f) for f in ("open", "high", "low", "close", "bar_state")},
+                    "to": {f: entry.get(f) for f in ("open", "high", "low", "close", "bar_state")},
+                    "provider": gate.name,
+                    "reason": "upstream_historical_revision" if prior.get("bar_state") == "final" else "post_close_final_confirmation",
+                })
+                entry["retrieved_at"] = now_iso
+            elif prior:
+                # 未变更的数据保留原有获取时间，不伪造收盘后时间
+                entry["retrieved_at"] = prior.get("retrieved_at", now_iso)
+            else:
+                entry["retrieved_at"] = now_iso
+            bars[d] = entry
+            fresh_dates.add(d)
+
+        br.save_board_cache(key, store)
+
+        merged = []
+        oldest = None
+        for d in sorted(bars):
+            if start8 <= d <= end8:
+                b = bars[d]
+                merged.append({
+                    "date8": d,
+                    "open": str(b["open"]),
+                    "high": str(b["high"]),
+                    "low": str(b["low"]),
+                    "close": str(b["close"]),
+                    "bar_state": b.get("bar_state", "final"),
+                })
+                ts = b.get("retrieved_at")
+                if ts and (oldest is None or ts < oldest):
+                    oldest = ts
+        return merged, {
+            "cache_served": False if fresh_dates else True,
+            "retrieved_at": oldest or now_iso,
+            "upstream_calls": 1,
+        }
 
 
-# ---------------------------------------------------------------------------
-# 板块日K持久缓存（真实取得才写；上游失败时如实以缓存服务 + 缺口上报）
-# ---------------------------------------------------------------------------
-
-
-def _board_cache_dir() -> Path:
-    return _snapshot_dir() / "board_daily_cache"
-
-
-def _board_cache_path(key: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)
-    return _board_cache_dir() / f"{safe}.json"
-
-
-def _board_cache_load(key: str) -> dict:
-    path = _board_cache_path(key)
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-        if (isinstance(loaded, dict) and isinstance(loaded.get("bars"), dict)
-                and loaded.get("instrument_id") == key):
-            return loaded
-    except (OSError, json.JSONDecodeError):
-        pass
-    return {"instrument_id": key, "bars": {}, "updated_at": None,
-            "fetch_attempts": 0, "fetch_failures": 0}
-
-
-def _board_cache_save(key: str, store: dict) -> None:
-    try:
-        path = _board_cache_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        store["updated_at"] = _now_iso()
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(store, ensure_ascii=False),
-                       encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass  # 缓存写失败不阻塞响应（内存内本次合并仍有效）
+def ths_board_daily_cached(key: str, code: str, start8: str, end8: str, *,
+                           timeout: float = 8.0) -> tuple[list[dict], dict]:
+    return _query_series_cached(key, code, is_ths=True, start8=start8, end8=end8, timeout=timeout)
 
 
 def board_daily_cached(key: str, secid: str, start8: str, end8: str, *,
                        timeout: float = 8.0) -> tuple[list[dict], dict]:
-    """板块日K读取（缓存优先合并）：→ (行, cache_info)。
-
-    - 上游成功：逐日 upsert（源修订覆盖旧值 = 允许的历史修订；不删除源未返回
-      的既有日——源 200 降级响应不删真实历史）；服务窗口 = 源行 ∪ 缓存行
-      （按日合并）。
-    - 上游失败且缓存覆盖窗口内有真实已取日：如实以缓存服务（缺口由基线
-      expected-slots 机制上报 partial + INCOMPLETE_COVERAGE，绝无虚造）；
-      cache_info.cache_served=True、retrieved_at=窗口内最旧已取时间（来源
-      可追溯，不得把缓存读取伪标为实时抓取）。
-    - 上游失败且窗口内无任何缓存：原样抛出（与既有诚实失败行为一致）。
-    """
-    native = key.split("/")[-1]
-    store = _board_cache_load(key)
-    bars = store.setdefault("bars", {})
-    now_iso = _now_iso()
-    cache_info: dict[str, Any] = {"cache_served": False, "retrieved_at": None}
-    try:
-        rows = eastmoney_board_daily(secid, start8, end8, timeout=timeout)
-    except ResearchError as exc:
-        store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
-        store["fetch_failures"] = int(store.get("fetch_failures", 0)) + 1
-        cached_rows = []
-        oldest = None
-        for d in sorted(bars):
-            if start8 <= d <= end8:
-                cached_rows.append({"date8": d, **{
-                    f: bars[d][f] for f in ("open", "high", "low", "close")}})
-                ts = bars[d].get("retrieved_at")
-                if ts and (oldest is None or ts < oldest):
-                    oldest = ts
-        if not cached_rows:
-            _board_cache_save(key, store)
-            raise
-        cache_info["cache_served"] = True
-        cache_info["retrieved_at"] = oldest
-        cache_info["source_error"] = exc.message[:200]
-        _board_cache_save(key, store)
-        return cached_rows, cache_info
-    store["fetch_attempts"] = int(store.get("fetch_attempts", 0)) + 1
-    fresh_dates: set[str] = set()
-    for row in rows:
-        d = row["date8"]
-        entry = {f: row[f] for f in ("open", "high", "low", "close")}
-        prior = bars.get(d)
-        if prior and any(str(prior.get(f)) != str(entry[f])
-                         for f in ("open", "high", "low", "close")):
-            revisions = store.setdefault("revisions", {})
-            revisions[d] = {"at": now_iso,
-                            "from": {f: prior.get(f)
-                                     for f in ("open", "high", "low", "close")}}
-        entry["retrieved_at"] = now_iso
-        bars[d] = entry
-        fresh_dates.add(d)
-    _board_cache_save(key, store)
-    # 服务窗口 = 源行 ∪ 缓存行（源 200 降级不丢既有真实日）
-    merged = [dict(row) for row in rows]
-    seen = set(fresh_dates)
-    extra_cached = 0
-    oldest = None
-    for d in sorted(bars):
-        if d in seen or not (start8 <= d <= end8):
-            continue
-        merged.append({"date8": d, **{
-            f: bars[d][f] for f in ("open", "high", "low", "close")}})
-        extra_cached += 1
-        ts = bars[d].get("retrieved_at")
-        if ts and (oldest is None or ts < oldest):
-            oldest = ts
-    merged.sort(key=lambda r: r["date8"])
-    if extra_cached:
-        cache_info["merged_cached_extras"] = extra_cached
-        cache_info["retrieved_at"] = oldest
-    return merged, cache_info
+    return _query_series_cached(key, secid, is_ths=False, start8=start8, end8=end8, timeout=timeout)
 
 
-def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
-    """各板块缓存缺口（对照 XSHG 日历；只统计 <= latest_completed8 的交易日）。
-
-    latest_completed8 缺省取引擎最新交易日（只读 HEALTH，不触发引擎探测）；
-    不可用时用「今天」——今天当日收盘前的缺日不算缺口（final 语义另行处理）。
-    """
+def board_cache_gap_report(target_t: str | None = None) -> dict:
+    """各板块缓存缺口（对照 XSHG 日历；只统计 <= target_t 的交易日）。"""
     from interfaces.mcp import market_v3 as v3
-    if latest_completed8 is None:
-        latest_completed8 = (v3.HEALTH.get().get("latest") or
-                             datetime.now().strftime("%Y%m%d"))
+    if target_t is None:
+        try:
+            target_t = br.compute_target_trade_date_shanghai()
+        except Exception:
+            target_t = v3.HEALTH.peek().get("latest") or datetime.now().strftime("%Y%m%d")
+
     report: dict[str, Any] = {}
+    window_end = target_t or datetime.now().strftime("%Y%m%d")
     window_start = max(
         v3.CALENDAR_COVERAGE_START.replace("-", ""),
-        (datetime.now() - timedelta(days=820)).strftime("%Y%m%d"))
-    window_end = datetime.now().strftime("%Y%m%d")
+        (datetime.now() - timedelta(days=820)).strftime("%Y%m%d")
+    )
+
     all_series = {**BOARD_SERIES, **THS_BOARD_SERIES}
     for key, meta in all_series.items():
-        store = _board_cache_load(key)
-        cached = set((store.get("bars") or {}).keys())
+        store = br.load_board_cache(key)
+        bars = store.get("bars") or {}
+        cached = set(bars.keys())
         try:
-            slots = v3._expected_slots("XSHG", window_start, window_end) or []
-        except Exception:  # noqa: BLE001 - 日历不可用按空处理
-            slots = []
-        dates8 = [d.replace("-", "") for d in slots]
+            slots = v3._expected_slots("XSHG", window_start, window_end)
+            calendar_ok = slots is not None
+        except Exception:
+            slots = None
+            calendar_ok = False
+
+        dates8 = [d.replace("-", "") for d in (slots or [])]
+        if not calendar_ok:
+            report[key] = {
+                "name": meta["name"],
+                "code": meta.get("code") or meta.get("secid"),
+                "provider": "ths" if "/ths/" in key else "eastmoney",
+                "cached_days": len(cached),
+                "cache_first": min(cached) if cached else None,
+                "cache_last": max(cached) if cached else None,
+                "gap_days": [],
+                "gap_count": 0,
+                "coverage": "unknown",
+            }
+            continue
+
         gaps = [d for d in dates8
-                if d not in cached and d <= latest_completed8
+                if d not in cached and d <= window_end
                 and d >= (meta.get("board_start8") or "00000000")]
+
+        if not gaps and len(cached) >= len(dates8):
+            cov = "complete"
+        elif cached:
+            cov = "partial"
+        else:
+            cov = "empty"
+
+        preliminary_days = [d for d in cached if bars.get(d, {}).get("bar_state") == "preliminary"]
+        pending_archive_days = [d for d in cached if bars.get(d, {}).get("archive_status") == "pending_yearly_archive"]
+
         report[key] = {
             "name": meta["name"],
             "code": meta.get("code") or meta.get("secid"),
@@ -918,103 +1081,111 @@ def board_cache_gap_report(latest_completed8: str | None = None) -> dict:
             "cache_last": max(cached) if cached else None,
             "gap_days": gaps,
             "gap_count": len(gaps),
+            "preliminary_days": preliminary_days,
+            "pending_archive_days": pending_archive_days,
+            "revisions_count": len(store.get("revisions", {})),
+            "coverage": cov,
+            "expected_days_500": min(500, len(dates8)),
         }
     return report
 
 
 def board_backfill_cycle(*, force: bool = False) -> dict:
-    """缺口补采一轮：逐板块按缺口窗口拉取合并（冷却许可时）。
-
-    有界重试：一轮每板块至多 1 次源请求；板块间 1.5s 间隔；东财风控冷却
-    未到期时跳过东财板块（THS 不受东财风控冷却限制）。
-    """
-    state = _em_client_state()
-    now = time.time()
-    cooldown_until = float(state.get("cooldown_until") or 0.0)
-    summary: dict[str, Any] = {"started_at": _now_iso(), "boards": {},
-                               "skipped": None}
-    if not force and now < cooldown_until:
-        summary["skipped"] = (f"风控冷却中（剩余 {int(cooldown_until - now)}s）"
-                              "——不触网，缺口等待下一轮")
-        with _EM_STATE_LOCK:
-            _EM_BACKFILL_STATE.update(last_cycle_at=time.time(),
-                                      last_summary=summary)
-        return summary
+    """受控板块补采与重叠巡检：逐板块按缺口窗口与受控重叠巡检（独立提供者闸门）。"""
+    summary: dict[str, Any] = {"started_at": _now_iso(), "boards": {}, "overlap_inspected": {}}
     report = board_cache_gap_report()
-    touched = 0
-    max_touched = len(report)
+
+    task_budget = getattr(config, "BOARD_BACKFILL_TASK_BUDGET_SECONDS", 180)
+    overlap_days = getattr(config, "BOARD_OVERLAP_DAYS", 5)
+    start_mono = time.monotonic()
+    target_d8 = br.compute_target_trade_date_shanghai()
+
     for key, info in report.items():
-        if not info["gap_days"]:
-            summary["boards"][key] = {"action": "none",
-                                      "gap_count": 0}
+        if (time.monotonic() - start_mono) > task_budget:
+            summary["boards"][key] = {"action": "budget_exceeded"}
             continue
-        if touched >= max_touched:
-            summary["boards"][key] = {"action": "deferred"}
-            continue
+
         is_ths = key in THS_BOARD_SERIES
-        if not is_ths and not force and now < cooldown_until:
-            summary["boards"][key] = {"action": "skipped_cooldown",
-                                      "cooldown_remaining_s": int(cooldown_until - now)}
-            continue
-        beg = info["gap_days"][0]
-        end = max(info["gap_days"][-1],
-                  datetime.now().strftime("%Y%m%d"))
-        try:
-            if is_ths:
-                meta = THS_BOARD_SERIES[key]
-                _rows, _ci = ths_board_daily_cached(key, meta["code"], beg, end)
-            else:
-                meta = BOARD_SERIES[key]
-                _rows, _ci = board_daily_cached(key, meta["secid"], beg, end)
-            after = board_cache_gap_report(
-                datetime.now().strftime("%Y%m%d"))[key]
+        gate = br.THS_GATE if is_ths else br.EM_GATE
+        gate_status = gate.get_status()
+        if not force and gate_status["in_cooldown"]:
             summary["boards"][key] = {
-                "action": "fetched", "window": [beg, end],
-                "gap_before": info["gap_count"],
-                "gap_after": after["gap_count"]}
-        except ResearchError as exc:
-            summary["boards"][key] = {"action": "failed",
-                                      "error": exc.code,
-                                      "detail": exc.message[:160]}
-        touched += 1
-        time.sleep(1.0)  # 板块间礼貌间隔
-    with _EM_STATE_LOCK:
-        _EM_BACKFILL_STATE.update(last_cycle_at=time.time(),
-                                  last_summary=summary)
+                "action": "skipped_cooldown",
+                "provider": gate.name,
+                "cooldown_remaining_s": gate_status["cooldown_remaining_s"],
+            }
+            continue
+
+        # 1. 缺口补采（若有缺失日期）
+        gap_days = info.get("gap_days") or []
+        if gap_days:
+            beg = gap_days[0]
+            end = max(gap_days[-1], target_d8)
+            try:
+                if is_ths:
+                    meta = THS_BOARD_SERIES[key]
+                    _rows, _ci = ths_board_daily_cached(key, meta["code"], beg, end)
+                else:
+                    meta = BOARD_SERIES[key]
+                    _rows, _ci = board_daily_cached(key, meta["secid"], beg, end)
+                after = board_cache_gap_report().get(key, {})
+                summary["boards"][key] = {
+                    "action": "fetched",
+                    "window": [beg, end],
+                    "gap_before": info.get("gap_count", 0),
+                    "gap_after": after.get("gap_count", 0),
+                }
+            except Exception as exc:
+                code_err = getattr(exc, "code", type(exc).__name__)
+                msg_err = getattr(exc, "message", str(exc))
+                summary["boards"][key] = {"action": "failed", "error": code_err, "detail": msg_err[:160]}
+        else:
+            summary["boards"][key] = {"action": "complete", "gap_count": 0}
+
+        # 2. 受控重叠巡检与终结再确认（检查最近 overlap_days 是否存在 pending_yearly_archive 或盘后修订）
+        store = br.load_board_cache(key)
+        bars = store.get("bars", {})
+        recent_dates = sorted(bars.keys())[-overlap_days:] if bars else []
+        needs_reconcile = False
+        for rd in recent_dates:
+            bar_entry = bars.get(rd, {})
+            if bar_entry.get("bar_state") == "preliminary" or bar_entry.get("archive_status") == "pending_yearly_archive":
+                needs_reconcile = True
+                break
+
+        if needs_reconcile and not (not force and gate.get_status()["in_cooldown"]):
+            try:
+                rec_start = recent_dates[0]
+                rec_end = target_d8
+                if is_ths:
+                    meta = THS_BOARD_SERIES[key]
+                    new_rows = fetch_ths_board_daily(meta["code"], rec_start, rec_end)
+                    rec_res = br.reconcile_series_cache(key, new_rows, provider="ths", reason="closing_overlap_inspection")
+                else:
+                    meta = BOARD_SERIES[key]
+                    new_rows = eastmoney_board_daily(meta["secid"], rec_start, rec_end)
+                    rec_res = br.reconcile_series_cache(key, new_rows, provider="eastmoney", reason="closing_overlap_inspection")
+                summary["overlap_inspected"][key] = {
+                    "revisions": rec_res.get("revisions_count", 0),
+                    "revised_dates": rec_res.get("revised_dates", []),
+                    "meta_updated": rec_res.get("meta_updated", False),
+                }
+            except Exception as exc:
+                summary["overlap_inspected"][key] = {"error": str(exc)[:120]}
+
+        time.sleep(0.05)
+
+    summary["finished_at"] = _now_iso()
+    if any(b.get("action") == "skipped_cooldown" for b in summary.get("boards", {}).values()):
+        summary["skipped"] = "风控冷却中——不触网，缺口等待下一轮"
+    else:
+        summary["skipped"] = None
     return summary
 
 
-_backfill_thread_started = False
-_backfill_thread_lock = threading.Lock()
-
-
 def _ensure_backfill_thread() -> None:
-    """启动低频缺口巡检线程（进程级一次；kill-switch 立即退出）。
-
-    单测/验收 stub 通过 STOCKDB_V3_BOARD_BACKFILL=off 关闭；正式服务默认开。
-    首轮延迟 90s（避免短生命周期进程触网），之后每 20min±120s 一轮，且只在
-    存在缺口且冷却许可时真正出网。
-    """
-    global _backfill_thread_started
-    kill = os.environ.get("STOCKDB_V3_BOARD_BACKFILL", "").strip().lower()
-    if kill in ("0", "off", "false", "no"):
-        return
-    with _backfill_thread_lock:
-        if _backfill_thread_started:
-            return
-        _backfill_thread_started = True
-
-    def _loop() -> None:
-        time.sleep(90)
-        while True:
-            try:
-                board_backfill_cycle()
-            except Exception:  # noqa: BLE001 - 巡检线程绝不带崩服务
-                pass
-            time.sleep(1200 + (time.time() % 240) - 120)
-
-    threading.Thread(target=_loop, daemon=True,
-                     name="em-board-backfill").start()
+    """委派至 br.WORKER.start()。"""
+    br.WORKER.start()
 
 
 # ---------------------------------------------------------------------------
@@ -1132,102 +1303,7 @@ def _snapshot_dir() -> Path:
 _snapshot_dir_cached: dict[str, Path | None] = {"path": None}
 
 
-class PersistentSnapshotStore:
-    """内存 + 磁盘双层快照仓（与 market_v3.SnapshotStore 同接口）。
-
-    - capture()：内存登记 + 原子落盘（tmp+rename）；
-    - get()：内存未命中时从磁盘按需加载（重启后未到期快照可读）；
-    - 过期/超量淘汰同步删盘；clear() 同时清两层（测试辅助）。
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._items: dict[str, dict] = {}
-        self._disk_checked: set[str] = set()
-
-    @staticmethod
-    def _path(snapshot_id: str) -> Path:
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", snapshot_id)
-        return _snapshot_dir() / f"{safe}.json"
-
-    def _purge_locked(self) -> None:
-        from interfaces.mcp import market_v3 as v3
-        now = time.time()
-        for key in [k for k, v in self._items.items() if v["expires_at"] <= now]:
-            self._unlink(key)
-            del self._items[key]
-        total_rows = sum(v.get("row_count", 0) for v in self._items.values())
-        while ((len(self._items) > v3._SNAPSHOT_COUNT_CAP
-                or total_rows > v3._SNAPSHOT_ROW_CAP) and self._items):
-            oldest = min(self._items, key=lambda k: self._items[k]["created_at"])
-            total_rows -= self._items[oldest].get("row_count", 0)
-            self._unlink(oldest)
-            del self._items[oldest]
-
-    def _unlink(self, snapshot_id: str) -> None:
-        try:
-            self._path(snapshot_id).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def capture(self, snapshot_id: str, payload: dict, *,
-                row_count: int = 0) -> None:
-        from interfaces.mcp import market_v3 as v3
-        now = time.time()
-        item = {"payload": payload, "row_count": row_count,
-                "created_at": now,
-                "expires_at": now + v3.SNAPSHOT_RETENTION_SECONDS}
-        path = self._path(snapshot_id)
-        try:
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(item, ensure_ascii=False,
-                                      allow_nan=False), encoding="utf-8")
-            tmp.replace(path)
-        except OSError:
-            pass  # 磁盘写失败不阻塞响应；重启持久化尽力而为并如实失败（NOT_FOUND）
-        with self._lock:
-            self._items[snapshot_id] = item
-            self._purge_locked()
-
-    def get(self, snapshot_id: str) -> dict | None:
-        with self._lock:
-            item = self._items.get(snapshot_id)
-        if item is not None:
-            return item
-        if snapshot_id in self._disk_checked:
-            return None
-        path = self._path(snapshot_id)
-        self._disk_checked.add(snapshot_id)
-        if not path.exists():
-            return None
-        try:
-            item = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(item, dict) or "payload" not in item:
-            return None
-        with self._lock:
-            self._items.setdefault(snapshot_id, item)
-        return item
-
-    @staticmethod
-    def is_expired(item: dict) -> bool:
-        return item["expires_at"] <= time.time()
-
-    def new_id(self, kind: str) -> str:
-        import uuid
-        return f"snap-{kind}-{uuid.uuid4().hex[:12]}"
-
-    def size(self) -> int:
-        with self._lock:
-            return len(self._items)
-
-    def clear(self) -> None:
-        with self._lock:
-            for key in list(self._items):
-                self._unlink(key)
-            self._items.clear()
-            self._disk_checked.clear()
+PersistentSnapshotStore = br.HardenedPersistentSnapshotStore
 
 
 # ---------------------------------------------------------------------------
@@ -2162,7 +2238,6 @@ def fetch_series_rows(key: str, start8: str, end8: str) -> tuple[
     _exchange, _asset_type, namespace, _code = key.split("/")
     if namespace == "ths":
         rows, cache_info = ths_board_daily_cached(key, native, start8, end8)
-        _ensure_backfill_thread()
         return "board", "ths", rows, cache_info
     rows, cache_info = board_daily_cached(key, native, start8, end8)
     _ensure_backfill_thread()
@@ -2265,11 +2340,16 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
                      f"(ths board daily kline via d.10jqka.com.cn API)")
         finality = "10jqka publishes completed board bars after close"
         if cache_served:
-            reference += (f" [served from server-side persistent board cache; "
-                          f"bars originally retrieved "
-                          f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
-                          f"attempt failed upstream and is honestly reported via "
-                          f"gaps]")
+            if fetch_meta.get("source_error"):
+                reference += (f" [served from server-side persistent board cache; "
+                              f"bars originally retrieved "
+                              f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
+                              f"attempt failed upstream and is honestly reported via "
+                              f"gaps]")
+            else:
+                reference += (f" [served from server-side persistent board cache; "
+                              f"bars originally retrieved "
+                              f"{fetch_meta.get('retrieved_at') or 'unknown'}]")
         return v3._source_record(
             retrieved_at=retrieved_at,
             reference=reference,
@@ -2280,12 +2360,16 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
                  f"(eastmoney board daily kline via push2his API)")
     finality = "eastmoney publishes completed board bars after close"
     if cache_served:
-        # 来源可追溯：缓存服务的数据必须如实标注原始取得时间，不得伪标实时抓取
-        reference += (f" [served from server-side persistent board cache; "
-                      f"bars originally retrieved "
-                      f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
-                      f"attempt failed upstream and is honestly reported via "
-                      f"gaps]")
+        if fetch_meta.get("source_error"):
+            reference += (f" [served from server-side persistent board cache; "
+                          f"bars originally retrieved "
+                          f"{fetch_meta.get('retrieved_at') or 'unknown'}; this "
+                          f"attempt failed upstream and is honestly reported via "
+                          f"gaps]")
+        else:
+            reference += (f" [served from server-side persistent board cache; "
+                          f"bars originally retrieved "
+                          f"{fetch_meta.get('retrieved_at') or 'unknown'}]")
     return v3._source_record(
         retrieved_at=retrieved_at,
         reference=reference,
@@ -2299,7 +2383,6 @@ def series_source_record(kind: str, key: str, retrieved_at: str,
 
 def research_status_metadata() -> dict:
     """get_data_status.extensions.research_v1（§2.2；known_limitations 如实）。"""
-    _ensure_backfill_thread()  # 状态轮询路径也兜底启动巡检（无人请求板块也能补采）
     limitations: list[str] = []
     em = em_board_availability()
     if em["ok_at"] <= 0 and em["fail_at"] > 0:

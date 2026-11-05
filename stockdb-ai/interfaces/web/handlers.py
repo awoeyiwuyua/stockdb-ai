@@ -716,6 +716,33 @@ class Handler(BaseHTTPRequestHandler):
             print(f"webui: 研究成果迁移失败: {type(exc).__name__}: {exc}", file=sys.stderr)
             self._send(500, json.dumps({"error": f"迁移失败: {exc}"}, ensure_ascii=False))
 
+    def _board_reliability_control(self):
+        """POST /api/board-reliability/control: 受控启动/停止板块可靠性补采 worker 及查询状态。"""
+        try:
+            import interfaces.mcp.board_reliability as br
+            body = self._read_json()
+            action = str(body.get("action") or "status").strip().lower()
+            force = bool(body.get("force", False))
+
+            result = {"ok": True, "action": action}
+            if action == "start":
+                br.WORKER.start()
+            elif action == "stop":
+                br.WORKER.stop()
+            elif action == "run_once":
+                summary = br.WORKER.run_once(force=force)
+                result["summary"] = summary
+            elif action == "status":
+                pass
+            else:
+                self._send(400, json.dumps({"error": f"invalid action: {action}"}, ensure_ascii=False))
+                return
+
+            result["worker_state"] = br.WORKER.get_state()
+            self._send(200, json.dumps(result, ensure_ascii=False))
+        except Exception as exc:
+            self._send(500, json.dumps({"error": f"board reliability control error: {exc}"}, ensure_ascii=False))
+
     # ==================== 运营支撑 API（Phase 4.5：通知中心 / MCP 观测 / 版本检查） ====================
     # 隐私：告警/MCP 记录不含 apikey；版本接口只回显版本号与 release 链接。
     def _alerts(self):

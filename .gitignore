@@ -48,3 +48,17 @@ nas_ssh.py
 .tmp-v3live/
 # unittest 临时产物（test_records 等）
 stockdb-ai/test_records_*/
+# unittest ephemeral outputs
+test_ops_*/
+test_qmydb_*/
+test_records_*/
+test_research_*/
+test_trace_*/
+v3rs-*/
+stockdb-ai/test_ops_*/
+stockdb-ai/test_qmydb_*/
+stockdb-ai/test_records_*/
+stockdb-ai/test_research_*/
+stockdb-ai/test_trace_*/
+stockdb-ai/v3rs-*/
+stockdb-ai/acceptance-*/

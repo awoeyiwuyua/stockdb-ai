@@ -3528,6 +3528,11 @@ def dispatch(msg: dict, group: str | None = None) -> dict | None:
 
 
 def run_stdio() -> None:
+    try:
+        import interfaces.mcp.market_v3 as market_v3
+        market_v3.HEALTH.start()
+    except Exception:
+        pass
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -3605,6 +3610,11 @@ class _MCPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 def run_http(host: str, port: int) -> None:
     """启动 ThreadingHTTPServer（每请求一个线程，多 agent 并发安全）。"""
+    try:
+        import interfaces.mcp.market_v3 as market_v3
+        market_v3.HEALTH.start()
+    except Exception:
+        pass
     httpd = http.server.ThreadingHTTPServer((host, port), _MCPRequestHandler)
     print(
         f"{SERVER_NAME} HTTP server listening on http://{host}:{port} "
