@@ -87,6 +87,7 @@
         :totals="store.whTotals"
         :assets="store.assets"
         :latest="store.health?.latest || ''"
+        @open-warehouse="openDrawer('warehouse')"
       />
     </template>
 
@@ -110,6 +111,9 @@
     <el-drawer v-model="dreducers.query" title="数据查询" size="860px" destroy-on-close>
       <OpsMydb />
     </el-drawer>
+    <el-drawer v-model="dreducers.warehouse" title="分析数仓明细与变更监控" size="880px" destroy-on-close>
+      <WarehouseMonitorDrawer />
+    </el-drawer>
   </div>
 </template>
 
@@ -132,6 +136,7 @@ import OpsDiag from './OpsDiag.vue'
 import OpsMcp from './OpsMcp.vue'
 import OpsMydb from './OpsMydb.vue'
 import AssetsCard from '../components/cockpit/AssetsCard.vue'
+import WarehouseMonitorDrawer from '../components/cockpit/WarehouseMonitorDrawer.vue'
 import { awaitingToday, pendingAlerts } from '../domain/timeline'
 import type { DrawerName } from '../types/ui'
 
@@ -141,8 +146,14 @@ const route = useRoute()
 const { lights, worst, aggWord } = useCockpit()
 const refreshing = ref(false)
 
-// —— 抽屉群（批 3）：alerts / logs / diag / query；diag 内 tab（check|mcp）——
-const dreducers = ref<Record<DrawerName, boolean>>({ alerts: false, logs: false, diag: false, query: false })
+// —— 抽屉群（批 3）：alerts / logs / diag / query / warehouse；diag 内 tab（check|mcp）——
+const dreducers = ref<Record<DrawerName, boolean>>({
+  alerts: false,
+  logs: false,
+  diag: false,
+  query: false,
+  warehouse: false,
+})
 const diagTab = ref('check')
 
 function openDrawer(name: DrawerName, tab?: string) {

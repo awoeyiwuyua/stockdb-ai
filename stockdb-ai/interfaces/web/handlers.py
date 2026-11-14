@@ -88,6 +88,16 @@ from app import (  # noqa: E402 - app.py 末尾导入本模块（组合根），
     stockdb_get,
     sync_capability,
     tail_log,
+    bulk_import_batch,
+    bulk_import_complete,
+    bulk_import_readback,
+    bulk_import_status,
+    bulk_import_verify,
+    daily_backfill_batch,
+    daily_backfill_consolidate,
+    daily_backfill_readback,
+    invalidate_warehouse_caches,
+    warehouse_inventory_payload,
     warehouse_run_async,
     warehouse_status,
 )
@@ -155,6 +165,18 @@ class Handler(BaseHTTPRequestHandler):
         """GET /api/warehouse/status：仓库沉淀状态（0.10.0 W4 运维口，非面板）。"""
         self._send(200, json.dumps(warehouse_status(), ensure_ascii=False))
 
+    def _warehouse_inventory(self):
+        """GET /api/warehouse/inventory：按数据类型、范围与导入变化查询数仓资产清单。"""
+        q = parse_qs(urlparse(self.path).query)
+        force = ((q.get("refresh") or ["0"])[0] or "0").lower() in ("1", "true", "yes")
+        if force:
+            invalidate_warehouse_caches()
+        try:
+            res = warehouse_inventory_payload(force=force)
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001 - 单接口降级不拖垮面板
+            self._send(500, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+
     def _warehouse_run(self):
         """POST /api/warehouse/run {"days":1-5,"reconcile_sample":n,"backfill":bool}。
 
@@ -169,6 +191,239 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, json.dumps(
             warehouse_run_async(days=days, reconcile_sample=sample, backfill=backfill),
             ensure_ascii=False))
+
+    def _handle_bulk_import_exc(self, exc: Exception) -> None:
+        if type(exc).__name__ == "BulkImportConflictError":
+            self._send(409, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        elif isinstance(exc, ValueError):
+            self._send(400, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        elif isinstance(exc, RuntimeError):
+            self._send(503, json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        else:
+            raise exc
+
+    @staticmethod
+    def _opt_int(raw: str | None) -> int | None:
+        if raw is None or raw == "":
+            return None
+        return int(raw)
+
+    def _warehouse_bulk_import_status(self):
+        """GET /api/warehouse/bulk-import/status?snapshot_id=...&source_db=..."""
+        q = parse_qs(urlparse(self.path).query)
+        snapshot_id = (q.get("snapshot_id") or [None])[0] or None
+        source_db = (q.get("source_db") or [None])[0] or None
+        try:
+            res = bulk_import_status(snapshot_id=snapshot_id, source_db=source_db)
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _read_binary_upload(self) -> bytes | None:
+        max_bytes = max(1, int(getattr(config, "WAREHOUSE_BULK_MAX_UPLOAD_BYTES", 64 * 1024 * 1024)))
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0:
+            self._send(400, json.dumps({"ok": False, "error": "缺少或非法的 Content-Length"}))
+            return None
+        if length > max_bytes:
+            self._send(413, json.dumps({"ok": False, "error": f"批次超过上限 {max_bytes} 字节"}))
+            return None
+        payload = self.rfile.read(length)
+        if len(payload) != length:
+            raise ValueError(f"上传请求体不完整: expected={length}, actual={len(payload)}")
+        return payload
+
+    def _warehouse_bulk_import_batch(self):
+        """POST /api/warehouse/bulk-import/batch：接收单个 Parquet 批次二进制体并本地校验入仓。"""
+        q = parse_qs(urlparse(self.path).query)
+        snapshot_id = self.headers.get("X-StockDB-Snapshot-Id") or (q.get("snapshot_id") or [""])[0]
+        source_db = self.headers.get("X-StockDB-Source-Db") or (q.get("source_db") or [""])[0]
+        batch_id = self.headers.get("X-StockDB-Batch-Id") or (q.get("batch_id") or [""])[0]
+        raw_batch_idx = self.headers.get("X-StockDB-Batch-Index") or (q.get("batch_index") or [""])[0]
+        try:
+            payload = self._read_binary_upload()
+            if payload is None:
+                return
+            if not snapshot_id or not source_db or not batch_id or raw_batch_idx == "":
+                raise ValueError("缺少 snapshot_id / source_db / batch_id / batch_index")
+            batch_index = int(raw_batch_idx)
+            parquet_sha256 = self.headers.get("X-StockDB-Parquet-Sha256") or None
+            row_count = self._opt_int(self.headers.get("X-StockDB-Row-Count"))
+            seq_start = self._opt_int(self.headers.get("X-StockDB-Seq-Start"))
+            seq_end = self._opt_int(self.headers.get("X-StockDB-Seq-End"))
+            rows_digest = self.headers.get("X-StockDB-Rows-Digest") or None
+            source_fp = self.headers.get("X-StockDB-Source-Fingerprint") or None
+            res = bulk_import_batch(
+                payload=payload,
+                snapshot_id=snapshot_id,
+                source_db=source_db,
+                batch_id=batch_id,
+                batch_index=batch_index,
+                parquet_sha256=parquet_sha256,
+                expected_row_count=row_count,
+                expected_seq_start=seq_start,
+                expected_seq_end=seq_end,
+                expected_rows_digest=rows_digest,
+                source_fingerprint=source_fp,
+            )
+            invalidate_warehouse_caches()
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_bulk_import_complete(self):
+        """POST /api/warehouse/bulk-import/complete：校验无缺批、无重键并封口导入任务。"""
+        body = self._read_json()
+        try:
+            snapshot_id = str(body.get("snapshot_id") or "")
+            source_db = str(body.get("source_db") or "")
+            if not snapshot_id or not source_db or "expected_batches" not in body:
+                raise ValueError("缺少 snapshot_id / source_db / expected_batches")
+            expected_batches = int(body["expected_batches"])
+            exp_rows = body.get("expected_total_rows")
+            expected_total_rows = int(exp_rows) if exp_rows is not None else None
+            source_fp = body.get("source_fingerprint") or None
+            res = bulk_import_complete(
+                snapshot_id=snapshot_id,
+                source_db=source_db,
+                expected_batches=expected_batches,
+                expected_total_rows=expected_total_rows,
+                source_fingerprint=source_fp,
+            )
+            invalidate_warehouse_caches()
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_bulk_import_readback(self):
+        """GET /api/warehouse/bulk-import/readback：从 NAS DuckDB 按 seq_no 游标读回数据。"""
+        q = parse_qs(urlparse(self.path).query)
+        snapshot_id = (q.get("snapshot_id") or [""])[0]
+        source_db = (q.get("source_db") or [""])[0]
+        output_format = ((q.get("format") or ["parquet"])[0] or "parquet").lower()
+        try:
+            if not snapshot_id or not source_db:
+                raise ValueError("缺少 snapshot_id 或 source_db")
+            after_seq = int((q.get("after_seq") or ["-1"])[0])
+            raw_limit = (q.get("limit") or [None])[0]
+            limit = int(raw_limit) if raw_limit is not None else None
+            payload, meta = bulk_import_readback(
+                snapshot_id=snapshot_id,
+                source_db=source_db,
+                after_seq=after_seq,
+                limit=limit,
+                output_format=output_format,
+            )
+            if output_format == "json":
+                self._send(200, payload.decode("utf-8"))
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("X-StockDB-Has-More", "true" if meta["has_more"] else "false")
+            self.send_header("X-StockDB-Next-After-Seq", str(meta["next_after_seq"]))
+            self.send_header("X-StockDB-Returned-Rows", str(meta["returned_rows"]))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_bulk_import_verify(self):
+        """POST /api/warehouse/bulk-import/verify：核对 NAS 本地批次文件与 DuckDB 视图完整性。"""
+        body = self._read_json()
+        try:
+            snapshot_id = str(body.get("snapshot_id") or "")
+            source_db = str(body.get("source_db") or "")
+            if not snapshot_id or not source_db:
+                raise ValueError("缺少 snapshot_id 或 source_db")
+            exp_rows = body.get("expected_total_rows")
+            expected_total_rows = int(exp_rows) if exp_rows is not None else None
+            source_fp = body.get("source_fingerprint") or None
+            update_status = bool(body.get("update_status", True))
+            res = bulk_import_verify(
+                snapshot_id=snapshot_id,
+                source_db=source_db,
+                expected_total_rows=expected_total_rows,
+                source_fingerprint=source_fp,
+                update_status=update_status,
+            )
+            invalidate_warehouse_caches()
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_daily_backfill_batch(self):
+        """POST /api/warehouse/daily-backfill/batch：接收标准 21 列日线回填 Parquet 批次。"""
+        q = parse_qs(urlparse(self.path).query)
+        snapshot_id = self.headers.get("X-StockDB-Snapshot-Id") or (q.get("snapshot_id") or [""])[0]
+        source_db = self.headers.get("X-StockDB-Source-Db") or (q.get("source_db") or [""])[0]
+        batch_id = self.headers.get("X-StockDB-Batch-Id") or (q.get("batch_id") or [""])[0]
+        try:
+            payload = self._read_binary_upload()
+            if payload is None:
+                return
+            if not snapshot_id or not source_db or not batch_id:
+                raise ValueError("缺少 snapshot_id / source_db / batch_id")
+            parquet_sha256 = self.headers.get("X-StockDB-Parquet-Sha256") or None
+            row_count = self._opt_int(self.headers.get("X-StockDB-Row-Count"))
+            rows_digest = self.headers.get("X-StockDB-Rows-Digest") or None
+            raw_ow = (
+                self.headers.get("X-StockDB-Overwrite-Existing")
+                or (q.get("overwrite_existing") or ["false"])[0]
+            ).lower()
+            overwrite_existing = raw_ow in ("1", "true", "yes")
+            res = daily_backfill_batch(
+                payload=payload,
+                snapshot_id=snapshot_id,
+                source_db=source_db,
+                batch_id=batch_id,
+                overwrite_existing=overwrite_existing,
+                parquet_sha256=parquet_sha256,
+                expected_row_count=row_count,
+                expected_rows_digest=rows_digest,
+            )
+            invalidate_warehouse_caches()
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_daily_backfill_readback(self):
+        """GET /api/warehouse/daily-backfill/readback?dates=...：按日期从标准 `facts/daily` 导出 Parquet。"""
+        q = parse_qs(urlparse(self.path).query)
+        raw_dates = ",".join(q.get("dates") or [])
+        dates = [d.strip() for d in raw_dates.split(",") if d.strip()]
+        include_fq = ((q.get("include_fq") or ["false"])[0]).lower() in ("1", "true", "yes")
+        try:
+            payload, meta = daily_backfill_readback(dates=dates, include_fq=include_fq)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("X-StockDB-Returned-Rows", str(meta["returned_rows"]))
+            self.send_header("X-StockDB-Parquet-Sha256", str(meta["parquet_sha256"]))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
+
+    def _warehouse_daily_backfill_consolidate(self):
+        """POST /api/warehouse/daily-backfill/consolidate：将仓内 `k日k` 回填标准日线并可选裁剪去重。"""
+        body = self._read_json()
+        try:
+            res = daily_backfill_consolidate(
+                source_dbs=body.get("source_dbs") or None,
+                dates=body.get("dates") or None,
+                overwrite_existing=bool(body.get("overwrite_existing", False)),
+                batch_days=int(body.get("batch_days") or 20),
+                verify_readback=bool(body.get("verify_readback", True)),
+                prune_namespaces=body.get("prune_namespaces") or None,
+            )
+            invalidate_warehouse_caches()
+            self._send(200, json.dumps(res, ensure_ascii=False))
+        except (ValueError, RuntimeError) as exc:
+            self._handle_bulk_import_exc(exc)
 
     def _auction_daily(self):
         """GET /api/auction/daily：打板链路日检记录（0.9.2 批次 7 可观测性）。"""

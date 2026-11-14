@@ -41,6 +41,12 @@ availability = None     # storage.warehouse.availability
 refresh_views = None    # storage.warehouse.engine.get_engine().refresh_views
 backup_duckdb = None    # storage.warehouse.backup.backup_duckdb（0.10.8：日级备份）
 checkpoint_duckdb = None  # storage.warehouse.backup.checkpoint_duckdb（0.11.1：WAL 日级收口）
+bulk_import = None      # storage.warehouse.bulk_import（LevelDB 批量导入与核对模块）
+daily_backfill = None   # storage.warehouse.daily_backfill（k日k 标准日线回填与原库去重）
+minute_backfill = None  # storage.warehouse.minute_backfill（k分钟k 标准 1m 分钟线回填与去重）
+inventory = None        # storage.warehouse.inventory（数仓资产分类与导入变化监控）
+is_supported_code = None  # core.board_metrics.is_supported_a_share_code（股票标的过滤）
+_minute_write_lock = threading.RLock()
 
 _wh_fired: dict = {}  # 日级防重守卫：{date: {"fired": bool, "attempts": int, "next_retry": ts}}
 _wh_run_state: dict = {"running": False, "started": None, "finished": None, "result": None}
@@ -237,6 +243,28 @@ def warehouse_run(days: int = 1, reconcile_sample: int = 10,
             try:
                 refresh_views()
             except Exception:  # noqa: BLE001 - 视图刷新失败下次重建
+                pass
+        if inventory is not None and results:
+            try:
+                latest_day = results[-1]
+                rec = latest_day.get("reconcile")
+                if isinstance(rec, dict):
+                    inventory.save_daily_reconcile(
+                        root,
+                        {
+                            "date": latest_day.get("date"),
+                            "ok": bool(rec.get("ok")),
+                            "traded": rec.get("traded"),
+                            "stored": rec.get("stored"),
+                            "recorded_at": _now_iso(),
+                        },
+                    )
+                inventory.record_inventory_event(
+                    root,
+                    "sediment",
+                    summary_prefix=f"盘后沉淀 {latest_day.get('date') or ''}：".strip(),
+                )
+            except Exception:  # noqa: BLE001 - 监控落库异常不阻塞沉淀主流程
                 pass
         # 0.10.8：warehouse.duckdb 日级备份（沿 research_store 模式；失败静默不阻塞）
         if backup_duckdb is not None and results:
@@ -633,3 +661,330 @@ def warehouse_scheduler_loop() -> None:
             time.sleep(5)
         except Exception:  # noqa: BLE001 - 最外层兜底
             time.sleep(30)
+
+
+# ---- LevelDB 批量导入服务编排（经注入点委派给 storage.warehouse.bulk_import） ----
+
+def _require_wh_module(mod, name: str):
+    if availability is not None:
+        ok, reason = availability()
+        if not ok:
+            raise RuntimeError(f"warehouse 不可用: {reason}")
+    if warehouse_root is None or mod is None:
+        raise RuntimeError(f"{name} 未装配")
+    return warehouse_root(), mod
+
+
+def _require_bulk_import():
+    return _require_wh_module(bulk_import, "bulk_import")
+
+
+def _require_daily_backfill():
+    return _require_wh_module(daily_backfill, "daily_backfill")
+
+
+def _require_minute_backfill():
+    return _require_wh_module(minute_backfill, "minute_backfill")
+
+
+def _stock_code_predicate():
+    if is_supported_code is not None:
+        return is_supported_code
+    from core.board_metrics import is_supported_a_share_code
+    return is_supported_a_share_code
+
+
+def bulk_import_batch(
+    *,
+    payload: bytes,
+    snapshot_id: str,
+    source_db: str,
+    batch_id: str,
+    batch_index: int,
+    parquet_sha256: str | None = None,
+    expected_row_count: int | None = None,
+    expected_seq_start: int | None = None,
+    expected_seq_end: int | None = None,
+    expected_rows_digest: str | None = None,
+    source_fingerprint: str | None = None,
+) -> dict:
+    root, mod = _require_bulk_import()
+    return mod.ingest_parquet_batch(
+        root,
+        payload,
+        snapshot_id=snapshot_id,
+        source_db=source_db,
+        batch_id=batch_id,
+        batch_index=batch_index,
+        parquet_sha256=parquet_sha256,
+        expected_row_count=expected_row_count,
+        expected_seq_start=expected_seq_start,
+        expected_seq_end=expected_seq_end,
+        expected_rows_digest=expected_rows_digest,
+        source_fingerprint=source_fingerprint,
+        refresh_views_cb=refresh_views,
+    )
+
+
+def bulk_import_status(
+    *,
+    snapshot_id: str | None = None,
+    source_db: str | None = None,
+) -> dict:
+    root, mod = _require_bulk_import()
+    return mod.get_bulk_import_status(root, snapshot_id=snapshot_id, source_db=source_db)
+
+
+def bulk_import_complete(
+    *,
+    snapshot_id: str,
+    source_db: str,
+    expected_batches: int,
+    expected_total_rows: int | None = None,
+    source_fingerprint: str | None = None,
+) -> dict:
+    root, mod = _require_bulk_import()
+    return mod.complete_bulk_import(
+        root,
+        snapshot_id=snapshot_id,
+        source_db=source_db,
+        expected_batches=expected_batches,
+        expected_total_rows=expected_total_rows,
+        source_fingerprint=source_fingerprint,
+        refresh_views_cb=refresh_views,
+    )
+
+
+def bulk_import_readback(
+    *,
+    snapshot_id: str,
+    source_db: str,
+    after_seq: int = -1,
+    limit: int | None = None,
+    output_format: str = "parquet",
+) -> tuple[bytes, dict]:
+    root, mod = _require_bulk_import()
+    return mod.readback_bulk_import(
+        root,
+        snapshot_id=snapshot_id,
+        source_db=source_db,
+        after_seq=after_seq,
+        limit=limit,
+        output_format=output_format,
+    )
+
+
+def bulk_import_verify(
+    *,
+    snapshot_id: str,
+    source_db: str,
+    expected_total_rows: int | None = None,
+    source_fingerprint: str | None = None,
+    update_status: bool = True,
+) -> dict:
+    root, mod = _require_bulk_import()
+    return mod.verify_bulk_import(
+        root,
+        snapshot_id=snapshot_id,
+        source_db=source_db,
+        expected_total_rows=expected_total_rows,
+        source_fingerprint=source_fingerprint,
+        update_status=update_status,
+    )
+
+
+def daily_backfill_batch(
+    *,
+    payload: bytes,
+    snapshot_id: str,
+    source_db: str,
+    batch_id: str,
+    overwrite_existing: bool = False,
+    parquet_sha256: str | None = None,
+    expected_row_count: int | None = None,
+    expected_rows_digest: str | None = None,
+) -> dict:
+    root, mod = _require_daily_backfill()
+    return mod.ingest_daily_backfill_parquet_batch(
+        root,
+        payload,
+        snapshot_id=snapshot_id,
+        source_db=source_db,
+        batch_id=batch_id,
+        overwrite_existing=overwrite_existing,
+        parquet_sha256=parquet_sha256,
+        expected_row_count=expected_row_count,
+        expected_rows_digest=expected_rows_digest,
+        code_predicate=_stock_code_predicate(),
+        is_trading_day_fn=is_trading_day,
+        refresh_views_cb=refresh_views,
+    )
+
+
+def daily_backfill_readback(
+    *,
+    dates: list[str],
+    include_fq: bool = False,
+) -> tuple[bytes, dict]:
+    root, mod = _require_daily_backfill()
+    return mod.readback_daily_parquet(
+        root,
+        dates=dates,
+        include_fq=include_fq,
+    )
+
+
+def daily_backfill_consolidate(
+    *,
+    source_dbs: list[str] | None = None,
+    dates: list[str] | None = None,
+    overwrite_existing: bool = False,
+    batch_days: int = 20,
+    verify_readback: bool = True,
+    prune_namespaces: list[str] | None = None,
+) -> dict:
+    root, mod = _require_daily_backfill()
+    backfill_res = mod.backfill_daily_from_leveldb_warehouse(
+        root,
+        source_dbs=source_dbs,
+        dates=dates,
+        code_predicate=_stock_code_predicate(),
+        is_trading_day_fn=is_trading_day,
+        overwrite_existing=overwrite_existing,
+        batch_days=batch_days,
+        verify_readback=verify_readback,
+        refresh_views_cb=refresh_views,
+    )
+    prune_res = None
+    if prune_namespaces:
+        if not backfill_res.get("passed"):
+            raise RuntimeError("标准日线回填核对未通过，禁止裁剪原库键")
+        prune_res = mod.prune_leveldb_namespace(
+            root,
+            namespaces=tuple(prune_namespaces),
+            refresh_views_cb=refresh_views,
+        )
+    return {
+        "ok": True,
+        "passed": bool(backfill_res.get("passed")) and (prune_res is None or bool(prune_res.get("passed"))),
+        "backfill": backfill_res,
+        "prune": prune_res,
+    }
+
+
+def minute_backfill_run(
+    *,
+    source_dbs: list[str] | None = None,
+    months: list[str] | None = None,
+    overwrite_existing: bool = False,
+    resume: bool = True,
+    checkpoint_path=None,
+    advance_watermark: bool = True,
+) -> dict:
+    """手动触发 Stage 1 1m 分钟线回填（受写锁保护，按 A 股谓词与沪深市场过滤）。"""
+    root, mod = _require_minute_backfill()
+    with _minute_write_lock:
+        return mod.backfill_minute_from_leveldb_warehouse(
+            root,
+            source_dbs=source_dbs,
+            months=months,
+            code_predicate=_stock_code_predicate(),
+            overwrite_existing=overwrite_existing,
+            resume=resume,
+            checkpoint_path=checkpoint_path,
+            advance_watermark=advance_watermark,
+            refresh_views_cb=refresh_views,
+        )
+
+
+def minute_backfill_verify(
+    *,
+    source_dbs: list[str] | None = None,
+    sample_days: int = 5,
+    sample_per_day: int = 50,
+    check_overlap: bool = True,
+) -> dict:
+    """校验 1m 分钟线 Parquet 与 `facts/leveldb_raw` `k分钟k` 去重后的一致性。"""
+    root, mod = _require_minute_backfill()
+    return mod.verify_minute_backfill(
+        root,
+        source_dbs=source_dbs,
+        code_predicate=_stock_code_predicate(),
+        sample_days=sample_days,
+        sample_per_day=sample_per_day,
+        check_overlap=check_overlap,
+    )
+
+
+def minute_backfill_consolidate(
+    *,
+    source_dbs: list[str] | None = None,
+    months: list[str] | None = None,
+    overwrite_existing: bool = False,
+    resume: bool = True,
+    checkpoint_path=None,
+    advance_watermark: bool = True,
+    sample_days: int = 5,
+    sample_per_day: int = 50,
+    prune: bool = True,
+    batch_size: int = 50000,
+    run_backfill: bool = True,
+) -> dict:
+    """执行 1m 分钟线回填与 100% 校验后，安全裁剪原库 `k分钟k` 命名空间。"""
+    root, mod = _require_minute_backfill()
+    with _minute_write_lock:
+        return mod.consolidate_and_prune_minute(
+            root,
+            source_dbs=source_dbs,
+            months=months,
+            code_predicate=_stock_code_predicate(),
+            overwrite_existing=overwrite_existing,
+            resume=resume,
+            checkpoint_path=checkpoint_path,
+            advance_watermark=advance_watermark,
+            sample_days=sample_days,
+            sample_per_day=sample_per_day,
+            prune=prune,
+            batch_size=batch_size,
+            run_backfill=run_backfill,
+            refresh_views_cb=refresh_views,
+        )
+
+
+def warehouse_inventory(history_limit: int = 30) -> dict:
+    """分析数仓按数据类型、覆盖范围、持久化对账与导入变化查询。"""
+    empty = {
+        "ok": True,
+        "available": False,
+        "datasets": [],
+        "highlights": [],
+        "index_rows": 0,
+        "jobs": [],
+        "active_jobs": [],
+        "changes": [],
+        "latest_change": None,
+        "reconcile": {
+            "daily": None,
+            "bulk": {"job_count": 0, "verified_count": 0, "active_count": 0, "latest_job": None},
+        },
+        "totals": {
+            "total_rows": 0,
+            "standard_rows": 0,
+            "leveldb_rows": 0,
+            "standard_bytes": 0,
+            "leveldb_disk_bytes": 0,
+            "leveldb_raw_bytes": 0,
+            "duckdb_bytes": 0,
+            "total_bytes": 0,
+        },
+    }
+    if availability is not None and not availability()[0]:
+        return empty
+    if warehouse_root is None or inventory is None:
+        return empty
+    root = warehouse_root()
+    if not (root / "facts").is_dir() and not (root / "warehouse.duckdb").is_file():
+        return {**empty, "available": True}
+    payload = inventory.get_warehouse_inventory(root, history_limit=history_limit)
+    payload["available"] = True
+    return payload
