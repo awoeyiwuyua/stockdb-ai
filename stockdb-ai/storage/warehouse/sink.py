@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from datetime import datetime as _dt
 import math
 import os
 from pathlib import Path
@@ -35,7 +37,25 @@ _DAILY_COLUMNS = (
     ("adj_factor", "DOUBLE"), ("open_fq", "DOUBLE"), ("high_fq", "DOUBLE"),
     ("low_fq", "DOUBLE"), ("close_fq", "DOUBLE"),
 )
+DAILY_BASE_COLUMNS = _DAILY_COLUMNS[:21]
 _NUMERIC_FIELDS = ("open", "high", "low", "close", "prev_close", "volume", "amount")
+
+# 分钟K 标准化列定义（0.17.x：首期仅存 period=1m 原始量价 9 列，不物化复权列）
+_MINUTE_COLUMNS = (
+    ("code", "TEXT"),
+    ("date", "DATE"),
+    ("datetime", "TIMESTAMP"),
+    ("open", "DOUBLE"),
+    ("high", "DOUBLE"),
+    ("low", "DOUBLE"),
+    ("close", "DOUBLE"),
+    ("volume", "DOUBLE"),
+    ("amount", "DOUBLE"),
+)
+
+_PARQUET_COMPRESSIONS = frozenset({
+    "UNCOMPRESSED", "SNAPPY", "GZIP", "ZSTD", "BROTLI", "LZ4", "LZ4_RAW",
+})
 
 
 def _finite(value) -> bool:
@@ -45,6 +65,28 @@ def _finite(value) -> bool:
     if isinstance(value, float) and not math.isfinite(value):
         return False
     return True
+
+
+def _normalize_timestamp(value) -> str:
+    """时间戳输入 → ISO TIMESTAMP 文本（YYYY-MM-DD HH:MM:SS[.ffffff]）。"""
+    if isinstance(value, _dt):
+        dt = value.replace(tzinfo=None) if value.tzinfo is not None else value
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f") if dt.microsecond else dt.strftime("%Y-%m-%d %H:%M:%S")
+    s = str(value).strip()
+    if not s:
+        raise ValueError(f"invalid timestamp: {value!r}")
+    if len(s) == 14 and s.isdigit():
+        return _dt.strptime(s, "%Y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    if len(s) == 12 and s.isdigit():
+        return _dt.strptime(s, "%Y%m%d%H%M").strftime("%Y-%m-%d %H:%M:%S")
+    iso_s = s[:-1] if s.endswith("Z") else s
+    try:
+        dt = _dt.fromisoformat(iso_s)
+    except ValueError as exc:
+        raise ValueError(f"invalid timestamp: {value!r}") from exc
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.%f") if dt.microsecond else dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _normalize_rows(rows: list[dict], columns):
@@ -59,8 +101,28 @@ def _normalize_rows(rows: list[dict], columns):
             v = r.get(name)
             if isinstance(v, float) and not _math.isfinite(v):
                 v, sanitized = None, sanitized + 1
+            elif ctype == "DOUBLE" and v is not None:
+                if isinstance(v, bool):
+                    v, sanitized = None, sanitized + 1
+                else:
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        v, sanitized = None, sanitized + 1
+                    else:
+                        if not _math.isfinite(fv):
+                            v, sanitized = None, sanitized + 1
             elif ctype == "DATE" and v is not None:
-                v = layout.iso_date(v)  # 8 位/ISO → ISO（DATE 列统一：date/snapshot 等）
+                if isinstance(v, _dt):
+                    v = v.strftime("%Y-%m-%d")
+                else:
+                    sv = str(v).strip()
+                    if len(sv) in (12, 14) and sv.isdigit():
+                        v = layout.iso_date(sv[:8])
+                    else:
+                        v = layout.iso_date(v)  # 8 位/ISO → ISO（DATE 列统一：date/snapshot 等）
+            elif ctype == "TIMESTAMP" and v is not None:
+                v = _normalize_timestamp(v)
             elif name == "is_st":
                 v = bool(v) if v is not None else None
             row.append(v)
@@ -113,9 +175,21 @@ def _load_rows(con, table: str, rows: list[tuple], columns) -> None:
             pass
 
 
-def _write_parquet_atomic(rows: list[tuple], columns, target: Path) -> None:
+def _write_parquet_atomic(
+    rows: list[tuple],
+    columns,
+    target: Path,
+    compression: str | None = None,
+) -> None:
     """元组行 → 排序写入临时文件 → 原子 rename。失败清理临时文件。"""
     import duckdb
+
+    fmt_opts = "FORMAT PARQUET"
+    if compression is not None:
+        comp = str(compression).strip().upper()
+        if comp not in _PARQUET_COMPRESSIONS:
+            raise ValueError(f"unsupported parquet compression: {compression!r}")
+        fmt_opts = f"FORMAT PARQUET, COMPRESSION {comp}"
 
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".tmp")
@@ -124,9 +198,14 @@ def _write_parquet_atomic(rows: list[tuple], columns, target: Path) -> None:
         con = duckdb.connect()
         try:
             _load_rows(con, "t", rows, columns)
-            order_by = "code" if "code" in names else names[0]
+            if "code" in names and "datetime" in names:
+                order_by = "code, datetime"
+            elif "code" in names:
+                order_by = "code"
+            else:
+                order_by = names[0]
             con.execute(
-                f"COPY (SELECT * FROM t ORDER BY {order_by}) TO '{tmp.as_posix()}' (FORMAT PARQUET)"
+                f"COPY (SELECT * FROM t ORDER BY {order_by}) TO '{tmp.as_posix()}' ({fmt_opts})"
             )
         finally:
             con.close()
@@ -137,12 +216,14 @@ def _write_parquet_atomic(rows: list[tuple], columns, target: Path) -> None:
 
 
 def write_daily(root: Path, date, rows: list[dict],
-                factor_map: dict[str, float] | None = None) -> dict:
+                factor_map: dict[str, float] | None = None,
+                *, advance_watermark: bool = True) -> dict:
     """沉淀一个交易日的全市场日K（按市场分分区文件，幂等）。
 
     factor_map（0.10.10）：{code: 当日累计因子}——沉淀时一次计算物化复权列
     （adj_factor + open_fq/high_fq/low_fq/close_fq = 原价 × factor）；
     None/缺码 → 复权列 NULL（原价，事件未就绪）。查询层零计算。
+    advance_watermark=False 允许历史回填只补分区而不推进 watermark:daily。
 
     返回 {status: written|skipped|empty, markets, rows, dropped_nonfinite, watermark}。
     """
@@ -162,11 +243,14 @@ def write_daily(root: Path, date, rows: list[dict],
             if factor is not None and not math.isfinite(factor):
                 factor = None
         if factor is not None:
+            def _mul(val):
+                return val * factor if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(float(val)) else None
+
             row.update(adj_factor=factor,
-                       open_fq=row.get("open") * factor,
-                       high_fq=row.get("high") * factor,
-                       low_fq=row.get("low") * factor,
-                       close_fq=row.get("close") * factor)
+                       open_fq=_mul(row.get("open")),
+                       high_fq=_mul(row.get("high")),
+                       low_fq=_mul(row.get("low")),
+                       close_fq=_mul(row.get("close")))
         normalized, d = _normalize_rows([row], _DAILY_COLUMNS)
         dropped += d  # 0.10.7 起为消毒单元格计数（不再丢行）
         if normalized:
@@ -174,7 +258,7 @@ def write_daily(root: Path, date, rows: list[dict],
 
     if not by_market:
         # 完全无有效行也推进 watermark（空交易日不阻塞后续任务判断）
-        advanced = catalog.set_watermark(root, "daily", date)
+        advanced = catalog.set_watermark(root, "daily", date) if advance_watermark else False
         return {"status": "empty", "markets": [], "rows": 0,
                 "dropped_nonfinite": dropped, "watermark_advanced": advanced}
 
@@ -188,12 +272,116 @@ def write_daily(root: Path, date, rows: list[dict],
         written_markets.append(market)
         total += len(market_rows)
 
-    advanced = catalog.set_watermark(root, "daily", date)
+    advanced = catalog.set_watermark(root, "daily", date) if advance_watermark else False
     return {
         "status": "written" if written_markets else "skipped",
         "markets": written_markets,
         "rows": total,
         "dropped_nonfinite": dropped,
+        "watermark_advanced": advanced,
+    }
+
+
+def write_minute(
+    root: Path,
+    date,
+    rows: list[dict],
+    *,
+    period: str = "1m",
+    code_predicate: Callable[[str], bool] | None = None,
+    allowed_markets: tuple[str, ...] | Iterable[str] | None = ("sh", "sz"),
+    overwrite: bool = False,
+    advance_watermark: bool = True,
+) -> dict:
+    """沉淀一个交易日的标准分钟K（默认 period=1m，按市场 sh/sz 分区，ZSTD 压缩，(code, datetime) 排序）。
+
+    - 不冗余物化 adj_factor / *_fq（查询时按 (code, date) 关联 v_daily）。
+    - NaN/Inf 数值单元格消毒为 NULL 并计入 dropped_nonfinite。
+    - 默认幂等跳过已存在分区；overwrite=True 时原子覆盖目标分区。
+    - advance_watermark=False 允许历史回填而不推进 watermark:minute。
+
+    返回 {status: written|skipped|empty, markets, rows, dropped_nonfinite, filtered, watermark_advanced}。
+    """
+    root = Path(root)
+    date8 = layout.normalize_date(date)
+    period_norm = str(period).strip().lower()
+    if period_norm not in layout.MINUTE_PERIODS:
+        raise ValueError(f"invalid minute period: {period!r}（须在 {layout.MINUTE_PERIODS}）")
+    allowed = set(allowed_markets) if allowed_markets is not None else None
+
+    rows_by_market: dict[str, list[dict]] = {}
+    filtered = 0
+    for r in rows:
+        code = str(r.get("code") or "").strip()
+        if not code:
+            filtered += 1
+            continue
+        if code_predicate is not None and not code_predicate(code):
+            filtered += 1
+            continue
+        market = layout.market_of(code)
+        if allowed is not None and market not in allowed:
+            filtered += 1
+            continue
+
+        raw_dt = r.get("datetime")
+        raw_d = r.get("date")
+        if raw_dt is None and raw_d is not None:
+            if isinstance(raw_d, _dt):
+                raw_dt = raw_d
+            else:
+                sd = str(raw_d).strip()
+                if (len(sd) in (12, 14) and sd.isdigit()) or ":" in sd or "T" in sd or " " in sd:
+                    raw_dt = raw_d
+
+        row = dict(r)
+        row["code"] = code
+        if raw_dt is not None:
+            dt_iso = _normalize_timestamp(raw_dt)
+            row["datetime"] = dt_iso
+            if raw_d is None or raw_d is raw_dt or str(raw_d).strip() == str(raw_dt).strip():
+                row["date"] = dt_iso[:10]
+        if row.get("date") is None:
+            row["date"] = date8
+
+        rows_by_market.setdefault(market, []).append(row)
+
+    by_market: dict[str, list[tuple]] = {}
+    dropped = 0
+    for market, mkt_dicts in rows_by_market.items():
+        normalized, d = _normalize_rows(mkt_dicts, _MINUTE_COLUMNS)
+        dropped += d
+        if normalized:
+            by_market[market] = normalized
+
+    if not by_market:
+        advanced = catalog.set_watermark(root, "minute", date8) if advance_watermark else False
+        return {
+            "status": "empty",
+            "markets": [],
+            "rows": 0,
+            "dropped_nonfinite": dropped,
+            "filtered": filtered,
+            "watermark_advanced": advanced,
+        }
+
+    written_markets = []
+    total = 0
+    for market, market_rows in sorted(by_market.items()):
+        target = layout.minute_partition(root, period_norm, date8, market)
+        if target.exists() and not overwrite:
+            continue
+        _write_parquet_atomic(market_rows, _MINUTE_COLUMNS, target, compression="ZSTD")
+        written_markets.append(market)
+        total += len(market_rows)
+
+    advanced = catalog.set_watermark(root, "minute", date8) if advance_watermark else False
+    return {
+        "status": "written" if written_markets else "skipped",
+        "markets": written_markets,
+        "rows": total,
+        "dropped_nonfinite": dropped,
+        "filtered": filtered,
         "watermark_advanced": advanced,
     }
 
@@ -283,7 +471,8 @@ def _kline_aggregate_sql(period_start, period_end, glob: str) -> str:
     """
 
 
-def _write_kline_aggregate(root: Path, dataset: str, period_end, rows) -> dict:
+def _write_kline_aggregate(root: Path, dataset: str, period_end, rows,
+                           *, advance_watermark: bool = True) -> dict:
     """周/月K 聚合落盘公共（0.10.12）：按市场分分区文件（幂等；other 孤码跳过）。"""
     by_market: dict[str, list[tuple]] = {}
     for r in rows:
@@ -305,13 +494,14 @@ def _write_kline_aggregate(root: Path, dataset: str, period_end, rows) -> dict:
         _write_parquet_atomic(market_rows, _DAILY_COLUMNS, target)
         written_markets.append(market)
         total += len(market_rows)
-    if written_markets:
+    if written_markets and advance_watermark:
         catalog.set_watermark(root, dataset, period_end)
     return {"status": "written" if written_markets else "skipped",
             "markets": written_markets, "rows": total}
 
 
-def aggregate_weekly(root: Path, week_end, market: str | None = None) -> dict:
+def aggregate_weekly(root: Path, week_end, market: str | None = None,
+                     *, advance_watermark: bool = True) -> dict:
     """周K聚合物化（0.10.10 粒度阶梯：facts/week/year=YYYY/market=xx/date=YYYYMMDD.parquet）。
 
     聚合源 = 该自然周（周一~周五）的 daily 分区（read_parquet glob，不重复拉引擎）；
@@ -338,10 +528,11 @@ def aggregate_weekly(root: Path, week_end, market: str | None = None) -> dict:
         con.close()
     if not rows:
         return {"status": "empty", "markets": [], "rows": 0}
-    return _write_kline_aggregate(root, "week", week_end, rows)
+    return _write_kline_aggregate(root, "week", week_end, rows, advance_watermark=advance_watermark)
 
 
-def aggregate_monthly(root: Path, month_end, market: str | None = None) -> dict:
+def aggregate_monthly(root: Path, month_end, market: str | None = None,
+                      *, advance_watermark: bool = True) -> dict:
     """月K聚合物化（0.10.12 粒度阶梯：facts/month/year=YYYY/market=xx/date=YYYYMMDD.parquet）。
 
     聚合源 = 该自然月（1 日~月末）的 daily 分区；月K列与 daily 完全同构（26 列，
@@ -365,4 +556,4 @@ def aggregate_monthly(root: Path, month_end, market: str | None = None) -> dict:
         con.close()
     if not rows:
         return {"status": "empty", "markets": [], "rows": 0}
-    return _write_kline_aggregate(root, "month", month_end, rows)
+    return _write_kline_aggregate(root, "month", month_end, rows, advance_watermark=advance_watermark)

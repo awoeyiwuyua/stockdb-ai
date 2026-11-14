@@ -97,6 +97,10 @@ if os.name == "nt" and WAREHOUSE_DIR_EXPLICIT and DATA_DIR_EXPLICIT:
 WAREHOUSE_ROW_CAP: int = int(os.environ.get("WAREHOUSE_ROW_CAP", "5000"))
 # 单条语句执行超时（秒）
 WAREHOUSE_QUERY_TIMEOUT: int = int(os.environ.get("WAREHOUSE_QUERY_TIMEOUT", "30"))
+# 批量导入单批上传上限（字节，默认 64 MiB）
+WAREHOUSE_BULK_MAX_UPLOAD_BYTES: int = _env_int("WAREHOUSE_BULK_MAX_UPLOAD_BYTES", 64 * 1024 * 1024)
+# 批量导入 DuckDB 回读单次上限（行数）
+WAREHOUSE_BULK_READBACK_MAX_ROWS: int = _env_int("WAREHOUSE_BULK_READBACK_MAX_ROWS", 100000)
 
 # ---- 港股自动同步（0.12.0 H1：每日港股收盘后定时同步重点标的） ----
 # 总开关（回滚演练用）：0 = 调度/手动运行口整体关闭；既有手动 /api/hk/sync 不受影响

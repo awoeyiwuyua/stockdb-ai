@@ -308,3 +308,37 @@ DEPENDENCY_UNAVAILABLE（hint：uv sync / musllinux 无 wheel 属预期）；超
 3. 回滚演练：WAREHOUSE_ENABLED=0 全链路无感知、53 工具回归绿；warehouse 目录损坏 → 仅仓库工具降级
 4. 测试总量 ≥ 300（实际 308）+ 层边界测试含 C3 规则
 5. 文档四件套（本文件 / ROADMAP / CHANGELOG / development-guide）
+
+## 11. LevelDB 全量快照批量导入与对账核对（Bulk Import）
+
+针对 NAS 行情 LevelDB（`data`、`data1`、`mydb` 等）历史全量同步需求，仓库提供“Windows 只读分批导出 + NAS 本地校验原子入仓 + DuckDB 分页读回全量核对”链路，避免 Windows 与 NAS 服务并发打开同一个 `warehouse.duckdb`。
+
+### 11.1 磁盘布局与 DuckDB 视图
+
+- **原始事实分区**：`<root>/facts/leveldb_raw/<snapshot_id>/<source_db>/batch_<batch_id>.parquet`（不使用 `k=v` 目录段，避免 Hive 分区列干扰）。
+- **暂存区**：`<root>/.staging/leveldb_raw/...tmp`（与 `facts/` 隔离，校验全部通过后再 `os.replace` 晋升为不可变事实）。
+- **Parquet 契约（14 列）**：`snapshot_id VARCHAR`、`source_db VARCHAR`、`batch_id VARCHAR`、`seq_no BIGINT`、`raw_key BLOB`、`raw_value BLOB`、`key_sha256 VARCHAR`、`value_sha256 VARCHAR`、`key_len INTEGER`、`value_len INTEGER`、`key_utf8 VARCHAR`、`key_namespace VARCHAR`、`value_kind VARCHAR`、`value_text VARCHAR`。遇到未识别键格式时原样以 `BLOB` 落盘，零丢弃、零改写。
+- **元数据表**：`warehouse.duckdb` 内置 `bulk_import_jobs` 与 `bulk_import_batches`，记录 `source_fingerprint`、批次索引、连续 `seq_no` 范围、`parquet_sha256`、`rows_digest_sha256`。
+- **只读分析视图**（由 `WarehouseEngine.refresh_views()` 注册，MCP `warehouse` 组工具数量保持 4 个不变）：
+  - `v_leveldb_raw`：全部原始键值（无分区时返回同契约空视图）；
+  - `v_leveldb_snapshots`：`bulk_import_jobs` 任务与验证汇总视图；
+  - `v_leveldb_latest`：按 `source_db` 选取最新已封口/已核对快照。
+
+### 11.2 Windows 快照遍历与断点续传
+
+- **只读快照遍历器（`storage/warehouse/leveldb_snapshot.py`）**：纯 Python 实现，读取 `CURRENT`、`MANIFEST-*`、`*.ldb`/`*.sst`（Snappy / Zstd / 无压缩 + CRC32C）与活跃 `*.log`（WriteBatch），通过 `heapq.merge` 按 `(user_key ASC, sequence DESC)` 消解覆盖写与 Tombstone，绝不向快照目录写入 `LOCK`。
+- **先确认后推进（`storage/warehouse/bulk_sync_client.py` / `scripts/sync_leveldb_to_warehouse.py`）**：
+  - 每批先写本地 `pending_batch`，上传并收到 NAS 确认后才推进 `last_confirmed_key_b64` 与 `next_seq`；
+  - 断网重启时先查 `/api/warehouse/bulk-import/status` 自动对账，支持 `start_after_key` 跳扫与同内容幂等重传（`duplicate_skipped`），同 `batch_id` 内容或指纹不一致返回 `409 Conflict`。
+
+### 11.3 HTTP 接口与终局验收门槛
+
+| 端点 | 方法 | 用途 |
+|---|---|---|
+| `/api/warehouse/bulk-import/status` | `GET` | 查询导入任务与已落盘批次列表 |
+| `/api/warehouse/bulk-import/batch` | `POST` | 上传单批 Parquet 二进制（上限 `WAREHOUSE_BULK_MAX_UPLOAD_BYTES`，默认 64MiB）与摘要头 |
+| `/api/warehouse/bulk-import/complete` | `POST` | 校验 `0..expected_batches-1` 无缺批、`seq_no` 连续、跨批无重键并封口 |
+| `/api/warehouse/bulk-import/readback` | `GET` | 按 `seq_no` 游标分页从 DuckDB `v_leveldb_raw` 读回（`format=parquet\|json`） |
+| `/api/warehouse/bulk-import/verify` | `POST` | NAS 本地逐文件 SHA-256 与 DuckDB 视图行数/哈希完整性自检 |
+
+**验收标准**：逐库从 DuckDB 读回与源 LevelDB 快照流式比对，`missing_keys == 0`、`extra_keys == 0`、`mismatched_values == 0`、`duplicate_keys == 0`、`order_errors == 0`。

@@ -1,6 +1,6 @@
 // api/ops.ts — 运维域接口封装（告警/MCP 观测/版本）。
 import { getJson, postJson } from './http'
-import type { VersionPayload } from '../types/api'
+import type { VersionPayload, WarehouseInventory } from '../types/api'
 
 export interface AlertMuteState {
   muted: boolean
@@ -21,3 +21,5 @@ export const clearAlertMute = () =>
 export const getMcpStats = () => getJson('/api/mcp/stats') // 总调用/成功率/avg/p95/by_tool
 export const getMcpCalls = (limit = 50) => getJson(`/api/mcp/calls?limit=${limit}`)
 export const getVersion = () => getJson<VersionPayload>('/api/version') // webui/image/upstream/stale/ui_mode
+export const getWarehouseInventory = (refresh = false) =>
+  getJson<WarehouseInventory>(`/api/warehouse/inventory${refresh ? '?refresh=1' : ''}`)

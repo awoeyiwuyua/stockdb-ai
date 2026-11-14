@@ -152,3 +152,39 @@ def list_daily_dates(root: Path) -> list[str]:
     if not daily.is_dir():
         return []
     return sorted({f.stem[len("date="):] for f in daily.rglob("date=*.parquet")})
+
+
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def validate_identifier(value: str, label: str = "identifier") -> str:
+    """校验批量导入路径段标识（防路径穿越/非法字符）。"""
+    if not isinstance(value, str) or not _SAFE_ID_RE.match(value) or value in {".", ".."}:
+        raise ValueError(f"非法 {label}: {value!r}")
+    return value
+
+
+def leveldb_raw_dir(root: Path) -> Path:
+    return facts_dir(root) / "leveldb_raw"
+
+
+def leveldb_snapshot_dir(root: Path, snapshot_id: str) -> Path:
+    sid = validate_identifier(snapshot_id, "snapshot_id")
+    return leveldb_raw_dir(root) / sid
+
+
+def leveldb_batch_partition(root: Path, snapshot_id: str, source_db: str, batch_id: str) -> Path:
+    sid = validate_identifier(snapshot_id, "snapshot_id")
+    src = validate_identifier(source_db, "source_db")
+    bid = validate_identifier(batch_id, "batch_id")
+    return leveldb_raw_dir(root) / sid / src / f"batch_{bid}.parquet"
+
+
+def leveldb_staging_path(
+    root: Path, snapshot_id: str, source_db: str, batch_id: str, token: str = ""
+) -> Path:
+    sid = validate_identifier(snapshot_id, "snapshot_id")
+    src = validate_identifier(source_db, "source_db")
+    bid = validate_identifier(batch_id, "batch_id")
+    suffix = f".{validate_identifier(token, 'token')}" if token else ""
+    return Path(root) / ".staging" / "leveldb_raw" / sid / src / f"batch_{bid}{suffix}.parquet.tmp"

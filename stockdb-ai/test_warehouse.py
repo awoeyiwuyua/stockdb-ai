@@ -20,7 +20,7 @@ if str(WEBUI) not in sys.path:
 
 import config
 from storage import warehouse
-from storage.warehouse import backup, catalog, layout, sink
+from storage.warehouse import backup, catalog, engine as wh_engine, inventory, layout, sink
 from storage.warehouse.engine import GuardrailError, WarehouseEngine
 from storage.warehouse.queries import WarehouseUnavailable
 
@@ -1658,6 +1658,473 @@ class McpWarehouseToolsTest(unittest.TestCase):
         # 分组过滤：group=warehouse 只见 4 工具（0.10.15 增 warehouse_run 触发口）
         listed = self.srv._tools_for_group("warehouse")
         self.assertEqual({t["name"] for t in listed}, names)
+
+
+class WarehouseMinuteTest(unittest.TestCase):
+    """分钟K 标准化 1m 存储契约 / v_minute 视图 / inventory 三级分区与 Footer 统计验收。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_minute_schema_exact_9_columns(self):
+        expected = (
+            ("code", "TEXT"),
+            ("date", "DATE"),
+            ("datetime", "TIMESTAMP"),
+            ("open", "DOUBLE"),
+            ("high", "DOUBLE"),
+            ("low", "DOUBLE"),
+            ("close", "DOUBLE"),
+            ("volume", "DOUBLE"),
+            ("amount", "DOUBLE"),
+        )
+        self.assertEqual(sink._MINUTE_COLUMNS, expected)
+        self.assertEqual(wh_engine._MINUTE_EMPTY_COLUMNS, list(expected))
+
+    def test_write_minute_layout_zstd_sorting_and_extra_fields(self):
+        """落盘 period=1m/year=YYYY/market=<sh|sz>/date=YYYYMMDD.parquet，ZSTD 压缩，(code, datetime) 排序，9 列无复权列。"""
+        rows = [
+            # 故意乱序输入 + 14 位原始 date 字段 + 额外字段（必须被忽略）+ bj/hk/other（默认过滤）
+            {"code": "688001", "date": "20261112093200",
+             "open": 50.0, "high": 50.5, "low": 49.8, "close": 50.2,
+             "volume": 1200.0, "amount": 60240.0, "adj_factor": 2.0, "close_fq": 100.4},
+            {"code": "600000", "datetime": "2026-11-12 09:32:00",
+             "open": 10.1, "high": 10.2, "low": 10.0, "close": 10.15,
+             "volume": 300.0, "amount": 3045.0},
+            {"code": "600000", "datetime": datetime.datetime(2026, 11, 12, 9, 31, 0),
+             "open": 10.0, "high": 10.15, "low": 9.95, "close": 10.1,
+             "volume": 200.0, "amount": 2010.0},
+            {"code": "300750", "datetime": "2026-11-12 09:31:00",
+             "open": 200.0, "high": 201.0, "low": 199.0, "close": 200.5,
+             "volume": 500.0, "amount": 100250.0},
+            {"code": "000001", "date": "20261112093500",
+             "open": 11.2, "high": 11.3, "low": 11.1, "close": 11.25,
+             "volume": 400.0, "amount": 4500.0},
+            {"code": "000001", "date": "20261112093000",
+             "open": 11.0, "high": 11.2, "low": 10.9, "close": 11.1,
+             "volume": 350.0, "amount": 3885.0},
+            {"code": "920001", "datetime": "2026-11-12 09:31:00",
+             "open": 5.0, "high": 5.1, "low": 4.9, "close": 5.05, "volume": 10.0, "amount": 50.0},
+            {"code": "hk00700", "datetime": "2026-11-12 09:31:00",
+             "open": 400.0, "high": 401.0, "low": 399.0, "close": 400.5, "volume": 10.0, "amount": 4000.0},
+            {"code": "200002", "datetime": "2026-11-12 09:31:00",
+             "open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 10.0, "amount": 20.0},
+        ]
+        res = sink.write_minute(self.root, "20261112", rows)
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["markets"], ["sh", "sz"])
+        self.assertEqual(res["rows"], 6)
+        self.assertEqual(res["filtered"], 3)
+        self.assertEqual(res["dropped_nonfinite"], 0)
+        self.assertTrue(res["watermark_advanced"])
+        self.assertEqual(catalog.get_watermark(self.root, "minute"), "20261112")
+
+        sh_path = layout.minute_partition(self.root, "1m", "20261112", "sh")
+        sz_path = layout.minute_partition(self.root, "1m", "20261112", "sz")
+        self.assertTrue(sh_path.is_file() and sz_path.is_file())
+        minute_root = layout.facts_dir(self.root) / "minute"
+        self.assertEqual(sorted(p.name for p in minute_root.iterdir()), ["period=1m"])
+
+        con = duckdb.connect()
+        try:
+            desc = con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{sh_path.as_posix()}', hive_partitioning=false)"
+            ).fetchall()
+            self.assertEqual(
+                [(r[0], r[1]) for r in desc],
+                [
+                    ("code", "VARCHAR"), ("date", "DATE"), ("datetime", "TIMESTAMP"),
+                    ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"),
+                    ("close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+                ],
+            )
+            schema_cols = [
+                r[0] for r in con.execute(
+                    f"SELECT name FROM parquet_schema('{sh_path.as_posix()}') WHERE num_children IS NULL"
+                ).fetchall()
+            ]
+            self.assertEqual(
+                schema_cols,
+                ["code", "date", "datetime", "open", "high", "low", "close", "volume", "amount"],
+            )
+            comps = {r[0] for r in con.execute(
+                f"SELECT compression FROM parquet_metadata('{sh_path.as_posix()}')"
+            ).fetchall()}
+            self.assertEqual(comps, {"ZSTD"})
+
+            sh_raw = con.execute(
+                f"SELECT code, datetime FROM read_parquet('{sh_path.as_posix()}')"
+            ).fetchall()
+            self.assertEqual(
+                sh_raw,
+                [
+                    ("600000", datetime.datetime(2026, 11, 12, 9, 31, 0)),
+                    ("600000", datetime.datetime(2026, 11, 12, 9, 32, 0)),
+                    ("688001", datetime.datetime(2026, 11, 12, 9, 32, 0)),
+                ],
+            )
+            sz_raw = con.execute(
+                f"SELECT code, datetime FROM read_parquet('{sz_path.as_posix()}')"
+            ).fetchall()
+            self.assertEqual(
+                sz_raw,
+                [
+                    ("000001", datetime.datetime(2026, 11, 12, 9, 30, 0)),
+                    ("000001", datetime.datetime(2026, 11, 12, 9, 35, 0)),
+                    ("300750", datetime.datetime(2026, 11, 12, 9, 31, 0)),
+                ],
+            )
+        finally:
+            con.close()
+
+    def test_write_minute_code_predicate_excludes_etf_and_bj(self):
+        from core.board_metrics import is_supported_a_share_code
+
+        rows = [
+            {"code": "600000", "datetime": "2026-11-12 09:31:00", "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0, "volume": 100.0, "amount": 1000.0},
+            {"code": "510300", "datetime": "2026-11-12 09:31:00", "open": 4.0, "high": 4.1, "low": 3.9, "close": 4.0, "volume": 100.0, "amount": 400.0},
+            {"code": "159915", "datetime": "2026-11-12 09:31:00", "open": 2.0, "high": 2.1, "low": 1.9, "close": 2.0, "volume": 100.0, "amount": 200.0},
+            {"code": "920001", "datetime": "2026-11-12 09:31:00", "open": 5.0, "high": 5.1, "low": 4.9, "close": 5.0, "volume": 100.0, "amount": 500.0},
+        ]
+        res = sink.write_minute(
+            self.root, "20261112", rows, code_predicate=is_supported_a_share_code
+        )
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["markets"], ["sh"])
+        self.assertEqual(res["rows"], 1)
+        self.assertEqual(res["filtered"], 3)
+        self.assertFalse(layout.minute_partition(self.root, "1m", "20261112", "sz").exists())
+
+    def test_write_minute_nan_inf_disinfection(self):
+        rows = [
+            {
+                "code": "600000",
+                "datetime": "2026-11-12 09:31:00",
+                "open": float("nan"),
+                "high": float("inf"),
+                "low": float("-inf"),
+                "close": "NaN",
+                "volume": 100.0,
+                "amount": 1000.0,
+            }
+        ]
+        res = sink.write_minute(self.root, "20261112", rows)
+        self.assertEqual(res["status"], "written")
+        self.assertEqual(res["rows"], 1)
+        self.assertEqual(res["dropped_nonfinite"], 4)
+
+        sh_path = layout.minute_partition(self.root, "1m", "20261112", "sh")
+        con = duckdb.connect()
+        try:
+            got = con.execute(
+                f"SELECT open, high, low, close, volume, amount FROM read_parquet('{sh_path.as_posix()}')"
+            ).fetchone()
+        finally:
+            con.close()
+        self.assertEqual(got, (None, None, None, None, 100.0, 1000.0))
+
+    def test_write_minute_idempotent_overwrite_and_watermark(self):
+        base = [{"code": "600000", "datetime": "2026-11-12 09:31:00",
+                 "open": 10.0, "high": 10.2, "low": 9.9, "close": 10.1,
+                 "volume": 100.0, "amount": 1010.0}]
+        r1 = sink.write_minute(self.root, "20261112", base, advance_watermark=False)
+        self.assertEqual(r1["status"], "written")
+        self.assertFalse(r1["watermark_advanced"])
+        self.assertIsNone(catalog.get_watermark(self.root, "minute"))
+
+        updated = [{"code": "600000", "datetime": "2026-11-12 09:31:00",
+                    "open": 10.0, "high": 10.5, "low": 9.9, "close": 10.4,
+                    "volume": 200.0, "amount": 2080.0}]
+        r2 = sink.write_minute(self.root, "20261112", updated, overwrite=False, advance_watermark=True)
+        self.assertEqual(r2["status"], "skipped")
+        self.assertEqual(r2["markets"], [])
+        self.assertTrue(r2["watermark_advanced"])
+        self.assertEqual(catalog.get_watermark(self.root, "minute"), "20261112")
+
+        r3 = sink.write_minute(self.root, "20261112", updated, overwrite=False, advance_watermark=True)
+        self.assertEqual(r3["status"], "skipped")
+        self.assertFalse(r3["watermark_advanced"])
+
+        sh_path = layout.minute_partition(self.root, "1m", "20261112", "sh")
+        con = duckdb.connect()
+        try:
+            c_before = con.execute(f"SELECT close FROM read_parquet('{sh_path.as_posix()}')").fetchone()[0]
+            self.assertAlmostEqual(c_before, 10.1)
+        finally:
+            con.close()
+
+        r4 = sink.write_minute(self.root, "20261112", updated, overwrite=True, advance_watermark=True)
+        self.assertEqual(r4["status"], "written")
+        self.assertEqual(r4["markets"], ["sh"])
+        self.assertFalse(r4["watermark_advanced"])
+
+        con = duckdb.connect()
+        try:
+            c_after = con.execute(f"SELECT close FROM read_parquet('{sh_path.as_posix()}')").fetchone()[0]
+            self.assertAlmostEqual(c_after, 10.4)
+        finally:
+            con.close()
+
+        # 旧日期写入不得回退 watermark:minute
+        earlier = [{"code": "600000", "datetime": "2026-11-10 09:31:00",
+                    "open": 9.5, "high": 9.6, "low": 9.4, "close": 9.55,
+                    "volume": 50.0, "amount": 477.5}]
+        r5 = sink.write_minute(self.root, "20261110", earlier, advance_watermark=True)
+        self.assertEqual(r5["status"], "written")
+        self.assertFalse(r5["watermark_advanced"])
+        self.assertEqual(catalog.get_watermark(self.root, "minute"), "20261112")
+
+        # 空交易日写可推进 watermark:minute
+        r6 = sink.write_minute(self.root, "20261113", [], advance_watermark=True)
+        self.assertEqual(r6["status"], "empty")
+        self.assertTrue(r6["watermark_advanced"])
+        self.assertEqual(catalog.get_watermark(self.root, "minute"), "20261113")
+
+    def test_write_minute_atomic_on_failure(self):
+        rows = [{"code": "600000", "datetime": "2026-11-12 09:31:00",
+                 "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0,
+                 "volume": 100.0, "amount": 1000.0}]
+        with mock.patch("os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                sink.write_minute(self.root, "20261112", rows)
+        self.assertFalse(layout.minute_partition(self.root, "1m", "20261112", "sh").exists())
+        self.assertEqual(list(layout.facts_dir(self.root).rglob("*.tmp")), [])
+
+    def test_write_parquet_atomic_compression_compat_and_validation(self):
+        target = self.root / "direct.parquet"
+        sink._write_parquet_atomic(
+            [("600000", "2026-11-12", "2026-11-12 09:31:00", 10.0, 10.1, 9.9, 10.0, 1.0, 10.0)],
+            sink._MINUTE_COLUMNS,
+            target,
+            compression="ZSTD",
+        )
+        self.assertTrue(target.exists())
+        with self.assertRaises(ValueError):
+            sink._write_parquet_atomic(
+                [("600000", "2026-11-12", "2026-11-12 09:31:00", 10.0, 10.1, 9.9, 10.0, 1.0, 10.0)],
+                sink._MINUTE_COLUMNS,
+                self.root / "bad.parquet",
+                compression="INVALID_CODEC",
+            )
+
+    def test_v_minute_empty_fallback_live_hive_and_5m_fq_join(self):
+        """空仓 9 列零行占位 → 写入后 refresh_views 切 live hive 视图 + 按需 5m 聚合 & 复权 JOIN + 护栏。"""
+        eng = WarehouseEngine(self.root)
+        try:
+            self.assertIn("v_minute", eng.list_objects()["tables"])
+            empty_cnt = eng.run_sql("SELECT count(*) FROM v_minute")["rows"][0][0]
+            self.assertEqual(empty_cnt, 0)
+            empty_desc = eng.run_sql("DESCRIBE SELECT * FROM v_minute")["rows"]
+            self.assertEqual(
+                [(r[0], r[1]) for r in empty_desc],
+                [
+                    ("code", "VARCHAR"), ("date", "DATE"), ("datetime", "TIMESTAMP"),
+                    ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"),
+                    ("close", "DOUBLE"), ("volume", "DOUBLE"), ("amount", "DOUBLE"),
+                ],
+            )
+
+            # 写入日线（含 adj_factor=2.0）与 10 根 1m 分钟线（09:30~09:34、09:35~09:39）
+            sink.write_daily(
+                self.root,
+                "20261112",
+                [{
+                    "code": "000001", "name": "平安银行", "is_st": False,
+                    "open": 10.0, "high": 12.0, "low": 9.8, "close": 11.5,
+                    "prev_close": 10.0, "volume": 10000.0, "amount": 110000.0,
+                }],
+                factor_map={"000001": 2.0},
+            )
+            bars_1m = []
+            for idx in range(10):
+                hhmm = f"09:{30 + idx:02d}:00"
+                base = 10.0 + idx * 0.1
+                bars_1m.append({
+                    "code": "000001",
+                    "datetime": f"2026-11-12 {hhmm}",
+                    "open": base,
+                    "high": base + 0.5,
+                    "low": base - 0.2,
+                    "close": base + 0.05,
+                    "volume": 100.0 * (idx + 1),
+                    "amount": 1000.0 * (idx + 1),
+                })
+            bars_1m.append({
+                "code": "600000",
+                "datetime": "2026-11-12 09:31:00",
+                "open": 9.0, "high": 9.1, "low": 8.9, "close": 9.05,
+                "volume": 500.0, "amount": 4525.0,
+            })
+            sink.write_minute(self.root, "20261112", bars_1m)
+            eng.refresh_views()
+
+            # Live Hive 分区列可见（period, year, market）
+            live = eng.run_sql(
+                "SELECT period, year, market, count(*) FROM v_minute "
+                "GROUP BY period, year, market ORDER BY market"
+            )["rows"]
+            self.assertEqual(live, [["1m", 2026, "sh", 1], ["1m", 2026, "sz", 10]])
+
+            # 按需 5m 聚合 + JOIN v_daily 复权因子
+            agg = eng.run_sql("""
+                SELECT m.code,
+                       time_bucket(INTERVAL '5 minutes', m.datetime) AS bar_5m,
+                       arg_min(m.open, m.datetime) * ANY_VALUE(d.adj_factor) AS open_fq,
+                       max(m.high) * ANY_VALUE(d.adj_factor) AS high_fq,
+                       min(m.low)  * ANY_VALUE(d.adj_factor) AS low_fq,
+                       arg_max(m.close, m.datetime) * ANY_VALUE(d.adj_factor) AS close_fq,
+                       sum(m.volume) AS volume,
+                       sum(m.amount) AS amount
+                FROM v_minute m
+                LEFT JOIN v_daily d ON m.code = d.code AND m.date = d.date
+                WHERE m.code = '000001' AND m.date = DATE '2026-11-12'
+                GROUP BY m.code, bar_5m
+                ORDER BY bar_5m
+            """)
+            self.assertEqual(len(agg["rows"]), 2)
+            b0, b1 = agg["rows"]
+            self.assertEqual(b0[0], "000001")
+            self.assertEqual(b0[1], "2026-11-12T09:30:00")
+            self.assertAlmostEqual(b0[2], 10.0 * 2.0)   # open_fq (09:30)
+            self.assertAlmostEqual(b0[3], 10.9 * 2.0)   # high_fq (09:34 = 10.4 + 0.5)
+            self.assertAlmostEqual(b0[4], 9.8 * 2.0)    # low_fq  (09:30 = 10.0 - 0.2)
+            self.assertAlmostEqual(b0[5], 10.45 * 2.0)  # close_fq (09:34 = 10.4 + 0.05)
+            self.assertAlmostEqual(b0[6], 1500.0)       # 100*(1+2+3+4+5)
+            self.assertAlmostEqual(b0[7], 15000.0)
+
+            self.assertEqual(b1[1], "2026-11-12T09:35:00")
+            self.assertAlmostEqual(b1[2], 10.5 * 2.0)   # open_fq (09:35)
+            self.assertAlmostEqual(b1[3], 11.4 * 2.0)   # high_fq (09:39 = 10.9 + 0.5)
+            self.assertAlmostEqual(b1[4], 10.3 * 2.0)   # low_fq  (09:35 = 10.5 - 0.2)
+            self.assertAlmostEqual(b1[5], 10.95 * 2.0)  # close_fq (09:39 = 10.9 + 0.05)
+            self.assertAlmostEqual(b1[6], 4000.0)       # 100*(6+7+8+9+10)
+            self.assertAlmostEqual(b1[7], 40000.0)
+
+            # 护栏仍有效：禁止直接读 facts/minute
+            with self.assertRaises(GuardrailError):
+                eng.run_sql(
+                    f"SELECT * FROM read_parquet('{layout.facts_dir(self.root).as_posix()}/minute/*/*/*/date=*.parquet')"
+                )
+        finally:
+            eng.close()
+
+    def test_inventory_std_minute_3level_scan_and_footer_only_cache(self):
+        """inventory._scan_parquet_partition 识别 3 级 period=1m 分区并仅走 Footer 元数据统计。"""
+        saved_cache = dict(inventory._PARQUET_SHAPE_CACHE)
+        inventory._PARQUET_SHAPE_CACHE.clear()
+        try:
+            sink.write_daily(self.root, "20261111", _sample_rows()[:2])
+            sink.write_minute(self.root, "20261111", [
+                {"code": "600000", "datetime": "2026-11-11 09:31:00",
+                 "open": 10.0, "high": 10.1, "low": 9.9, "close": 10.0, "volume": 10.0, "amount": 100.0},
+                {"code": "000001", "datetime": "2026-11-11 09:31:00",
+                 "open": 11.0, "high": 11.1, "low": 10.9, "close": 11.0, "volume": 20.0, "amount": 220.0},
+            ])
+            sink.write_minute(self.root, "20261112", [
+                {"code": "600000", "datetime": "2026-11-12 09:31:00",
+                 "open": 10.1, "high": 10.2, "low": 10.0, "close": 10.1, "volume": 30.0, "amount": 303.0},
+                {"code": "600000", "datetime": "2026-11-12 09:32:00",
+                 "open": 10.1, "high": 10.2, "low": 10.0, "close": 10.15, "volume": 40.0, "amount": 406.0},
+                {"code": "300750", "datetime": "2026-11-12 09:31:00",
+                 "open": 200.0, "high": 201.0, "low": 199.0, "close": 200.5, "volume": 50.0, "amount": 10025.0},
+            ])
+
+            inv = inventory.get_warehouse_inventory(self.root)
+            by_key = {d["key"]: d for d in inv["datasets"]}
+            self.assertIn("std:daily", by_key)
+            self.assertIn("std:minute", by_key)
+
+            daily_item = by_key["std:daily"]
+            self.assertEqual(daily_item["rows"], 2)
+            self.assertEqual(daily_item["codes"], 2)
+
+            min_item = by_key["std:minute"]
+            self.assertEqual(min_item["type_key"], "minute")
+            self.assertEqual(min_item["label"], "分钟线")
+            self.assertEqual(min_item["layer"], "standard")
+            self.assertEqual(min_item["source"], "facts/minute")
+            self.assertEqual(min_item["date_min"], "2026-11-11")
+            self.assertEqual(min_item["date_max"], "2026-11-12")
+            self.assertEqual(min_item["range_text"], "2026-11-11 ~ 2026-11-12")
+            self.assertEqual(min_item["periods"], 2)
+            self.assertEqual(min_item["units_text"], "2 个交易日")
+            self.assertEqual(min_item["rows"], 5)
+            self.assertIsNone(min_item["codes"])  # 严禁对分钟线跑 COUNT(DISTINCT code)
+            self.assertGreater(min_item["bytes"], 0)
+            self.assertEqual(min_item["status"], "ready")
+
+            hl_keys = [h["key"] for h in inv["highlights"]]
+            self.assertEqual(hl_keys[:2], ["std:minute", "std:daily"])
+
+            # 严禁在 minute 分支执行 COUNT(DISTINCT code) 或扫 v_minute：直接 spy _cached_parquet_shape SQL
+            scan_min = inventory._scan_parquet_partition(self.root, "minute")
+            self.assertEqual(len(scan_min["files"]), 4)
+            self.assertEqual(scan_min["dates"], ["20261111", "20261112"])
+            inventory._PARQUET_SHAPE_CACHE.clear()
+            sql_calls: list[str] = []
+            con = duckdb.connect()
+            try:
+                class _SpyCon:
+                    def execute(self, sql, params=None):
+                        sql_calls.append(sql)
+                        return con.execute(sql, params or [])
+
+                rows_cnt, codes_cnt = inventory._cached_parquet_shape(
+                    _SpyCon(), self.root, "minute", scan_min, count_codes=False
+                )
+                self.assertEqual((rows_cnt, codes_cnt), (5, None))
+                self.assertEqual(len(sql_calls), 1)
+                self.assertIn("parquet_file_metadata", sql_calls[0])
+                self.assertNotIn("DISTINCT", sql_calls[0].upper())
+                self.assertNotIn("v_minute", sql_calls[0])
+
+                # 命中 _PARQUET_SHAPE_CACHE：第二次零 SQL 查询
+                rows_cnt2, codes_cnt2 = inventory._cached_parquet_shape(
+                    _SpyCon(), self.root, "minute", scan_min, count_codes=False
+                )
+                self.assertEqual((rows_cnt2, codes_cnt2), (5, None))
+                self.assertEqual(len(sql_calls), 1)
+            finally:
+                con.close()
+        finally:
+            inventory._PARQUET_SHAPE_CACHE.clear()
+            inventory._PARQUET_SHAPE_CACHE.update(saved_cache)
+
+    def test_inventory_standard_display_order_minute_daily_week_month(self):
+        """标准数仓 datasets 与 highlights 按 分钟线 → 日线 → 周线 → 月线 顺序输出。"""
+        saved_cache = dict(inventory._PARQUET_SHAPE_CACHE)
+        inventory._PARQUET_SHAPE_CACHE.clear()
+        try:
+            for i, px in enumerate([10.0, 10.5, 11.0, 10.8, 11.2]):
+                sink.write_daily(self.root, f"202608{17 + i:02d}", [{
+                    "code": "600000", "name": "样本", "is_st": False,
+                    "open": px, "high": px + 0.5, "low": px - 0.5,
+                    "close": px, "prev_close": px - 0.1,
+                    "volume": 1000.0, "amount": 10000.0,
+                }], factor_map={"600000": 1.0})
+            sink.aggregate_weekly(self.root, "20260821")
+            sink.aggregate_monthly(self.root, "20260831")
+            sink.write_minute(self.root, "20260821", [{
+                "code": "600000", "datetime": "2026-08-21 09:31:00",
+                "open": 11.2, "high": 11.3, "low": 11.1, "close": 11.2,
+                "volume": 100.0, "amount": 1120.0,
+            }])
+
+            inv = inventory.get_warehouse_inventory(self.root)
+            expected_keys = ["std:minute", "std:daily", "std:week", "std:month"]
+            expected_labels = ["分钟线", "日线", "周线", "月线"]
+            std_datasets = [d for d in inv["datasets"] if d.get("layer") == "standard"]
+            self.assertEqual([d["key"] for d in std_datasets], expected_keys)
+            self.assertEqual([d["label"] for d in std_datasets], expected_labels)
+            self.assertEqual([h["key"] for h in inv["highlights"][:4]], expected_keys)
+            self.assertEqual([h["label"] for h in inv["highlights"][:4]], expected_labels)
+        finally:
+            inventory._PARQUET_SHAPE_CACHE.clear()
+            inventory._PARQUET_SHAPE_CACHE.update(saved_cache)
 
 
 if __name__ == "__main__":

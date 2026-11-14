@@ -2837,11 +2837,26 @@ TOOLS: list[dict] = _astock_tools() + [
             "（个人研究库：可 CREATE TABLE/INSERT 建自己的研究表，建议放 research schema）。"
             "常用对象：v_daily（日K，含物化复权列 adj_factor/open_fq/high_fq/low_fq/"
             "close_fq——沉淀时一次计算，查询零 JOIN）、v_daily_fq（= v_daily）、"
-            "v_codes（代码表）；指标宏 ta_ma(n)/"
-            "ta_rsi(n)/ta_macd(fast,slow,sig)（窗口按 code 分区、date 排序，窗口不满为 NULL，"
-            "RSI 为简单版非 Wilder）。示例：SELECT * FROM ta_ma(20) WHERE code='600000' "
-            "AND date>='2026-01-01'；横截面：SELECT code,close FROM v_daily WHERE "
-            "date=(SELECT max(date) FROM v_daily) ORDER BY close DESC LIMIT 20。"
+            "v_week/v_month（周/月K）、v_minute（沪深 A 股 1m 分钟线，仅 period='1m' "
+            "原始量价，不预存 5m/15m/30m 与复权列；列：period/year/market/code/date/"
+            "datetime/open/high/low/close/volume/amount）、v_codes（代码表）；"
+            "指标宏 ta_ma(n)/ta_rsi(n)/ta_macd(fast,slow,sig)（窗口按 code 分区、date 排序，"
+            "窗口不满为 NULL，RSI 为简单版非 Wilder）。"
+            "【v_minute 性能提示】表规模 ~500M+（5亿+）行，务必在 WHERE 中按 code / date / "
+            "year / market 过滤裁剪，避免无过滤扫全表触发 30s 超时中断。"
+            "示例：SELECT * FROM ta_ma(20) WHERE code='600000' AND date>='2026-01-01'；"
+            "横截面：SELECT code,close FROM v_daily WHERE date=(SELECT max(date) FROM v_daily) "
+            "ORDER BY close DESC LIMIT 20；"
+            "按需聚合 5 分钟 K 线：SELECT code, time_bucket(INTERVAL '5 minutes', datetime) AS bar_5m, "
+            "arg_min(open, datetime) AS open, max(high) AS high, min(low) AS low, "
+            "arg_max(close, datetime) AS close, sum(volume) AS volume, sum(amount) AS amount "
+            "FROM v_minute WHERE code='000001' AND date BETWEEN '2026-11-01' AND '2026-11-12' "
+            "GROUP BY code, bar_5m ORDER BY bar_5m；"
+            "按需前复权（JOIN v_daily 取 adj_factor）：SELECT code, datetime, "
+            "m.open*d.adj_factor AS open_fq, m.high*d.adj_factor AS high_fq, "
+            "m.low*d.adj_factor AS low_fq, m.close*d.adj_factor AS close_fq, "
+            "m.volume, m.amount FROM v_minute m JOIN v_daily d USING (code, date) "
+            "WHERE code='000001' AND date='2026-11-12' ORDER BY datetime。"
             "护栏：仅单条语句；结果超行数上限截断（truncated）；语句超时中断；"
             "facts/ 不可变事实区只读（经视图访问）。known_at=仓库 watermark"
             "（沉淀到的最新交易日，可能落后引擎当日）。"
@@ -2857,8 +2872,8 @@ TOOLS: list[dict] = _astock_tools() + [
     {
         "name": "warehouse_list_tables",
         "description": (
-            "列出仓库对象：表/视图（v_daily/v_daily_fq/v_codes/codes 及用户自建表）"
-            "与指标宏清单（名称+参数）。写 SQL 前先看本清单确认对象名与可用性。"
+            "列出仓库对象：表/视图（v_daily/v_daily_fq/v_week/v_month/v_minute/v_codes/codes "
+            "及用户自建表）与指标宏清单（名称+参数）。写 SQL 前先看本清单确认对象名与可用性。"
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
