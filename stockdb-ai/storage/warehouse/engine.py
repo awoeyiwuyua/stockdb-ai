@@ -11,8 +11,25 @@ SQL 面（读写全开 + 三护栏，用户拍板"最大权限"）：
 
 视图：v_daily（日K 全分区，含物化复权列 adj_factor/open_fq/high_fq/low_fq/close_fq）/
 v_daily_fq（= v_daily，复权列沉淀时一次计算，查询零 JOIN 零计算）/
+v_week / v_month / v_week_current / v_month_current /
+v_minute（1m 原始量价全分区：period/year/market + 9 列，按需 time_bucket 聚合与 JOIN v_daily 复权）/
 v_codes（代码表）。指标 = 表宏（PARTITION BY code 保证时序窗口正确性；
 ta_ma/ta_rsi/ta_macd），口径见 docs/design/warehouse.md。
+
+v_minute 按需重采样与前复权参考 SQL（不预物化 5m/15m/30m 与复权列）：
+  SELECT m.code,
+         time_bucket(INTERVAL '5 minutes', m.datetime) AS bar_5m,
+         arg_min(m.open, m.datetime) * ANY_VALUE(d.adj_factor) AS open_fq,
+         max(m.high) * ANY_VALUE(d.adj_factor) AS high_fq,
+         min(m.low)  * ANY_VALUE(d.adj_factor) AS low_fq,
+         arg_max(m.close, m.datetime) * ANY_VALUE(d.adj_factor) AS close_fq,
+         sum(m.volume) AS volume,
+         sum(m.amount) AS amount
+  FROM v_minute m
+  LEFT JOIN v_daily d ON m.code = d.code AND m.date = d.date
+  WHERE m.code = '000001' AND m.date BETWEEN '2026-11-01' AND '2026-11-12'
+  GROUP BY m.code, bar_5m
+  ORDER BY bar_5m;
 """
 from __future__ import annotations
 
@@ -44,6 +61,20 @@ _DAILY_EMPTY_COLUMNS = [
     ("total_mv", "DOUBLE"), ("float_mv", "DOUBLE"),
     ("adj_factor", "DOUBLE"), ("open_fq", "DOUBLE"), ("high_fq", "DOUBLE"),
     ("low_fq", "DOUBLE"), ("close_fq", "DOUBLE"),
+]
+
+_MINUTE_GLOB = "minute/*/*/*/date=*.parquet"
+
+_MINUTE_EMPTY_COLUMNS = [
+    ("code", "TEXT"),
+    ("date", "DATE"),
+    ("datetime", "TIMESTAMP"),
+    ("open", "DOUBLE"),
+    ("high", "DOUBLE"),
+    ("low", "DOUBLE"),
+    ("close", "DOUBLE"),
+    ("volume", "DOUBLE"),
+    ("amount", "DOUBLE"),
 ]
 
 
@@ -141,8 +172,27 @@ class WarehouseEngine:
             self._register_period_current(con, "month", _wh_sink._kline_aggregate_sql,
                                           f"v_daily")
 
+        # 分钟K 视图（facts/minute/period=*/year=*/market=*/date=*.parquet；无分区时 9 列零行占位）
+        minute_glob = (facts / _MINUTE_GLOB).as_posix()
+        has_minute = (
+            any((facts / "minute").rglob("date=*.parquet"))
+            if (facts / "minute").is_dir()
+            else False
+        )
+        if has_minute:
+            con.execute(
+                f"CREATE OR REPLACE VIEW v_minute AS "
+                f"SELECT * FROM read_parquet('{minute_glob}', hive_partitioning=true)"
+            )
+        else:
+            cols = ", ".join(f"NULL::{t} \"{n}\"" for n, t in _MINUTE_EMPTY_COLUMNS)
+            con.execute(f"CREATE OR REPLACE VIEW v_minute AS SELECT {cols} WHERE FALSE")
+
         con.execute("CREATE TABLE IF NOT EXISTS codes (code TEXT PRIMARY KEY, name TEXT)")
         con.execute("CREATE OR REPLACE VIEW v_codes AS SELECT * FROM codes")
+        # 批量导入 LevelDB 全量原始视图（v_leveldb_raw / v_leveldb_snapshots / v_leveldb_latest）
+        from storage.warehouse import bulk_import as _wh_bulk_import
+        _wh_bulk_import.ensure_leveldb_views(con, self.root)
         # 用户研究区默认可用（工具文档建议放 research schema——实测首建前直接
         # CREATE TABLE research.x 会 CatalogException，故初始化即预建）
         con.execute("CREATE SCHEMA IF NOT EXISTS research")
@@ -240,7 +290,7 @@ class WarehouseEngine:
 
     @staticmethod
     def _jsonable(v):
-        """结果值 JSON 安全化：date/datetime → ISO 字符串；Decimal → float。
+        """结果值 JSON 安全化：date/datetime → ISO 字符串；Decimal → float；BLOB → 0xhex。
 
         0.10.4：MCP 通道 json.dumps 遇 DATE 列抛 TypeError（实测 ta_ma 查询经
         warehouse_run_sql 必现）——统一在引擎出口转换，MCP/HTTP 两侧免处理。
@@ -251,6 +301,8 @@ class WarehouseEngine:
             return v.isoformat()
         if isinstance(v, _decimal.Decimal):
             return float(v)
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            return "0x" + bytes(v).hex()
         return v
 
     def run_sql(self, sql: str) -> dict:

@@ -3,8 +3,8 @@
 
 export type LightTone = 'ok' | 'warn' | 'err' | 'off'
 
-// 驾驶舱抽屉群（批 3）：alerts / logs / diag（含 MCP 标签）/ query
-export type DrawerName = 'alerts' | 'logs' | 'diag' | 'query'
+// 驾驶舱抽屉群（批 3）：alerts / logs / diag（含 MCP 标签）/ query / warehouse
+export type DrawerName = 'alerts' | 'logs' | 'diag' | 'query' | 'warehouse'
 
 export interface Light {
   key: 'data' | 'sync' | 'warehouse' | 'disk'

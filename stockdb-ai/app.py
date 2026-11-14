@@ -126,6 +126,18 @@ from services.auction_tasks import (  # noqa: E402
 # 0.10.0 W4：仓库沉淀编排（注入点绑定见 _wire_warehouse_tasks；handlers 经 app 取用）
 import services.warehouse_tasks as _warehouse_tasks  # noqa: E402
 from services.warehouse_tasks import (  # noqa: E402
+    bulk_import_batch,
+    bulk_import_complete,
+    bulk_import_readback,
+    bulk_import_status,
+    bulk_import_verify,
+    daily_backfill_batch,
+    daily_backfill_consolidate,
+    daily_backfill_readback,
+    minute_backfill_consolidate,
+    minute_backfill_run,
+    minute_backfill_verify,
+    warehouse_inventory,
     warehouse_run_async,
     warehouse_scheduler_loop,
     warehouse_status,
@@ -2090,6 +2102,29 @@ _assets_cache: tuple[float, dict] = (0.0, {})
 # 磁盘明细独立 300s 缓存（递归 stat 成本最高、磁盘体量分钟级变化）
 _DISK_DETAIL_TTL = 300.0
 _disk_detail_cache: tuple[float, dict] = (0.0, {})
+_WH_INV_TTL = 60.0
+_wh_inventory_cache: tuple[float, dict] = (0.0, {})
+
+
+def invalidate_warehouse_caches() -> None:
+    """批量导入/沉淀完成后清零资产卡与数仓清单缓存，让驾驶舱下拍立即看到变化。"""
+    global _assets_cache, _disk_detail_cache, _wh_inventory_cache, _wh_totals_cache
+    _assets_cache = (0.0, {})
+    _disk_detail_cache = (0.0, {})
+    _wh_inventory_cache = (0.0, {})
+    _wh_totals_cache = (0.0, {})
+
+
+def warehouse_inventory_payload(force: bool = False) -> dict:
+    """分析数仓按类型、范围、对账状态与变更历史清单（60s TTL；force=True 绕过缓存）。"""
+    global _wh_inventory_cache
+    now = _monotonic()
+    ts, cached = _wh_inventory_cache
+    if not force and ts and now - ts < _WH_INV_TTL:
+        return cached
+    data = warehouse_inventory()
+    _wh_inventory_cache = (now, data)
+    return data
 
 
 def assets_payload(force: bool = False) -> dict:
@@ -2105,10 +2140,15 @@ def assets_payload(force: bool = False) -> dict:
     ts, cached = _assets_cache
     if not force and ts and now - ts < _ASSETS_TTL:
         return cached
+    try:
+        wh_inv = warehouse_inventory_payload(force=force)
+    except Exception:  # noqa: BLE001 - 资产卡单块降级
+        wh_inv = None
     result = {
         "research": research_db_stats(),
         "backups": backup_stats(),
         "disk": disk_usage_detail(),
+        "warehouse_inventory": wh_inv,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _assets_cache = (now, result)
@@ -2835,13 +2875,26 @@ def _wire_warehouse_tasks() -> None:
     _warehouse_tasks.data_latest = data_latest_date
     _warehouse_tasks.is_trading_day = is_trading_day
     try:
+        from core.board_metrics import is_supported_a_share_code as _wh_is_supported_code
+        _warehouse_tasks.is_supported_code = _wh_is_supported_code
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         from storage import warehouse as _wh_pkg
         from storage.warehouse import backup as _wh_backup
+        from storage.warehouse import bulk_import as _wh_bulk_import
         from storage.warehouse import catalog as _wh_catalog
+        from storage.warehouse import daily_backfill as _wh_daily_backfill
+        from storage.warehouse import inventory as _wh_inventory
         from storage.warehouse import layout as _wh_layout
+        from storage.warehouse import minute_backfill as _wh_minute_backfill
         from storage.warehouse import reconcile as _wh_reconcile
         from storage.warehouse import sink as _wh_sink
         _warehouse_tasks.sink = _wh_sink
+        _warehouse_tasks.bulk_import = _wh_bulk_import
+        _warehouse_tasks.daily_backfill = _wh_daily_backfill
+        _warehouse_tasks.minute_backfill = _wh_minute_backfill
+        _warehouse_tasks.inventory = _wh_inventory
         _warehouse_tasks.record_adjust_events = _wh_catalog.record_adjust_events  # 0.11.0 审计
         _warehouse_tasks.reconcile_daily = _wh_reconcile.reconcile_daily
         _warehouse_tasks.warehouse_root = _wh_layout.root_dir

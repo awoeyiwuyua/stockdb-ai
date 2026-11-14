@@ -178,10 +178,101 @@ export interface DiskDetail {
   volume?: DiskUsage | null
 }
 
+export interface WarehouseDatasetItem {
+  key: string
+  type_key: string
+  label: string
+  layer: 'standard' | 'leveldb' | string
+  layer_label?: string
+  source: string
+  is_index: boolean
+  date_min: string | null
+  date_max: string | null
+  range_text: string
+  periods?: number | null
+  units_text?: string | null
+  rows: number
+  codes?: number | null
+  bytes: number
+  status: string
+}
+
+export interface WarehouseHighlightItem {
+  key: string
+  label: string
+  range_text: string
+  units_text?: string | null
+  rows: number
+  bytes: number
+  source: string
+  status: string
+}
+
+export interface WarehouseChangeEntry {
+  event_id: string
+  recorded_at: string
+  trigger_kind: string
+  snapshot_id?: string | null
+  source_db?: string | null
+  total_rows: number
+  total_bytes: number
+  delta_rows: number
+  delta_bytes: number
+  summary_text: string
+}
+
+export interface BulkImportJobSummary {
+  snapshot_id: string
+  source_db: string
+  status: string
+  expected_batches?: number | null
+  committed_batches: number
+  committed_rows: number
+  committed_bytes: number
+  created_at?: string
+  updated_at?: string
+  completed_at?: string | null
+  verified_at?: string | null
+  verify_summary?: Record<string, unknown> | null
+}
+
+export interface WarehouseInventory {
+  ok: boolean
+  available?: boolean
+  generated_at?: string
+  datasets: WarehouseDatasetItem[]
+  highlights: WarehouseHighlightItem[]
+  index_rows?: number
+  jobs: BulkImportJobSummary[]
+  active_jobs: BulkImportJobSummary[]
+  changes: WarehouseChangeEntry[]
+  latest_change?: WarehouseChangeEntry | null
+  reconcile?: {
+    daily?: { date?: string; ok?: boolean; traded?: number; stored?: number; recorded_at?: string } | null
+    bulk?: {
+      job_count: number
+      verified_count: number
+      active_count: number
+      latest_job?: BulkImportJobSummary | null
+    } | null
+  } | null
+  totals?: {
+    total_rows: number
+    standard_rows: number
+    leveldb_rows: number
+    standard_bytes: number
+    leveldb_disk_bytes: number
+    leveldb_raw_bytes: number
+    duckdb_bytes: number
+    total_bytes: number
+  } | null
+}
+
 export interface AssetsPayload {
   research?: ResearchDbStats | null
   backups?: BackupStats | null
   disk?: DiskDetail | null
+  warehouse_inventory?: WarehouseInventory | null
   generated_at?: string
 }
 

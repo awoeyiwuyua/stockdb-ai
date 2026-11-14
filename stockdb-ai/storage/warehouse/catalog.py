@@ -35,6 +35,78 @@ CREATE TABLE IF NOT EXISTS adjust_events (
 )
 """
 
+_BULK_IMPORT_JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bulk_import_jobs (
+    snapshot_id TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source_fingerprint TEXT,
+    expected_batches BIGINT,
+    committed_batches BIGINT NOT NULL DEFAULT 0,
+    committed_rows BIGINT NOT NULL DEFAULT 0,
+    committed_bytes BIGINT NOT NULL DEFAULT 0,
+    last_seq_end BIGINT NOT NULL DEFAULT -1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    verified_at TEXT,
+    verify_summary TEXT,
+    PRIMARY KEY (snapshot_id, source_db)
+)
+"""
+
+_BULK_IMPORT_BATCHES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bulk_import_batches (
+    snapshot_id TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    batch_index BIGINT NOT NULL,
+    seq_start BIGINT NOT NULL,
+    seq_end BIGINT NOT NULL,
+    row_count BIGINT NOT NULL,
+    file_size BIGINT NOT NULL,
+    parquet_sha256 TEXT NOT NULL,
+    rows_digest_sha256 TEXT NOT NULL,
+    first_key_sha256 TEXT NOT NULL,
+    last_key_sha256 TEXT NOT NULL,
+    parquet_path TEXT NOT NULL,
+    committed_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, source_db, batch_id)
+)
+"""
+
+_BULK_IMPORT_TYPE_STATS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bulk_import_type_stats (
+    snapshot_id TEXT NOT NULL,
+    source_db TEXT NOT NULL,
+    type_key TEXT NOT NULL,
+    type_label TEXT NOT NULL,
+    is_index BOOLEAN NOT NULL DEFAULT FALSE,
+    row_count BIGINT NOT NULL DEFAULT 0,
+    raw_bytes BIGINT NOT NULL DEFAULT 0,
+    date_min TEXT,
+    date_max TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (snapshot_id, source_db, type_key)
+)
+"""
+
+_WAREHOUSE_INVENTORY_HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS warehouse_inventory_history (
+    event_id TEXT PRIMARY KEY,
+    recorded_at TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    snapshot_id TEXT,
+    source_db TEXT,
+    total_rows BIGINT NOT NULL DEFAULT 0,
+    total_bytes BIGINT NOT NULL DEFAULT 0,
+    delta_rows BIGINT NOT NULL DEFAULT 0,
+    delta_bytes BIGINT NOT NULL DEFAULT 0,
+    summary_text TEXT NOT NULL,
+    detail_json TEXT NOT NULL
+)
+"""
+
 
 def _connect(root: Path):
     import duckdb
@@ -44,6 +116,10 @@ def _connect(root: Path):
     con = duckdb.connect(str(layout.duckdb_path(root)))
     con.execute(_SCHEMA)
     con.execute(_ADJUST_EVENTS_SCHEMA)
+    con.execute(_BULK_IMPORT_JOBS_SCHEMA)
+    con.execute(_BULK_IMPORT_BATCHES_SCHEMA)
+    con.execute(_BULK_IMPORT_TYPE_STATS_SCHEMA)
+    con.execute(_WAREHOUSE_INVENTORY_HISTORY_SCHEMA)
     return con
 
 
